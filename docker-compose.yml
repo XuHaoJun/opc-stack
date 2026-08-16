@@ -277,6 +277,11 @@ services:
       PAPERCLIP_DEPLOYMENT_MODE: authenticated
       PAPERCLIP_DEPLOYMENT_EXPOSURE: private
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
+      # Hostname allow-list for the private-hostname guard (comma-separated).
+      # "paperclip" is required: hermes/frontdoor call it by docker DNS name
+      # (loopback-only default would 403 every internal API call). Add the
+      # host's LAN IP if you open the board from other devices.
+      PAPERCLIP_ALLOWED_HOSTNAMES: ${PAPERCLIP_ALLOWED_HOSTNAMES:-paperclip}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set in .env}
       OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
