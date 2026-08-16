@@ -45,7 +45,7 @@ docker compose down           # 停 (volume 保留); down -v 全清
 ## 檔案地圖
 
 - `docker-compose.yml` / `.env.example` / `SETUP.md` — 部署核心
-- `patches/<proj>/opc/` — 改寫的 Dockerfiles + entrypoints (唯一客製來源)
+- `patches/<proj>/` — 改寫的 Dockerfiles + entrypoints (唯一客製來源; 內容 = 各 repo 的 opc/ 目錄)
 - `scripts/` — setup / prepare / upgrade / test-connectivity
 - `upstream/<proj>/opc/` — prepare.sh 產物, 勿手改
 - `acp-smoke-test.mjs` — omp ACP handshake 驗證 script (在 paperclip 容器內跑)
