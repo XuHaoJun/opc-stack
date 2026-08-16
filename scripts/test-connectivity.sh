@@ -3,7 +3,8 @@
 # (docker compose up -d first). Never touches the LLM: every probe is
 # container state, HTTP endpoint, or a relay-local command.
 #
-# Exit code: 0 = all PASS, 1 = one or more FAIL.
+# Waits up to ~5 min for services to become healthy (hermes has a 60s
+# start_period), then probes. Exit code: 0 = all PASS, 1 = one or more FAIL.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,22 +20,47 @@ check() { # check <label> <cmd...>
     echo "FAIL  $label"; FAIL=$((FAIL+1))
   fi
 }
-http_ok() { # http_ok <url> [ok-codes...]  → exit 0 if status matches
+http_ok() { # http_ok <url> [ok-codes...]  → exit 0 if status matches any
   local url="$1"; shift
-  local want="${1:-200}"
+  local want="${*:-200}"
   local code
   code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || echo 000)"
   for w in $want; do [ "$code" = "$w" ] && return 0; done
   return 1
 }
-container_alive() { # healthy, or running when no healthcheck
-  [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$1" 2>/dev/null)" = "healthy" ] \
-    || [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$1" 2>/dev/null)" = "running" ]
+cid_of() { docker compose ps -a -q "$1" 2>/dev/null; } # container id by service name
+service_state() { # <service> → healthy|running|exited|… 
+  local cid; cid="$(cid_of "$1")"
+  [ -n "$cid" ] || { echo missing; return; }
+  docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null
 }
+service_exitcode() { local cid; cid="$(cid_of "$1")"; docker inspect --format '{{.State.ExitCode}}' "$cid" 2>/dev/null; }
 
-echo "── container state ──"
-for c in buzz-db buzz-redis buzz-minio buzz-keys buzz buzz-bootstrap frontdoor hermes paperclip tencentdb-core tencentdb-hub tencentdb-proxy; do
-  check "container $c" container_alive "$c"
+MAIN="buzz-db buzz-redis buzz-minio buzz frontdoor hermes paperclip tencentdb-core tencentdb-hub tencentdb-proxy"
+ONESHOT="buzz-minio-init buzz-keys buzz-bootstrap tencentdb-bootstrap"
+
+echo "── wait for services (up to 5 min) ──"
+for i in $(seq 1 60); do
+  ok=1
+  for s in $MAIN; do
+    st="$(service_state "$s")"
+    if [ "$st" != healthy ] && [ "$st" != running ]; then ok=0; break; fi
+  done
+  [ "$ok" = 1 ] && break
+  sleep 5
+done
+container_alive() { # <service> — healthy, or running when no healthcheck
+  local st; st="$(service_state "$1")"
+  [ "$st" = healthy ] || [ "$st" = running ]
+}
+oneshot_ok() { # <service> — exited 0
+  [ "$(service_exitcode "$1")" = 0 ]
+}
+for s in $MAIN; do
+  check "container $s ($(service_state "$s"))" container_alive "$s"
+done
+for s in $ONESHOT; do
+  check "oneshot $s (exit 0)" oneshot_ok "$s"
 done
 
 echo "── HTTP endpoints (host → published ports) ──"
@@ -48,9 +74,10 @@ check "tencentdb knowl. :${TENCENTDB_KNOWLEDGE_PORT:-8424}/docs" http_ok "http:/
 check "tencentdb proxy  :${TENCENTDB_PROXY_PORT:-8096}/" http_ok "http://127.0.0.1:${TENCENTDB_PROXY_PORT:-8096}/" 200 401 403 404
 
 echo "── internal links ──"
-# frontdoor (buzz-acp sidecar) must reach the relay; buzz-cli lists channels
-# through the relay's REST API. Exit 0 = relay reachable + agent can talk.
-check "frontdoor → buzz relay (channels list)" docker compose exec -T frontdoor buzz channels list
+# frontdoor (buzz-acp sidecar) must reach the relay with the agent's key —
+# same invocation the register loop uses; exit 0 = relay reachable + agent OK.
+check "frontdoor → buzz relay (channels list)" \
+  docker compose exec -T frontdoor sh -c 'buzz --relay "http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")" --private-key "$(cat /keys/agent.nsec)" channels list'
 
 echo
 echo "result: ${PASS} pass, ${FAIL} fail"
