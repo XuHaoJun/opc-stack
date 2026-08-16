@@ -55,6 +55,17 @@ services:
       BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set in .env}
       BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
 
+  # Shared nix seed — builds opc/nix-seed:local (Task 1). One-shot: image is
+  # consumed via COPY --from by the service Dockerfiles; the container itself
+  # does nothing.
+  nix-seed:
+    build:
+      context: ./patches/nix-seed
+      dockerfile: Dockerfile
+    image: ${IMAGE_PREFIX:-opc}/nix-seed:local
+    restart: "no"
+    command: ["true"]
+
   # Generates relay/owner + front-door agent Nostr keys into the shared
   # opc-keys volume (idempotent, one-shot).
   buzz-keys:
@@ -62,8 +73,13 @@ services:
       context: ./upstream/buzz
       dockerfile: opc/Dockerfile
       target: opc-relay
+      args:
+        NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     image: ${IMAGE_PREFIX:-opc}/buzz:local
     restart: "no"
+    depends_on:
+      nix-seed:
+        condition: service_completed_successfully
     command: ["/usr/local/bin/opc-generate-keys.sh"]
     volumes:
       - opc-keys:/keys
@@ -73,6 +89,8 @@ services:
       context: ./upstream/buzz
       dockerfile: opc/Dockerfile
       target: opc-relay
+      args:
+        NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     image: ${IMAGE_PREFIX:-opc}/buzz:local
     init: true
     restart: unless-stopped
@@ -86,6 +104,8 @@ services:
       buzz-minio-init:
         condition: service_completed_successfully
       buzz-keys:
+        condition: service_completed_successfully
+      nix-seed:
         condition: service_completed_successfully
     environment:
       BUZZ_BIND_ADDR: 0.0.0.0:3000
@@ -114,6 +134,7 @@ services:
     volumes:
       - buzz-git:/data/git
       - buzz-nix:/nix
+      - buzz-mise:/opt/mise
       - opc-keys:/keys:ro
       - buzz-omp:/root/.omp
     healthcheck:
@@ -151,6 +172,8 @@ services:
     build:
       context: ./upstream/buzz
       dockerfile: opc/Dockerfile
+      args:
+        NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     # ACP sidecar of the relay: shares its network namespace so the canonical
     # relay host (localhost:3000) resolves to the relay itself.
     network_mode: service:buzz
@@ -161,6 +184,8 @@ services:
       buzz:
         condition: service_healthy
       buzz-bootstrap:
+        condition: service_completed_successfully
+      nix-seed:
         condition: service_completed_successfully
     environment:
       BUZZ_KEYS_DIR: /keys
@@ -209,6 +234,7 @@ services:
     volumes:
       - frontdoor-hermes:/opt/data
       - frontdoor-nix:/nix
+      - frontdoor-mise:/opt/mise
       - opc-keys:/keys:ro
       - opc-gh-creds:/creds
 
@@ -217,8 +243,13 @@ services:
     build:
       context: ./upstream/hermes
       dockerfile: opc/Dockerfile
+      args:
+        NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     image: ${IMAGE_PREFIX:-opc}/hermes:local
     restart: unless-stopped
+    depends_on:
+      nix-seed:
+        condition: service_completed_successfully
     command: ["gateway", "run"]
     environment:
       HERMES_UID: "10000"
@@ -261,6 +292,7 @@ services:
     volumes:
       - hermes-data:/opt/data
       - hermes-nix:/nix
+      - hermes-mise:/opt/mise
       - hermes-omp:/root/.omp
       - opc-keys:/keys:ro
       - opc-gh-creds:/creds
@@ -330,9 +362,14 @@ services:
     build:
       context: ./upstream/paperclip
       dockerfile: opc/Dockerfile
+      args:
+        NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     image: ${IMAGE_PREFIX:-opc}/paperclip:local
     init: true
     restart: unless-stopped
+    depends_on:
+      nix-seed:
+        condition: service_completed_successfully
     environment:
       HOST: 0.0.0.0
       PORT: "3100"
@@ -356,6 +393,7 @@ services:
     volumes:
       - paperclip-data:/paperclip
       - paperclip-nix:/nix
+      - paperclip-mise:/opt/mise
       - opc-gh-creds:/creds
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -508,6 +546,10 @@ volumes:
   hermes-nix:
   paperclip-data:
   paperclip-nix:
+  buzz-mise:
+  frontdoor-mise:
+  hermes-mise:
+  paperclip-mise:
   buzz-omp:
   frontdoor-omp:
   hermes-omp:
