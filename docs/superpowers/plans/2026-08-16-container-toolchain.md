@@ -95,14 +95,18 @@ Run:
 CID=$(docker run -d opc/nix-seed:local true)
 docker exec "$CID" sh -c '
   P=/nix/var/nix/profiles/per-user/root/profile/bin
-  for t in nix ripgrep jq fd htop bat just mise gh; do
+  for t in nix rg jq fd htop bat just mise gh; do
     [ -x "$P/$t" ] || { echo "MISSING $t"; exit 1; }
   done
   echo "all 9 binaries present"
-  nix --version
+  "$P/nix" --version
 '
-# hardlink check: /nix-seed files share inodes with /nix (one copy in layer)
-docker exec "$CID" sh -c '[ "$(stat -c %i /nix/store)" = "$(stat -c %i /nix-seed/store)" ] && echo HARDLINK-OK || echo NOT-HARDLINKED'
+# hardlink check: file-level inode sharing between /nix/store and /nix-seed/store
+# (dirs are recreated by cp -al, so compare a FILE's inode, not the dir's)
+docker exec "$CID" sh -c '
+  S=$(ls /nix/store | head -1)
+  [ "$(stat -c %i "/nix/store/$S")" = "$(stat -c %i "/nix-seed/store/$S")" ] && echo HARDLINK-OK || echo NOT-HARDLINKED
+'
 docker rm -f "$CID" >/dev/null
 ```
 Expected: all binaries present, nix 2.35.2, HARDLINK-OK.
