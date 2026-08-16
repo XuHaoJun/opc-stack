@@ -27,12 +27,17 @@ opc_nix_seed() {
     export PATH="$PROFILE/bin:/nix/var/nix/profiles/default/bin:$PATH"
     export NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root"
 
-    # Self-heal: if the profile somehow lacks the default tools (e.g. the
-    # deprecated `nix profile install` replaced it), re-add them once.
-    if [ ! -e "$PROFILE/bin/rg" ]; then
-        echo "[nix] default tools missing from profile; re-adding"
+    # Self-heal: if any seed tool is missing (e.g. image upgraded with new
+    # tools, or the deprecated `nix profile install` replaced the profile),
+    # re-add the full seed list once. Unpinned nixpkgs here is the existing
+    # behavior (seed image itself is pinned). omp is mise-managed, not nix.
+    if [ ! -e "$PROFILE/bin/rg" ] || [ ! -e "$PROFILE/bin/mise" ] \
+        || [ ! -e "$PROFILE/bin/just" ] || [ ! -e "$PROFILE/bin/gh" ]; then
+        echo "[nix] seed tools missing from profile; re-adding"
         HOME=/root PATH="/nix/var/nix/profiles/default/bin:$PATH" \
-            nix profile add nixpkgs#ripgrep nixpkgs#jq nixpkgs#fd nixpkgs#htop nixpkgs#bat || true
+            nix profile add \
+                nixpkgs#ripgrep nixpkgs#jq nixpkgs#fd nixpkgs#htop nixpkgs#bat \
+                nixpkgs#just nixpkgs#mise nixpkgs#gh || true
     fi
 
     # omp (Oh My Pi) — the executor agent runtime (paperclip claude_local
