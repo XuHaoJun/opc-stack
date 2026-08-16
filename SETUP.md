@@ -31,6 +31,29 @@ service endpoint and the frontdoor→relay link without ever calling an LLM.
 > tencentdb admin, and paperclip bootstrap are all recreated automatically by
 > the one-shot bootstrap containers. Fresh installs need no manual signing.
 
+## First boot: verify the toolchain
+
+`scripts/setup.sh` (and `docker compose up -d --build`) builds the shared
+**nix seed** image (`opc/nix-seed:local`, from `patches/nix-seed/`) first —
+every build service declares `depends_on: nix-seed` in docker-compose.yml and
+its Dockerfile copies `/nix-seed` out of the seed image via
+`COPY --from=nix-seed`, so no manual step is needed. To build the seed alone
+(e.g. after editing `patches/nix-seed/Dockerfile`): `docker compose build nix-seed`
+(or `docker compose build --with-dependencies`).
+
+On the first boot with empty `*-mise` volumes (fresh install or after
+`down -v`), each entrypoint auto-installs the mise-managed toolchains —
+node@lts, rust@stable, and the omp prebuilt — a few hundred MB of downloads
+that can take a couple of minutes. Verify once the stack has settled:
+
+```bash
+docker exec opc-buzz-1 sh -c 'mise ls; just --version; gh --version; omp --version'
+```
+
+If a tool reports missing, it self-heals on the next boot (the nix seed
+checks rg/mise/just/gh and re-adds the 8-tool set; the mise seed re-adds
+node/rust/omp when absent).
+
 ## Image prefix / project name
 
 | `.env` var | default | purpose |
@@ -209,10 +232,13 @@ docker compose exec -u root paperclip nix profile add nixpkgs#<tool>
 Each boot self-heals: if the profile ever loses the preinstalled tools, the
 entrypoint re-adds them automatically.
 
-`omp` (Oh My Pi) — the Paperclip executor agent runtime — is auto-installed
-into the paperclip container on first boot (and re-added if missing) from
-`github:numtide/llm-agents.nix#omp` (binary cache: cache.numtide.com). It
-runs as the `OMP Engineer` agent via the claude_local adapter with
+`omp` (Oh My Pi) — the Paperclip executor agent runtime — is mise-managed:
+the entrypoint installs the prebuilt `github:can1357/oh-my-pi@17.3.5` into the
+paperclip `*-mise` volume on first boot (and re-adds it if missing). The nix
+derivation can't build in image environments (bun EPERM), so omp is not part
+of the nix seed. Upgrade with zero rebuild:
+`docker compose exec -u root paperclip mise install github:can1357/oh-my-pi@latest`.
+It runs as the `OMP Engineer` agent via the claude_local adapter with
 `agentCommand: "omp acp --yolo"`.
 
 Search: `nix search nixpkgs <name>`. Wipe a store: `docker volume rm opc_hermes-nix`.

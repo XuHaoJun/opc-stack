@@ -6,6 +6,7 @@ Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-
 
 - **`upstream/`** = 4 個 git submodule, pin 在 upstream tag commit (乾淨 checkout, 永不直接編輯): buzz `desktop-v0.5.14` / hermes `v2026.8.13` / paperclip `canary/v2026.722.1-canary.0` / tencentdb `v2.0.0`。
 - **`patches/`** = 全部本地客製 (opc/Dockerfile、entrypoints、one-shot scripts)。build 前 `scripts/prepare.sh` 把 `patches/<proj>/` rsync 進 `upstream/<proj>/opc/` (冪等)。**改 image 一律改 `patches/`, 不改 upstream 主 Dockerfile。**
+- **`patches/nix-seed/`** = 第一個不屬 submodule 的 build context (compose service `nix-seed`, one-shot)。pin nix 2.35.2 + nixpkgs `8be7bd0c83f1`, 建 `/nix-seed` (cp -al hardlink) 含 8 工具 (ripgrep jq fd htop bat just mise gh)。各 build service `depends_on nix-seed` + `FROM ${NIX_SEED_IMAGE} AS nix-seed` / `COPY --from=nix-seed` 取用 (BuildKit 不支援 `--from` 變數展開, 故用 stage alias)。改 seed 工具清單 = 改這個 Dockerfile, seed 只重裝 1 次。
 - 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
 - LLM: OpenCode Go (`https://opencode.ai/zen/go/v1`)。`.env` 填 `OPENCODE_API_KEY` 一個 key 全棧通用; hermes 以 `provider: custom` + `OPENAI_BASE_URL/KEY` 接。
 
@@ -29,10 +30,11 @@ docker compose down           # 停 (volume 保留); down -v 全清
 
 1. **Buzz 一個 canonical host = 一個 community** (schema UNIQUE + NIP-42/98 以連線 host 驗簽名)。改 host → 改 `.env` `BUZZ_RELAY_URL` → 重啟 buzz + frontdoor → **重跑 add-member** (community 是新的)。Host 不要用 proxy 改寫 (會弄壞簽名驗證)。
 2. **Hermes Kanban 關閉** (Paperclip 是唯一 work plane): hermes/frontdoor 的 config.yaml seed 有 `agent.disabled_toolsets: [kanban]` + dispatcher off。別把它們開回來。
-3. **nix tool 持久化**: hermes/buzz/frontdoor/paperclip 的 `/nix` 是 named volume, 開機 seed + 自癒。加 tool 用 `nix profile add` (deprecated `install` 會蓋掉 profile)。
-4. `docker compose down -v` 後: relay/agent keys、community、tencentdb admin、paperclip bootstrap 全部重建 (bootstrap 皆 one-shot 自動化, 應一次到位)。
-5. 容器內 root 隨便折騰, 但**沒有 host mount / privileged** — 隔離不可破壞。
-6. **`upstream/` 是 submodule** — 直接改它 = 改壞版控。改動一律放 `patches/`。升版後 (新 tag checkout) patches 可能不兼容, 升版前 review upstream changelog。
+3. **nix tool 持久化**: hermes/buzz/frontdoor/paperclip 的 `/nix` 是 named volume, 首次開機從 image 內的 `/nix-seed` (nix-seed stage 提供) seed + 每 boot 自癒 (缺 rg/mise/just/gh 任一 → 重加 8 工具, unpinned nixpkgs)。加 tool 用 `nix profile add` (deprecated `install` 會蓋掉 profile)。
+4. **mise toolchain 持久化**: buzz/frontdoor/hermes/paperclip 各有 `*-mise:/opt/mise` volume; 空狀態首次開機 `opc-mise-seed.sh` 自動裝 node@lts + rust@stable + omp prebuilt (`github:can1357/oh-my-pi@17.3.5`, ~170MB)。PATH 尾掛 mise shims (baked node 優先, mise 補缺口)。日常加 toolchain = `docker exec <c> mise install <tool>`; 升 omp = `mise install github:can1357/oh-my-pi@latest` (零 rebuild)。
+5. `docker compose down -v` 後: relay/agent keys、community、tencentdb admin、paperclip bootstrap 全部重建 (bootstrap 皆 one-shot 自動化, 應一次到位)。
+6. 容器內 root 隨便折騰, 但**沒有 host mount / privileged** — 隔離不可破壞。
+7. **`upstream/` 是 submodule** — 直接改它 = 改壞版控。改動一律放 `patches/`。升版後 (新 tag checkout) patches 可能不兼容, 升版前 review upstream changelog。
 
 ## 已知坑 (踩過)
 
@@ -44,11 +46,17 @@ docker compose down           # 停 (volume 保留); down -v 全清
 - **TencentDB L0/L1 以 user_id 隔離**: 面板用 `asset.owner_user_id` 查 data plane, 所以 plugin 的 `MEMORY_TENCENTDB_USER_ID` 必須 = admin user_id (bootstrap 寫入 `/keys/tencentdb-admin-user-id`, entrypoint export)。留空 = `default` → 面板層級全 0。
 - TencentDB Gateway zod 上限: message content ≤8192 / query ≤2048 → plugin (`client.py`) 在邊界截斷 (頭尾保留 + marker), 超過會整筆 L0 寫入 400 掉。改 plugin 記得同步 `patches/hermes/` 與 `patches/buzz/` 兩份。
 - nix static build 不吃 `/nix/etc/nix/nix.conf` 預設路徑 → 靠 `NIX_USER_CONF_FILES` env; build 時需要 nixbld group+user。
+- **空 `*-mise` volume 首次開機會下載 node/rust/omp** (數分鐘, 看網路); bootstrap 完成前 `mise ls`/`just`/`omp` 可能失敗 — entrypoint 每 boot 檢查, 重開機即補。
+- **paperclip 既有 nix profile 有舊 omp 17.3.4** 會 shadow mise 的 17.3.5 (fresh nix volume 後消失)。
+- **rust toolchain 在 `$HOME/.cargo` (container layer)**: recreate 後首次 rustc/cargo 觸發 lazy ~300MB 重裝 (RUSTUP_HOME/CARGO_HOME 移 volume 的 fix 因 daemon-user write perm 考量擱置)。
+- **`docker exec` 互動 session 不繼承 entrypoint runtime export 的 env** (GH_CONFIG_DIR / GIT_SSH_COMMAND / GIT_CONFIG_GLOBAL / mise shims): 需手動 `. /usr/local/bin/opc-gh-seed.sh` (或 opc-mise-seed.sh) 補上。
 
 ## 檔案地圖
 
 - `docker-compose.yml` / `.env.example` / `SETUP.md` — 部署核心
 - `patches/<proj>/` — 改寫的 Dockerfiles + entrypoints (唯一客製來源; 內容 = 各 repo 的 opc/ 目錄)
+- `patches/nix-seed/` — nix seed build context (nix 2.35.2 + 8 工具, `cp -al` 成 `/nix-seed`); compose `nix-seed` 是 one-shot, 消費者 = 各 service Dockerfile 的 `COPY --from=nix-seed`
+- `patches/<proj>/opc-mise-seed.sh` — 每 project 一份, entrypoint source 的 mise bootstrap (空 volume 自動裝 node/rust/omp)
 - `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
 - `scripts/` — setup / prepare / upgrade / test-connectivity
 - `upstream/<proj>/opc/` — prepare.sh 產物, 勿手改
