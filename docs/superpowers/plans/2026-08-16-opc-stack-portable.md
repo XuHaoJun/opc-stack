@@ -46,9 +46,9 @@ project name via env; setup/upgrade/test scripts encapsulate the workflows.
 `scripts/upgrade.sh`, `scripts/test-connectivity.sh` (chmod +x)
 
 - [ ] `prepare.sh`: for each of buzz/hermes/paperclip/tencentdb-agent-memory
-      (+ MemoryProxy), `mkdir -p upstream/<p> && rsync -a --delete patches/<p>/
-      upstream/<p>/`; guard: missing `upstream/<p>` → error "run git submodule
-      update --init"
+      (+ MemoryProxy), `mkdir -p upstream/<p>/opc && rsync -a --delete
+      patches/<p>/ upstream/<p>/opc/`; guard: missing `upstream/<p>` → error
+      "run git submodule update --init"
 - [ ] `setup.sh`: .env copy-if-missing + LAN-IP hint → `git submodule update
       --init --recursive` → `prepare.sh` → `docker compose up -d --build`
 - [ ] `upgrade.sh <proj> <tag>`: fetch --tags; verify tag via ls-remote;
