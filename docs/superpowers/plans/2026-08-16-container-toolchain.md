@@ -4,7 +4,7 @@
 
 **Goal:** 把 nix install 抽成共享 seed image (build 秒級), 並在 4 個容器內提供 mise 管理的 node@lts + rust stable, 以及 gh/just CLI。
 
-**Architecture:** `patches/nix-seed/Dockerfile` 是唯一 nix install 處 (pin nix 2.35.2 + nixpkgs 8be7bd0c83f1 + 9 工具, `cp -al` hardlink seed); buzz/hermes/paperclip 三 Dockerfile 的 1.02–1.45GB nix RUN 換成 `COPY --from=opc/nix-seed:local /nix-seed /nix-seed`。mise binary 從 nix profile 來, toolchain data 在 per-container `*-mise:/opt/mise` volume, entrypoint source 的 `opc-mise-seed.sh` 空狀態自動 `mise use -g node@lts` + `rust@stable`。PATH 尾掛 mise shims → hermes/paperclip 的 baked node 不受影響。
+**Architecture:** `patches/nix-seed/Dockerfile` 是唯一 nix install 處 (pin nix 2.35.2 + nixpkgs 8be7bd0c83f1 + 8 工具, `cp -al` hardlink seed); buzz/hermes/paperclip 三 Dockerfile 的 1.02–1.45GB nix RUN 換成 `COPY --from=opc/nix-seed:local /nix-seed /nix-seed (stage alias, 見 Task 3)」mise binary 從 nix profile 來, toolchain data 在 per-container `*-mise:/opt/mise` volume, entrypoint source 的 `opc-mise-seed.sh` 空狀態自動 `mise use -g node@lts` + `rust@stable`。PATH 尾掛 mise shims → hermes/paperclip 的 baked node 不受影響。
 
 **Tech Stack:** Docker multi-stage, docker compose 5.x (service-level depends_on (nix-seed: condition service_completed_successfully)), nix 2.35.2, mise (node/rustup backend), shell (POSIX sh entrypoints)。
 
@@ -244,15 +244,20 @@ opc_mise_seed() {
 - [ ] **Step 2: 換掉 nix RUN 區塊** — 在 `patches/buzz/Dockerfile` Stage 6 (opc-relay) 中, 把整個 `RUN groupadd -r nixbld ... && cp -a /nix /nix-seed` 區塊替換為:
 
 ```dockerfile
+# NOTE: BuildKit does NOT expand variables in `COPY --from=${VAR}` — use the
+# stage-alias workaround: global ARG (declared BEFORE any FROM, near the top
+# of the Dockerfile) + `FROM ${NIX_SEED_IMAGE} AS nix-seed` stage alias.
+# The seed stage is used only as a COPY source; it adds no runtime image.
+FROM ${NIX_SEED_IMAGE} AS nix-seed
 RUN groupadd -r nixbld \
     && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \
     && gpasswd -a nixbld1 nixbld \
     && mkdir -m 0755 /nix
-# Shared seed (nix + 9 tools) built once in patches/nix-seed (compose
+# Shared seed (nix + 8 tools) built once in patches/nix-seed (compose
 # service `nix-seed`); a tool-list change rebuilds only that image.
-ARG NIX_SEED_IMAGE=opc/nix-seed:local
-COPY --from=${NIX_SEED_IMAGE} /nix-seed /nix-seed
+COPY --from=nix-seed /nix-seed /nix-seed
 ```
+(global ARG: 在 Dockerfile 最上方 `ARG EXTRA_CA_CERTS=` 那區加 `ARG NIX_SEED_IMAGE=opc/nix-seed:local`。)
 
 - [ ] **Step 3: 加 mise ENV** — 在既有 nix ENV block 後新增一行 (保留原有 NIX_* 不刪):
 
@@ -262,10 +267,10 @@ ENV MISE_DATA_DIR=/opt/mise \
     MISE_CONFIG_DIR=/opt/mise/config
 ```
 
-- [ ] **Step 4: COPY mise-seed.sh** — 在 `COPY opc/nix-seed.sh ...` 旁加:
+- [ ] **Step 4: COPY mise-seed.sh** — 在 `COPY opc/opc-nix-seed.sh ...` 旁加 (檔案名 `opc-mise-seed.sh` 對應既有 `opc-nix-seed.sh` 慣例):
 
 ```dockerfile
-COPY opc/mise-seed.sh /usr/local/bin/opc-mise-seed.sh
+COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 ```
 並在 chmod RUN 的清單加 `/usr/local/bin/opc-mise-seed.sh`。
 
@@ -286,7 +291,7 @@ CID=$(docker run -d --entrypoint sh opc/buzz:local -c 'sleep 5')
 docker exec "$CID" sh -c 'ls /nix-seed/var/nix/profiles/per-user/root/profile/bin | head; test -x /usr/local/bin/opc-mise-seed.sh && echo SEED-SCRIPT-OK'
 docker rm -f "$CID" >/dev/null
 ```
-Expected: 列出 9 工具 bin, SEED-SCRIPT-OK。
+Expected: 列出 8 工具 bin, SEED-SCRIPT-OK。
 
 - [ ] **Step 7: Commit**
 
@@ -605,7 +610,7 @@ git commit -m "docs: nix-seed build context, mise volumes, gh creds sync"
 
 | spec 驗證項 | plan task |
 |---|---|
-| nix-seed 內容 9 工具 + hardlink | Task 1 Step 3 |
+| nix-seed 內容 8 工具 + hardlink | Task 1 Step 3 |
 | patch script 編輯 → build 無 nix install | Task 3-5 Step 5 (build log) + Task 8 Step 1 |
 | 全新 volume 冒煙: mise/node/rust/just/omp | Task 8 Step 2-3 |
 | daemon 不變 (hermes 26 / paperclip 24) | Task 8 Step 4 |

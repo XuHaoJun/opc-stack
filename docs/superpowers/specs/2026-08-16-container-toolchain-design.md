@@ -106,7 +106,7 @@ FROM debian:bookworm-slim
 - 1.02–1.45GB 的 nix RUN 區塊換成:
   ```dockerfile
   ARG NIX_SEED_IMAGE=opc/nix-seed:local   # compose 傳 ${IMAGE_PREFIX:-opc}/nix-seed:local
-  COPY --from=${NIX_SEED_IMAGE} /nix-seed /nix-seed
+  COPY --from=nix-seed /nix-seed /nix-seed (stage alias: `FROM \ AS nix-seed` — BuildKit 不支援 --from 變數展開)
   ```
 - 保留: nixbld group/user (`groupadd nixbld` + `nixbld1`)、nix ENV block (PATH/NIX_PROFILES/NIX_USER_CONF_FILES/NIX_SSL_CERT_FILE)。
 - 新增 mise ENV:
