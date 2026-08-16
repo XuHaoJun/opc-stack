@@ -30,6 +30,9 @@ echo "── [2/5] submodules ──"
 # upstream tencentdb-agent-memory: MemoryProxy/packages/cost-guard has a
 # gitlink but no .gitmodules entry). None of our builds use nested submodules.
 git submodule update --init
+# Patched opc/ content inside submodule worktrees is untracked by design —
+# keep parent `git status` clean instead of showing all 4 submodules dirty.
+git config diff.ignoreSubmodules untracked
 
 echo "── [3/5] patches ──"
 scripts/prepare.sh
