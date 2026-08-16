@@ -113,7 +113,7 @@ FROM debian:bookworm-slim
   ```dockerfile
   ENV MISE_DATA_DIR=/opt/mise MISE_CACHE_DIR=/opt/mise/cache MISE_CONFIG_DIR=/opt/mise/config
   ```
-- 新增 `COPY opc/mise-seed.sh /usr/local/bin/opc-mise-seed.sh` + chmod。
+- 新增 `COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh` + chmod。
 - frontdoor (opc-frontdoor target) 繼承 opc-relay, 自動拿到。
 
 ### 4.4 `opc-mise-seed.sh` (新, 每 project 一份: patches/{buzz,hermes,paperclip}/)
