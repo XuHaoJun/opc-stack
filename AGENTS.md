@@ -49,7 +49,7 @@ docker compose down           # 停 (volume 保留); down -v 全清
 - **空 `*-mise` volume 首次開機會下載 node/rust/omp** (數分鐘, 看網路); bootstrap 完成前 `mise ls`/`just`/`omp` 可能失敗 — entrypoint 每 boot 檢查, 重開機即補。
 - **paperclip 既有 nix profile 有舊 omp 17.3.4** 會 shadow mise 的 17.3.5 (fresh nix volume 後消失)。
 - **rust toolchain 在 `$HOME/.cargo` (container layer)**: recreate 後首次 rustc/cargo 觸發 lazy ~300MB 重裝 (RUSTUP_HOME/CARGO_HOME 移 volume 的 fix 因 daemon-user write perm 考量擱置)。
-- **`docker exec` 互動 session 不繼承 entrypoint runtime export 的 env** (GH_CONFIG_DIR / GIT_SSH_COMMAND / GIT_CONFIG_GLOBAL / mise shims): 需手動 `. /usr/local/bin/opc-gh-seed.sh` (或 opc-mise-seed.sh) 補上。
+- **`docker exec` 互動 session 不繼承 entrypoint runtime export 的 env** (GH_CONFIG_DIR / GIT_SSH_COMMAND / GIT_CONFIG_GLOBAL): 需手動 `. /usr/local/bin/opc-gh-seed.sh` 補上。mise shims (`/opt/mise/shims`) 已 bake 進 image ENV PATH 尾, 所以 exec 也吃得到 omp/rustc/cargo (volume seed 後)。
 
 ## 檔案地圖
 

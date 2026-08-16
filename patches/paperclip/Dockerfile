@@ -124,13 +124,14 @@ RUN groupadd -r nixbld \
     && gpasswd -a nixbld1 nixbld \
     && mkdir -m 0755 /nix
 COPY --from=nix-seed /nix-seed /nix-seed
-ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/default/bin:${PATH}" \
+ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/default/bin:${PATH}:/opt/mise/shims" \
     NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root" \
     NIX_USER_CONF_FILES="/nix/etc/nix/nix.conf" \
     NIX_SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
 
 # mise-managed toolchains (node/rust/omp) live on the persistent *-mise volume
-# (opc-mise-seed.sh); PATH tail keeps the baked node 24 authoritative.
+# (opc-mise-seed.sh); PATH tail keeps the baked node 24 authoritative, and
+# /opt/mise/shims on the image PATH tail lets docker exec reach omp/rustc/cargo.
 ENV MISE_DATA_DIR=/opt/mise \
     MISE_CACHE_DIR=/opt/mise/cache \
     MISE_CONFIG_DIR=/opt/mise/config

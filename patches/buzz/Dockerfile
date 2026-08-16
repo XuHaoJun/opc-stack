@@ -160,12 +160,14 @@ RUN groupadd -r nixbld \
     && mkdir -m 0755 /nix
 COPY --from=nix-seed /nix-seed /nix-seed
 
-ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/default/bin:${PATH}" \
+ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/default/bin:${PATH}:/opt/mise/shims" \
     NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root" \
     NIX_USER_CONF_FILES="/nix/etc/nix/nix.conf" \
     NIX_SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
 
 # mise-managed toolchains live on the persistent *-mise volume (opc-mise-seed.sh).
+# /opt/mise/shims is on the image PATH tail (baked node stays authoritative) so
+# docker exec sessions also reach omp/rustc/cargo once the volume is seeded.
 ENV MISE_DATA_DIR=/opt/mise \
     MISE_CACHE_DIR=/opt/mise/cache \
     MISE_CONFIG_DIR=/opt/mise/config
