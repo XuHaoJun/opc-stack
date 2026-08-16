@@ -3,7 +3,7 @@
 Buzz (conversation) + Hermes (agent runtime) + Paperclip (work control plane)
 + TencentDB-Agent-Memory (agent memory), all in one docker compose stack.
 Hermes Kanban is disabled on both Hermes surfaces (Paperclip is the canonical
-work plane), matching nodalis-prd-v10.md.
+work plane), matching docs/nodalis-prd-v10.md.
 
 The repo is portable: `upstream/` holds the four projects as git submodules
 pinned to release tags; `patches/` holds every local customization

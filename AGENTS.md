@@ -1,6 +1,6 @@
 # AGENTS.md — OPC Stack
 
-Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-Agent-Memory (agent memory) 的 docker compose 部署。**本 repo 不實作 Nodalis。**
+Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-Agent-Memory (agent memory) 的 docker compose 部署。**本 repo 不實作 Nodalis**(架構決策: `docs/nodalis-prd-v10.1.md`)。
 
 ## 架構
 
