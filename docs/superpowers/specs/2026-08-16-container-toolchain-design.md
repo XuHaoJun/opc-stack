@@ -44,7 +44,7 @@
 ## 3. 設計總覽
 
 ```
-patches/nix-seed/Dockerfile  ──build──►  opc/nix-seed:local  (含 /nix-seed, 8 工具, cp -al)
+patches/nix-seed/Dockerfile  ──build──►  opc/nix-seed:local  (含 /nix-seed, 9 工具, cp -al)
                                               │ COPY --from (3 個 service Dockerfile)
                                               ▼
         buzz / hermes / paperclip Dockerfile ──► /nix-seed (layer, 秒級)
@@ -60,7 +60,7 @@ mise:  binary 從 nix seed 來 (nixpkgs#mise)
 
 ### 4.1 `patches/nix-seed/Dockerfile` (新)
 
-唯一 nix install 處。產出: `/nix-seed` (nix 2.35.2 + 8 工具)。
+唯一 nix install 處。產出: `/nix-seed` (nix 2.35.2 + 9 工具)。
 
 ```
 FROM debian:bookworm-slim
@@ -68,12 +68,12 @@ FROM debian:bookworm-slim
 # nix.conf: experimental-features = nix-command flakes / sandbox = false / accept-flake-config = true
 # nix 2.35.2 pin: https://releases.nixos.org/nix/nix-2.35.2/install (--no-daemon)
 # profile install (pin nixpkgs + omp rev):
-#   github:NixOS/nixpkgs/8be7bd0c83f1#ripgrep jq fd htop bat just mise
+#   github:NixOS/nixpkgs/8be7bd0c83f1#ripgrep jq fd htop bat just mise gh
 #   github:numtide/llm-agents.nix/dac632fe2759854b901cbab78efdeca6343a6c0e#omp
 # cp -al /nix /nix-seed        ← hardlink, layer 資料只存一份
 ```
 
-- 8 工具: ripgrep, jq, fd, htop, bat, **just**, **mise** (nixpkgs) + **omp** (llm-agents.nix)。
+- 9 工具: ripgrep, jq, fd, htop, bat, **just**, **mise**, **gh** (nixpkgs) + **omp** (llm-agents.nix)。
 - nixpkgs pin `8be7bd0c83f1` = 現有 volume 的 locked snapshot (`nixpkgs-26.11pre1054271.8be7bd0c83f1`), 版本與現況一致。
 - nix 2.35.2 = 現有 volume 的版本。
 - build context = `./patches/nix-seed` (不經過 prepare.sh; 第一個不屬 submodule 的 build context)。
@@ -153,17 +153,27 @@ opc_mise_seed
 
 ### 4.6 `opc-nix-seed.sh` self-heal 擴充 (既有 volume 拿到新工具)
 
-現有 self-heal 只檢查 `rg` 並重加 5 工具。擴充: 檢查 `rg`/`mise`/`just`/`omp`, 缺任一 → 重加完整 8 工具清單 (含 `github:numtide/llm-agents.nix#omp`)。
+現有 self-heal 只檢查 `rg` 並重加 5 工具。擴充: 檢查 `rg`/`mise`/`just`/`gh`/`omp`, 缺任一 → 重加完整 9 工具清單 (含 `github:numtide/llm-agents.nix#omp`)。
 
 - 必要: 既有 volume 沒有 mise binary 的話, `opc_mise_seed` 的 `mise use -g` 會失敗。
 - 既有行為保持 unpinned nixpkgs (已知 tradeoff, 不在此設計修正)。
+
+### 4.7 gh CLI + ssh/gh config 同步 (調查結論)
+
+**現況: config 同步機制已完整存在, 唯一缺口是 gh binary。**
+- 三個 project 的 `opc-gh-seed.sh` 完全相同 (env-based): `GIT_SSH_COMMAND=ssh -F /creds/ssh/config -o StrictHostKeyChecking=accept-new`、`GIT_CONFIG_GLOBAL=/creds/git/config`、`GH_CONFIG_DIR=/creds/gh` — 已 source 於 4 個 entrypoint。
+- compose 已 mount `opc-gh-creds:/creds` 於 frontdoor(:203)/hermes(:257)/paperclip(:296); buzz 無 (relay 不需要, gh-seed 偵測無 /creds 自動停用)。
+- host 端 `scripts/sync-gh-creds.sh` 鏡像 `~/.ssh` + `~/.config/gh` + `~/.gitconfig` 進 volume (IdentityFile 路徑重寫為 /creds/ssh/…), 冪等。
+- 實測 (2026-08-16): 三容器 /creds 內容一致 (ssh: id_ed25519/known_hosts/config; gh: hosts.yml/config.yml; git: config)。
+- **gh binary: 只有 paperclip 有 (apt 2.46.0)**; hermes/buzz/frontdoor 沒有 → 加入 nix seed (nixpkgs#gh) 後全部容器取得。
+- 已知限制 (既有行為, 不在此設計修正): GH_CONFIG_DIR 等 env 是 entrypoint runtime export — daemon 有 (s6/gosu 帶過去), `docker exec` 互動 session 不會繼承 (除非 shell 自己 source)。
 
 ## 5. 行為語意
 
 | 情境 | 行為 |
 |---|---|
 | 全新機器 / `down -v` 後 | nix-seed image build (一次 install) → 3 service COPY layer → 首次開機: nix volume seed + mise 裝 node@lts + rust@stable (~300MB 下載, 4 容器各自進行) |
-| 既有 volume, image 升級 | nix volume 已存在 → seed 不重跑; self-heal 補 just/mise/omp; mise volume 已存在 → 不重裝 |
+| 既有 volume, image 升級 | nix volume 已存在 → seed 不重跑; self-heal 補 just/mise/gh/omp; mise volume 已存在 → 不重裝 |
 | patch script 編輯 | `COPY opc/*.sh` invalidate → nix 不再陪葬 (COPY --from 是獨立 layer); cargo 重編照舊 (~1-2min) |
 | seed 工具清單變更 | 只重裝 nix-seed image 1 次, 3 service 只是 COPY layer |
 | docker exec 加工具 | 照舊: `nix profile add` / `mise install` (root 可寫 /opt/mise) |
@@ -177,7 +187,7 @@ opc_mise_seed
 
 ## 7. 驗證計畫
 
-1. `docker compose build nix-seed` → 確認 `/nix-seed` 內容 (8 工具 + nix 2.35.2), `du` 確認 hardlink 生效 (seed 不 double 資料量)。
+1. `docker compose build nix-seed` → 確認 `/nix-seed` 內容 (9 工具 + nix 2.35.2), `du` 確認 hardlink 生效 (seed 不 double 資料量)。
 2. 改一個 patch script → `docker compose build buzz` 不再出現 nix install (殘餘時間 = cargo local crates 重編, ~1-2min, 比 196s 顯著下降)。
 3. 全新 volume 冒煙測 (暫時移除 volume 或新 volume 名): 各容器開機後:
    - `mise --version` (nix profile 提供)
@@ -185,9 +195,11 @@ opc_mise_seed
    - `node -v` (buzz = LTS; hermes 仍 26.5.1; paperclip 仍 24.19.0 — daemon 不變)
    - `rustc --version` / `cargo --version` = stable
    - `just --version`
+   - `gh --version` (全部容器都有; hermes 原本沒有)
    - `omp --version` (全部容器都有)
-4. hermes/paperclip healthcheck 通過; buzz relay `_readiness` 200。
-5. 既有 volume 升級: self-heal 補 just/mise/omp, daemon 無感重啟。
+4. gh/ssh config 生效 (hermes/frontdoor/paperclip): 在 daemon env 下 `gh auth status` (GH_CONFIG_DIR=/creds/gh) + `ssh -T -F /creds/ssh/config git@github.com` 成功。
+5. hermes/paperclip healthcheck 通過; buzz relay `_readiness` 200。
+6. 既有 volume 升級: self-heal 補 just/mise/gh/omp, daemon 無感重啟。
 
 ## 8. 風險與緩解
 
@@ -243,7 +255,7 @@ opc_mise_seed
 ### 11.4 One-shots recreate 重跑
 
 - buzz-keys / buzz-bootstrap / tencentdb-bootstrap: **idempotent, 安全** (verified; DB 層 ON CONFLICT DO NOTHING / 檔案存在即 skip / 409 accepted)。
-- paperclip-bootstrap: 上次 **Exited(1)** — `[pc-bootstrap] bootstrap/claim failed: HTTP 403`。**但 key 檔案已存在** (`/keys/paperclip-api.key` 在 opc-keys volume, 已確認) 且無 service depends_on 它 → **benign**; redeploy 重跑可能再噴 403, 不影響 stack。
+- paperclip-bootstrap: 上次 **Exited(1)** — `[pc-bootstrap] bootstrap/claim failed: HTTP 403` (舊 image 行為)。**已修復**: commit `7a32927` (skip claim when admin exists) 在 patches 中, 尚未部署; key 檔案已存在 (`/keys/paperclip-api.key` 在 opc-keys volume, 已確認) 且無 service depends_on 它 → **benign**; redeploy 後以修復版重跑, 預期 exit 0。
 
 ### 11.5 Wedge 風險 (既有, 非本變更引入)
 
@@ -254,6 +266,6 @@ opc_mise_seed
 ### 11.6 本變更對 rollout 的影響
 
 - 新增 `nix-seed` one-shot (command: true) — 無害。
-- 既有 nix volume: seed 不重跑 (非空), self-heal 補 just/mise/omp。
+- 既有 nix volume: seed 不重跑 (非空), self-heal 補 just/mise/gh/omp。
 - 新 `*-mise` volumes: 空 → 首次開機各容器裝 node@lts + rust@stable (~1-3 min/容器, 平行) — daemon 不受影響 (PATH 尾)。
 - 結論: **可以在執行中 stack 直接 redeploy**; hermes/paperclip 的 in-flight 工作會被優雅中斷並自動續跑, 資料零遺失。
