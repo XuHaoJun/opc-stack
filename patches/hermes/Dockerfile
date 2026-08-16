@@ -11,6 +11,10 @@
 # corruption bug. Build a pinned shared library for the runtime image instead
 # of relying on a distro backport that trixie does not currently provide.
 # See #70480 and https://sqlite.org/wal.html#walresetbug.
+# Shared nix seed image (compose passes the IMAGE_PREFIX-qualified name).
+# Declared globally so FROM ${NIX_SEED_IMAGE} expands; the `nix-seed` stage
+# below materializes it for COPY --from (which cannot expand variables).
+ARG NIX_SEED_IMAGE=opc/nix-seed:local
 FROM debian:13.4 AS sqlite_build
 ARG SQLITE_AUTOCONF_VERSION=3530400
 ARG SQLITE_SHA256=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
@@ -51,6 +55,13 @@ RUN apt-get -o Acquire::Retries=3 update && \
 
 FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
 FROM node:26-bookworm-slim@sha256:9e6f9357d371591e32ab6f2d8a26d63bdd0d17c29eee3f4f3e7e454d9634bf73 AS node_source
+# Shared seed (nix + 8 tools) built once in patches/nix-seed (compose service
+# `nix-seed`); a tool-list change rebuilds only that image. Seed image alias:
+# COPY --from cannot expand variables (BuildKit), so the global
+# NIX_SEED_IMAGE ARG (compose passes the IMAGE_PREFIX-qualified name) is
+# materialized as a stage and copied from by name. The COPY --from=nix-seed
+# in the runtime stage below consumes it.
+FROM ${NIX_SEED_IMAGE} AS nix-seed
 FROM debian:13.4
 
 ENV PYTHONUNBUFFERED=1
@@ -195,9 +206,10 @@ VOLUME [ "/opt/data" ]
 
 # ---------- OPC stack overlay: nix tool persistence + kanban-off seed ----------
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/hermes-entrypoint.sh /usr/local/bin/hermes-entrypoint.sh
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-gh-seed.sh /usr/local/bin/hermes-entrypoint.sh
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh /usr/local/bin/opc-gh-seed.sh /usr/local/bin/hermes-entrypoint.sh
 
 # memory_tencentdb MemoryProvider (TencentDB Knowledge Plane, PRD v10.1) —
 # seeded into $HERMES_HOME/plugins/ at boot by hermes-entrypoint.sh.
@@ -207,24 +219,23 @@ COPY opc/memory_tencentdb/ /opt/hermes/memory_tencentdb/
 # at boot by hermes-entrypoint.sh.
 COPY opc/skills/paperclip-api/ /opt/hermes/skills/paperclip-api/
 
+# Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
+# above); a tool-list change rebuilds only the nix-seed image.
 RUN groupadd -r nixbld \
     && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \
     && gpasswd -a nixbld1 nixbld \
-    && mkdir -m 0755 /nix \
-    && HOME=/root sh -c 'curl -fsSL https://nixos.org/nix/install -o /tmp/nix-install.sh \
-        && sh /tmp/nix-install.sh --no-daemon --yes \
-        && rm -f /tmp/nix-install.sh' \
-    && mkdir -p /nix/etc/nix \
-    && printf 'experimental-features = nix-command flakes\nsandbox = false\naccept-flake-config = true\n' > /nix/etc/nix/nix.conf \
-    && HOME=/root PATH="/nix/var/nix/profiles/default/bin:$PATH" \
-        nix --extra-experimental-features 'nix-command flakes' \
-        profile install --profile /nix/var/nix/profiles/per-user/root/profile \
-        nixpkgs#ripgrep nixpkgs#jq nixpkgs#fd nixpkgs#htop nixpkgs#bat \
-    && cp -a /nix /nix-seed
+    && mkdir -m 0755 /nix
+COPY --from=nix-seed /nix-seed /nix-seed
 ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/default/bin:${PATH}" \
     NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root" \
     NIX_USER_CONF_FILES="/nix/etc/nix/nix.conf" \
     NIX_SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+
+# mise-managed toolchains (node/rust/omp) live on the persistent *-mise volume
+# (opc-mise-seed.sh); PATH tail keeps the baked node 26 authoritative.
+ENV MISE_DATA_DIR=/opt/mise \
+    MISE_CACHE_DIR=/opt/mise/cache \
+    MISE_CONFIG_DIR=/opt/mise/config
 
 ENTRYPOINT [ "/usr/local/bin/hermes-entrypoint.sh" ]
 CMD [ "/opt/hermes/docker/entrypoint-dispatch.sh" ]
