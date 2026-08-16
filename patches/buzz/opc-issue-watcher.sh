@@ -12,6 +12,25 @@
 # when it creates a ticket, and by the frontdoor entrypoint boot sweep.
 set -eu
 
+# The agent's terminal tool spawns children with a sanitized env: the nix
+# profile bin (jq), the buzz relay identity, and sometimes the paperclip key
+# are missing. Self-heal from known locations (same sources the entrypoints
+# use) so the watcher works no matter who spawns it.
+export PATH="/nix/var/nix/profiles/per-user/root/profile/bin:$PATH"
+if [ -z "${PAPERCLIP_API_KEY:-}" ] && [ -f /keys/paperclip-api.key ]; then
+    export PAPERCLIP_API_KEY="$(cat /keys/paperclip-api.key)"
+fi
+if [ -z "${BUZZ_PRIVATE_KEY:-}" ] && [ -f "${BUZZ_KEYS_DIR:-/keys}/agent.nsec" ]; then
+    export BUZZ_PRIVATE_KEY="$(cat "${BUZZ_KEYS_DIR:-/keys}/agent.nsec")"
+fi
+if [ -z "${BUZZ_RELAY_URL:-}" ]; then
+    if [ -f /opt/data/buzz-relay-url ]; then
+        export BUZZ_RELAY_URL="$(cat /opt/data/buzz-relay-url)"
+    else
+        export BUZZ_RELAY_URL="ws://localhost:3000"
+    fi
+fi
+
 API="${PAPERCLIP_API_URL:-http://paperclip:3100}/api"
 AUTH="Authorization: Bearer ${PAPERCLIP_API_KEY:-}"
 STATE_DIR="${WATCHER_STATE_DIR:-/opt/data/issue-watchers}"
@@ -39,9 +58,15 @@ api_get() {
     curl -fsS --max-time 15 -H "$AUTH" "$API$1" 2>/dev/null || true
 }
 
-# find_github_url <issue-id> — first https://github.com/ URL in comments
+# find_github_url <issue-id> — first repo-root GitHub URL in comments
+# (skips PR/tree/commit/issue/blob links; the analysis comments contain lots
+# of github.com noise, so match a strict repo URL and filter).
 find_github_url() {
-    api_get "/issues/$1/comments" | jq -r '.. | strings? | select(test("https://github.com/"))' 2>/dev/null | head -1
+    api_get "/issues/$1/comments" | \
+        jq -r '.. | strings? | select(test("https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))' 2>/dev/null | \
+        grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' | \
+        grep -vE '/tree/|/pull/|/commit/|/issues/|/blob/|/actions/|/releases/' | \
+        head -1
 }
 
 # find_channel <issue-id> — BUZZ_CHANNEL marker from comments
@@ -55,7 +80,8 @@ poll_once() {
     json="$(api_get "/issues/$id")"
     [ -n "$json" ] || { log "issue $id: GET failed (paperclip down?)"; return 1; }
     status="$(printf '%s' "$json" | jq -r '.status // empty' 2>/dev/null)"
-    title="$(printf '%s' "$json" | jq -r '.title // .id // "issue"' 2>/dev/null | cut -c1-80)"
+    # jq slices by codepoints — cut -c would split UTF-8 mid-byte (busybox)
+    title="$(printf '%s' "$json" | jq -r '(.title // .id // "issue")[0:80]' 2>/dev/null)"
 
     case "$status" in
         done)
@@ -65,10 +91,12 @@ poll_once() {
             else
                 post "✅ ${title} 完成 (ticket 無 GitHub link, 見 paperclip)"
             fi
+            touch "$STATE_DIR/$id.posted" 2>/dev/null || true
             return 0
             ;;
         cancelled|blocked)
             post "⚠️ ${title} 已終止 (status=${status})"
+            touch "$STATE_DIR/$id.posted" 2>/dev/null || true
             return 0
             ;;
         *) return 1 ;;
@@ -105,16 +133,18 @@ sweep() {
     [ -n "$company" ] || company="$(api_get "/companies" | jq -r '.[0].id // empty' 2>/dev/null)"
     [ -n "$company" ] || { log "sweep: no company resolvable (auth?)"; exit 1; }
     issues="$(api_get "/companies/$company/issues")"
+    # Scan ALL issues (not just open): a ticket that completed while the
+    # container was down still needs its delivery. .posted marks delivered.
     ids="$(printf '%s' "$issues" | jq -r '
         if type == "array" then .[]
         elif .issues != null then .issues[]
         elif .data != null then .data[]
         else empty end
-        | select(.status != "done" and .status != "cancelled")
         | .id' 2>/dev/null)"
     for id in $ids; do
         channel="$(find_channel "$id")"
         [ -n "$channel" ] || continue
+        [ -f "$STATE_DIR/$id.posted" ] && continue
         if [ -f "$STATE_DIR/$id.pid" ]; then
             pid="$(cat "$STATE_DIR/$id.pid" 2>/dev/null || true)"
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then

@@ -22,6 +22,10 @@ fi
 : "${BUZZ_ACP_AGENT_COMMAND:=hermes}"
 : "${BUZZ_ACP_AGENT_ARGS:=acp}"
 export BUZZ_RELAY_URL BUZZ_ACP_AGENT_COMMAND BUZZ_ACP_AGENT_ARGS
+# Persist the resolved relay URL for the issue watcher (the agent's terminal
+# children get a sanitized env without it).
+mkdir -p /opt/data
+printf '%s' "$BUZZ_RELAY_URL" > /opt/data/buzz-relay-url
 echo "[frontdoor] relay=${BUZZ_RELAY_URL} agent=${BUZZ_ACP_AGENT_COMMAND} ${BUZZ_ACP_AGENT_ARGS}"
 
 HH="${HERMES_HOME:-/opt/data}"
