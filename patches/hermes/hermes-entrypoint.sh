@@ -8,6 +8,9 @@ set -eu
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
+. /usr/local/bin/opc-gh-seed.sh
+opc_gh_seed
+
 HH="${HERMES_HOME:-/opt/data}"
 
 # TencentDB Knowledge Plane (PRD v10.1): sync the memory_tencentdb Hermes
@@ -20,6 +23,16 @@ if [ -d "$MP_SRC" ]; then
     rm -rf "$MP_DST"
     cp -r "$MP_SRC" "$MP_DST"
     echo "[hermes] synced memory provider: memory_tencentdb"
+fi
+
+# paperclip-api skill (GitHub integration): sync from image on every boot.
+SK_SRC="/opt/hermes/skills/paperclip-api"
+SK_DST="$HH/skills/paperclip-api"
+if [ -d "$SK_SRC" ]; then
+    mkdir -p "$HH/skills"
+    rm -rf "$SK_DST"
+    cp -r "$SK_SRC" "$SK_DST"
+    echo "[hermes] synced skill: paperclip-api"
 fi
 
 if [ ! -f "$HH/config.yaml" ]; then

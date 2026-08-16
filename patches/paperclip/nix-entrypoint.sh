@@ -6,4 +6,7 @@ set -eu
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
+. /usr/local/bin/opc-gh-seed.sh
+opc_gh_seed
+
 exec "$@"

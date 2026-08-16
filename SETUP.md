@@ -141,6 +141,51 @@ pubkey can then connect; no invites needed).
   `x-team-id` / `x-agent-id` / `x-task-id` (create Team/Agent/Task in the
   panel first). See `upstream/tencentdb-agent-memory/INSTALL.md`.
 
+## GitHub integration (dev flow → paperclip ticket → omp → gh → buzz link)
+
+In Buzz (or the Hermes dashboard) tell the agent 「開發 xx」: the agent
+clarifies, creates a Paperclip ticket, Paperclip's runtime invokes omp to
+develop, omp runs `gh repo create --private --push` and posts the repo link
+into the ticket, and a watcher in the frontdoor container posts the link to
+your Buzz channel automatically. Paperclip never touches Buzz — all Buzz
+traffic is the frontdoor agent's own identity.
+
+Setup (one-time):
+
+1. **Host prereqs**: `~/.ssh` (config + keys), `~/.config/gh` (logged in,
+   `gh auth status`), `~/.gitconfig` (`[user] name/email`).
+2. **Paperclip API key**: Paperclip → Settings → API keys → create an agent
+   key (scoped to the frontdoor agent). Put it in `.env` as
+   `PAPERCLIP_API_KEY=…`, then `docker compose up -d hermes frontdoor`.
+3. **Sync credentials** (any time they change on the host):
+   ```bash
+   scripts/sync-gh-creds.sh
+   ```
+   Copies `~/.ssh`, `~/.config/gh`, and git identity into the `opc_gh-creds`
+   named volume (mounted at `/creds` in paperclip/hermes/frontdoor); rewrites
+   ssh `IdentityFile` paths to the container layout and pre-seeds the
+   `github.com` host key. Re-run after key/token changes — no rebuild needed.
+
+How it works: entrypoints set `GIT_SSH_COMMAND` / `GH_CONFIG_DIR` /
+`GIT_CONFIG_GLOBAL` from `/creds` (paperclip's omp inherits them), the
+`paperclip-api` skill teaches the agents the REST surface
+(`POST /api/companies/<id>/issues` etc., bearer `PAPERCLIP_API_KEY`), and
+`opc-issue-watcher.sh` polls the ticket (60s) then posts the GitHub link to
+Buzz via the buzz CLI when the issue reaches `done`. The frontdoor entrypoint
+re-attaches watchers for surviving tickets on every boot.
+
+Verify / troubleshoot:
+
+```bash
+docker compose exec -u root paperclip sh -c '. /usr/local/bin/opc-gh-seed.sh && opc_gh_seed && gh auth status && ssh -F /creds/ssh/config -T git@github.com'
+docker compose exec frontdoor cat /opt/data/issue-watchers/watcher.log
+```
+
+- `sweep: no companyId from /agents/me` in watcher.log → `PAPERCLIP_API_KEY`
+  missing/empty in `.env` (or wrong key scope).
+- `gh auth status` fails → re-run `scripts/sync-gh-creds.sh`
+  (`docker compose restart frontdoor hermes paperclip` re-applies key perms).
+
 ## Nix-based persistent tools (hermes, buzz, paperclip — OS level)
 
 Install more tools (survives `compose down/up`, recreates, and image rebuilds):

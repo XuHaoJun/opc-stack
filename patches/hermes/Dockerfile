@@ -195,12 +195,17 @@ VOLUME [ "/opt/data" ]
 
 # ---------- OPC stack overlay: nix tool persistence + kanban-off seed ----------
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/hermes-entrypoint.sh /usr/local/bin/hermes-entrypoint.sh
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/hermes-entrypoint.sh
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-gh-seed.sh /usr/local/bin/hermes-entrypoint.sh
 
 # memory_tencentdb MemoryProvider (TencentDB Knowledge Plane, PRD v10.1) —
 # seeded into $HERMES_HOME/plugins/ at boot by hermes-entrypoint.sh.
 COPY opc/memory_tencentdb/ /opt/hermes/memory_tencentdb/
+
+# paperclip-api skill (GitHub integration) — seeded into $HERMES_HOME/skills/
+# at boot by hermes-entrypoint.sh.
+COPY opc/skills/paperclip-api/ /opt/hermes/skills/paperclip-api/
 
 RUN groupadd -r nixbld \
     && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \

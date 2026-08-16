@@ -192,10 +192,15 @@ services:
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
       MEMORY_TENCENTDB_AGENT_ID: hermes-front-door
+      # Paperclip work-plane integration (GitHub dev flow): REST base + agent
+      # API key for creating/tracking tickets; watcher posts results to Buzz.
+      PAPERCLIP_API_URL: http://paperclip:3100
+      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
     volumes:
       - frontdoor-hermes:/opt/data
       - frontdoor-nix:/nix
       - opc-keys:/keys:ro
+      - opc-gh-creds:/creds
 
   # ══════════════════════════ Hermes ══════════════════════════
   hermes:
@@ -237,6 +242,10 @@ services:
       MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
+      # Paperclip work-plane integration (GitHub dev flow): REST base + agent
+      # API key for creating/tracking tickets.
+      PAPERCLIP_API_URL: http://paperclip:3100
+      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
     ports:
       - "${HERMES_DASHBOARD_PORT:-9119}:9119"
       - "${HERMES_API_PORT:-8642}:8642"
@@ -244,6 +253,7 @@ services:
       - hermes-data:/opt/data
       - hermes-nix:/nix
       - hermes-omp:/root/.omp
+      - opc-gh-creds:/creds
     healthcheck:
       test: ["CMD-SHELL", "code=$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9119/); [ \"$$code\" = \"200\" ] || [ \"$$code\" = \"401\" ] || [ \"$$code\" = \"302\" ]"]
       interval: 15s
@@ -277,6 +287,7 @@ services:
     volumes:
       - paperclip-data:/paperclip
       - paperclip-nix:/nix
+      - opc-gh-creds:/creds
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -385,6 +396,7 @@ services:
 
 volumes:
   opc-keys:
+  opc-gh-creds:
   buzz-pgdata:
   buzz-redisdata:
   buzz-miniodata:

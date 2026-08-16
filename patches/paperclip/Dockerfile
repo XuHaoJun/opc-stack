@@ -98,8 +98,9 @@ EXPOSE 3100
 
 # ---------- OPC stack overlay: nix tool persistence ----------
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/nix-entrypoint.sh
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-gh-seed.sh /usr/local/bin/nix-entrypoint.sh
 
 RUN groupadd -r nixbld \
     && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \

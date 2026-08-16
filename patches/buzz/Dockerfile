@@ -129,12 +129,15 @@ COPY --from=stripped-binaries /build/target/release/buzz-acp /usr/local/bin/buzz
 COPY --from=stripped-binaries /build/target/release/buzz /usr/local/bin/buzz
 # OPC tooling: nix seed helpers + entrypoints.
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
+COPY opc/opc-issue-watcher.sh /usr/local/bin/opc-issue-watcher.sh
 COPY opc/buzz-entrypoint.sh /usr/local/bin/buzz-entrypoint.sh
 COPY opc/frontdoor-entrypoint.sh /usr/local/bin/frontdoor-entrypoint.sh
 COPY opc/opc-register-agent.sh /usr/local/bin/opc-register-agent.sh
 COPY opc/generate-keys.sh /usr/local/bin/opc-generate-keys.sh
 COPY opc/add-member.sh /usr/local/bin/opc-add-member.sh
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/buzz-entrypoint.sh \
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-gh-seed.sh \
+             /usr/local/bin/opc-issue-watcher.sh /usr/local/bin/buzz-entrypoint.sh \
              /usr/local/bin/frontdoor-entrypoint.sh /usr/local/bin/opc-generate-keys.sh \
              /usr/local/bin/opc-add-member.sh
 
@@ -184,6 +187,10 @@ RUN mkdir -p /opt/data
 # memory_tencentdb MemoryProvider (TencentDB Knowledge Plane, PRD v10.1) —
 # seeded into $HERMES_HOME/plugins/ at boot by frontdoor-entrypoint.sh.
 COPY opc/memory_tencentdb/ /opt/hermes/memory_tencentdb/
+
+# paperclip-api skill (GitHub integration) — seeded into $HERMES_HOME/skills/
+# at boot by frontdoor-entrypoint.sh.
+COPY opc/skills/paperclip-api/ /opt/hermes/skills/paperclip-api/
 
 ENTRYPOINT ["/usr/local/bin/frontdoor-entrypoint.sh"]
 CMD []
