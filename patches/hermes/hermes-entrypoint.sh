@@ -45,6 +45,7 @@ fi
 if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<YAML
+_config_version: 34
 agent:
   disabled_toolsets:
     - kanban
@@ -67,6 +68,12 @@ fi
 # exact legacy values are rewritten, not user edits).
 if [ -f "$HH/config.yaml" ]; then
     sed -i "s|^  default: deepseek-v4-pro$|  default: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}|; s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}|" "$HH/config.yaml"
+    # Pre-s12 configs (no _config_version) trip hermes's "predates version
+    # 12" migration refusal on every boot; stamp the current version once.
+    if ! grep -q "^_config_version:" "$HH/config.yaml"; then
+        sed -i "1i _config_version: 34" "$HH/config.yaml"
+        echo "[hermes] stamped _config_version: 34 onto existing $HH/config.yaml"
+    fi
 fi
 
 # Key routing: for provider "custom", Hermes reads OPENAI_API_KEY +

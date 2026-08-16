@@ -8,7 +8,8 @@ Buzz(對話)+ Hermes(agent runtime)+ Paperclip(work 控制面)+ TencentDB-Agent-
 |---|---|---|
 | `buzz` | Nostr relay(+ pg/redis/minio) | 3000 |
 | `frontdoor` | buzz-acp → `hermes acp`(與 buzz 共用 netns) | — |
-| `hermes` | agent runtime dashboard / API | 9119 / 8642 |
+| `hermes` | gateway API server (dashboard 關閉) | 8642 |
+| `hermes-dashboard` | web dashboard over the buzz front door's hermes home (sessions + live logs/thinking) | 9119 |
 | `paperclip` | canonical work control plane | 3100 |
 | `tencentdb-core` / `-hub` / `-proxy` | memory gateway / panel+knowledge / LLM proxy | 8420 / 8125+8424 / 8096 |
 

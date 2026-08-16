@@ -45,6 +45,7 @@ fi
 if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<YAML
+_config_version: 34
 agent:
   disabled_toolsets:
     - kanban
@@ -72,6 +73,12 @@ fi
 # exact legacy values are rewritten, not user edits).
 if [ -f "$HH/config.yaml" ]; then
     sed -i "s|^  default: deepseek-v4-pro$|  default: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}|; s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}|" "$HH/config.yaml"
+    # Pre-s12 configs (no _config_version) trip hermes's "predates version
+    # 12" migration refusal on every boot; stamp the current version once.
+    if ! grep -q "^_config_version:" "$HH/config.yaml"; then
+        sed -i "1i _config_version: 34" "$HH/config.yaml"
+        echo "[frontdoor] stamped _config_version: 34 onto existing $HH/config.yaml"
+    fi
 fi
 
 : "${OPENAI_API_KEY:=$OPENCODE_API_KEY}"
@@ -99,4 +106,11 @@ fi
 mkdir -p /opt/data/issue-watchers
 /usr/local/bin/opc-issue-watcher.sh sweep >> /opt/data/issue-watchers/sweep.log 2>&1 &
 
-exec /usr/local/bin/buzz-acp "$@"
+# Mirror buzz-acp's own logs (Rust tracing, incl. `acp::thought` reasoning
+# enabled via RUST_LOG) AND the ACP agent's python stderr logs into the shared
+# hermes home's agent.log, so the hermes dashboard Logs page
+# (/api/logs?file=agent) shows live agent activity. stdbuf -oL keeps the file
+# line-buffered. Note: this makes buzz-acp a pipeline member instead of PID 1 —
+# `docker compose stop` may hard-kill it; sessions persist per-turn in
+# state.db, so no data is lost.
+exec /usr/local/bin/buzz-acp "$@" 2>&1 | stdbuf -oL tee -a "$HH/logs/agent.log"

@@ -172,6 +172,13 @@ services:
       # the desktop's mention autocomplete labels relay agents "not in channel"
       # even when they are members, which blocks mention-tag insertion.
       BUZZ_ACP_NO_MENTION_FILTER: "true"
+      # Expose the ACP agent's chain-of-thought: buzz-acp only debug-logs
+      # `agent_thought_chunk` updates (target `acp::thought`) and never relays
+      # them, so the default `buzz_acp=info` filter hides thinking. The
+      # frontdoor entrypoint tees this output into /opt/data/logs/agent.log,
+      # which the hermes dashboard Logs page reads — thinking shows up live at
+      # http://localhost:9119 (Logs → agent). Override via FRONTDOOR_RUST_LOG.
+      RUST_LOG: ${FRONTDOOR_RUST_LOG:-buzz_acp=info,acp::thought=debug}
       HERMES_HOME: /opt/data
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
@@ -214,11 +221,10 @@ services:
       HERMES_UID: "10000"
       HERMES_GID: "10000"
       HERMES_HOME: /opt/data
-      HERMES_DASHBOARD: "1"
-      HERMES_DASHBOARD_HOST: 0.0.0.0
-      HERMES_DASHBOARD_PORT: "9119"
-      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USERNAME:?set in .env}
-      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:?set in .env}
+      # Dashboard disabled: the web UI is served by the dedicated
+      # `hermes-dashboard` service over the Buzz front door's home (the
+      # gateway's own home has no conversations). API server (8642) stays.
+      HERMES_DASHBOARD: "0"
       HERMES_GATEWAY_BOOTSTRAP_STATE: running
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0
@@ -247,10 +253,63 @@ services:
       PAPERCLIP_API_URL: http://paperclip:3100
       PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
     ports:
-      - "${HERMES_DASHBOARD_PORT:-9119}:9119"
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:
       - hermes-data:/opt/data
+      - hermes-nix:/nix
+      - hermes-omp:/root/.omp
+      - opc-keys:/keys:ro
+      - opc-gh-creds:/creds
+    healthcheck:
+      test: ["CMD-SHELL", "code=$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8642/); [ \"$$code\" = \"200\" ] || [ \"$$code\" = \"401\" ] || [ \"$$code\" = \"403\" ] || [ \"$$code\" = \"404\" ]"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+
+  # Dashboard over the Buzz front door's HERMES_HOME (frontdoor-hermes
+  # volume). The conversations the user has via Buzz run in the ACP agents
+  # spawned by `frontdoor`; the standalone `hermes` gateway keeps its own
+  # empty home. This dashboard-only container (no gateway supervisor → it
+  # never picks up pending agent work) serves Sessions / Logs / Chat
+  # against that shared home at http://localhost:9119. Logs page shows the
+  # agent's live activity incl. chain-of-thought (frontdoor tees buzz-acp
+  # output into /opt/data/logs/agent.log; see RUST_LOG on frontdoor).
+  hermes-dashboard:
+    image: ${IMAGE_PREFIX:-opc}/hermes:local
+    restart: unless-stopped
+    # s6 main program; the supervised `dashboard` service does the real work
+    # (same slot the gateway container uses for its own dashboard).
+    command: ["sleep", "infinity"]
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_PORT: "9119"
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USERNAME:?set in .env}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:?set in .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
+      OPENAI_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}
+      OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      # TencentDB Knowledge Plane: memory provider parity with the agent home.
+      MEMORY_TENCENTDB_GATEWAY_HOST: tencentdb-core
+      MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
+      MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+      MEMORY_TENCENTDB_TEAM_ID: opc
+      PAPERCLIP_API_URL: http://paperclip:3100
+      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
+    ports:
+      - "${HERMES_DASHBOARD_PORT:-9119}:9119"
+    volumes:
+      - frontdoor-hermes:/opt/data
       - hermes-nix:/nix
       - hermes-omp:/root/.omp
       - opc-keys:/keys:ro
