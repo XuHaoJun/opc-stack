@@ -82,6 +82,14 @@ if ! docker run --rm -i "${BINDS[@]}" "$IMAGE" sh -eu -c '
         if ! grep -q "github.com" /creds/ssh/known_hosts 2>/dev/null; then
             cat >> /creds/ssh/known_hosts
         fi
+        # Containers have no ~/.ssh/known_hosts; without an explicit
+        # UserKnownHostsFile the pre-seeded keys above are never consulted and
+        # ssh falls back to TOFU (or fails in BatchMode). Point every host at
+        # the mirrored file; a host config that already names one survives the
+        # sed rewrite above and skips this.
+        if ! grep -q "UserKnownHostsFile" /creds/ssh/config 2>/dev/null; then
+            printf "Host *\\n  UserKnownHostsFile /creds/ssh/known_hosts\\n" >> /creds/ssh/config
+        fi
         chmod 700 /creds/ssh
         chmod 600 /creds/ssh/* 2>/dev/null || true
         chmod 644 /creds/ssh/*.pub /creds/ssh/known_hosts /creds/ssh/config 2>/dev/null || true

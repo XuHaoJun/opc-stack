@@ -23,6 +23,12 @@ opc_mise_seed() {
     if [ ! -d "$MISE_DATA_DIR/installs/rust" ]; then
         echo "[mise] first boot: installing rust@stable (global, rustup)"
         mise use -g rust@stable || echo "[mise] rust install failed (network?)" >&2
+        # core:rust backend leaves installs/rust/stable as a symlink into
+        # $HOME/.cargo/bin; mise 2026.8.3 only generates the rustc/cargo/rustup
+        # shims on tool activation, not at install. Activate once so the shims
+        # exist on the volume for the daemon PATH (otherwise `rustc`/`cargo`
+        # are "not found" until something runs `mise x` for rust).
+        mise x rust@stable -- true || echo "[mise] rust shim activation failed" >&2
     fi
     if [ ! -d "$MISE_DATA_DIR/installs/github-can1357-oh-my-pi" ]; then
         echo "[mise] first boot: installing omp (prebuilt, github releases)"
