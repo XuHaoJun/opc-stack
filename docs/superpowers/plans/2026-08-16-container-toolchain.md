@@ -35,9 +35,14 @@
 # syntax=docker/dockerfile:1.7
 #
 # OPC shared nix seed — the ONE place nix gets installed. Produces
-# /nix-seed (nix 2.35.2 + 9 pinned tools) which the buzz/hermes/paperclip
+# /nix-seed (nix 2.35.2 + 8 pinned tools) which the buzz/hermes/paperclip
 # images COPY in. Tool-list changes rebuild ONLY this image; service images
 # just re-COPY the layer (seconds).
+#
+# omp is NOT here — its bun2nix derivation fails to build in image builds
+# (bun isolated-linker EPERM, 334 packages; llm-agents.nix at any rev).
+# omp ships via mise: `mise use -g github:can1357/oh-my-pi@17.3.5` (prebuilt
+# GitHub release, ~170MB) in opc-mise-seed.sh.
 #
 # Build via compose service `nix-seed` (context ./patches/nix-seed) or:
 #   docker build -t opc/nix-seed:local -f patches/nix-seed/Dockerfile patches/nix-seed
@@ -50,6 +55,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # nix 2.35.2 — pinned installer URL for reproducible builds.
+# nix.conf is written to THREE locations: single-user nix reads
+# ~/.config/nix/nix.conf and /etc/nix/nix.conf (NOT /nix/etc/nix/nix.conf —
+# that one is only for the runtime volume seed via NIX_USER_CONF_FILES).
 RUN groupadd -r nixbld \
     && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \
     && gpasswd -a nixbld1 nixbld \
@@ -57,8 +65,8 @@ RUN groupadd -r nixbld \
     && HOME=/root sh -c 'curl -fsSL https://releases.nixos.org/nix/nix-2.35.2/install -o /tmp/nix-install.sh \
         && sh /tmp/nix-install.sh --no-daemon --yes \
         && rm -f /tmp/nix-install.sh' \
-    && mkdir -p /nix/etc/nix \
-    && printf 'experimental-features = nix-command flakes\nsandbox = false\naccept-flake-config = true\n' > /nix/etc/nix/nix.conf \
+    && mkdir -p /nix/etc/nix /etc/nix /root/.config/nix \
+    && printf 'experimental-features = nix-command flakes\nsandbox = false\naccept-flake-config = true\n' | tee /nix/etc/nix/nix.conf /etc/nix/nix.conf /root/.config/nix/nix.conf >/dev/null \
     && HOME=/root PATH="/nix/var/nix/profiles/default/bin:$PATH" \
         nix --extra-experimental-features 'nix-command flakes' \
         profile install --profile /nix/var/nix/profiles/per-user/root/profile \
@@ -70,7 +78,6 @@ RUN groupadd -r nixbld \
         github:NixOS/nixpkgs/8be7bd0c83f1#just \
         github:NixOS/nixpkgs/8be7bd0c83f1#mise \
         github:NixOS/nixpkgs/8be7bd0c83f1#gh \
-        github:numtide/llm-agents.nix/dac632fe2759854b901cbab78efdeca6343a6c0e#omp \
     && cp -al /nix /nix-seed
 
 CMD ["true"]
@@ -88,10 +95,10 @@ Run:
 CID=$(docker run -d opc/nix-seed:local true)
 docker exec "$CID" sh -c '
   P=/nix/var/nix/profiles/per-user/root/profile/bin
-  for t in nix ripgrep jq fd htop bat just mise gh omp; do
+  for t in nix ripgrep jq fd htop bat just mise gh; do
     [ -x "$P/$t" ] || { echo "MISSING $t"; exit 1; }
   done
-  echo "all 10 binaries present"
+  echo "all 9 binaries present"
   nix --version
 '
 # hardlink check: /nix-seed files share inodes with /nix (one copy in layer)
@@ -104,7 +111,7 @@ Expected: all binaries present, nix 2.35.2, HARDLINK-OK.
 
 ```bash
 git add patches/nix-seed/Dockerfile
-git commit -m "feat: shared nix-seed image — pinned nix 2.35.2 + 9 tools (rg/jq/fd/htop/bat/just/mise/gh/omp)"
+git commit -m "feat: shared nix-seed image — pinned nix 2.35.2 + 8 tools (rg/jq/fd/htop/bat/just/mise/gh; omp via mise)"
 ```
 
 ---
@@ -200,12 +207,14 @@ git commit -m "feat: compose — nix-seed one-shot service, build.depends_on, *-
 # opc-mise-seed.sh — source from an OPC entrypoint AFTER opc-nix-seed.sh
 # (mise binary comes from the nix profile, so nix PATH must be active first).
 #
-# Ensures the mise-managed toolchains (node@lts, rust@stable) exist on the
-# persistent *-mise volume. Installs only when a toolchain is missing
-# (fresh volume / down -v); existing installs are left untouched. Per-tool
-# check → a failed rust install retries on next boot without touching node.
+# Ensures the mise-managed toolchains exist on the persistent *-mise volume:
+# node@lts, rust@stable, and omp (prebuilt from GitHub releases — the nix
+# derivation for omp cannot build in image environments, bun EPERM). Installs
+# only when a toolchain is missing (fresh volume / down -v); existing
+# installs are left untouched. Per-tool check → a failed install retries on
+# next boot without touching the others.
 # PATH tail: baked node stays authoritative (hermes 26 / paperclip 24);
-# mise fills gaps (cargo/rustc everywhere, node in buzz).
+# mise fills gaps (cargo/rustc everywhere, node in buzz, omp).
 opc_mise_seed() {
     export MISE_DATA_DIR="${MISE_DATA_DIR:-/opt/mise}"
     export MISE_CACHE_DIR="${MISE_CACHE_DIR:-/opt/mise/cache}"
@@ -219,6 +228,10 @@ opc_mise_seed() {
     if [ ! -d "$MISE_DATA_DIR/installs/rust" ]; then
         echo "[mise] first boot: installing rust@stable (global, rustup)"
         mise use -g rust@stable || echo "[mise] rust install failed (network?)" >&2
+    fi
+    if [ ! -d "$MISE_DATA_DIR/installs/github-can1357-oh-my-pi" ]; then
+        echo "[mise] first boot: installing omp (prebuilt, github releases)"
+        mise use -g github:can1357/oh-my-pi@17.3.5 || echo "[mise] omp install failed (network?)" >&2
     fi
 }
 ```
@@ -435,16 +448,14 @@ git commit -m "feat: entrypoints — opc_mise_seed after opc_nix_seed (PATH-tail
     # Self-heal: if any seed tool is missing (e.g. image upgraded with new
     # tools, or the deprecated `nix profile install` replaced the profile),
     # re-add the full seed list once. Unpinned nixpkgs here is the existing
-    # behavior (seed image itself is pinned); omp comes from llm-agents.nix.
+    # behavior (seed image itself is pinned). omp is mise-managed, not nix.
     if [ ! -e "$PROFILE/bin/rg" ] || [ ! -e "$PROFILE/bin/mise" ] \
-        || [ ! -e "$PROFILE/bin/just" ] || [ ! -e "$PROFILE/bin/gh" ] \
-        || [ ! -e "$PROFILE/bin/omp" ]; then
+        || [ ! -e "$PROFILE/bin/just" ] || [ ! -e "$PROFILE/bin/gh" ]; then
         echo "[nix] seed tools missing from profile; re-adding"
         HOME=/root PATH="/nix/var/nix/profiles/default/bin:$PATH" \
             nix profile add \
                 nixpkgs#ripgrep nixpkgs#jq nixpkgs#fd nixpkgs#htop nixpkgs#bat \
-                nixpkgs#just nixpkgs#mise nixpkgs#gh \
-                github:numtide/llm-agents.nix#omp || true
+                nixpkgs#just nixpkgs#mise nixpkgs#gh || true
     fi
 ```
 
@@ -510,10 +521,10 @@ Run:
 ```bash
 for c in opc-buzz-1 opc-frontdoor-1 opc-hermes-1 opc-paperclip-1; do
   echo "== $c"
-  docker exec "$c" sh -c 'mise --version | head -1; mise ls 2>/dev/null | grep -E "node|rust"; rustc --version; cargo --version; just --version; gh --version | head -1'
+  docker exec "$c" sh -c 'mise --version | head -1; mise ls 2>/dev/null | grep -E "node|rust|oh-my-pi"; rustc --version; cargo --version; just --version; gh --version | head -1; omp --version'
 done
 ```
-Expected: 每容器 mise 有 node@lts + rust@stable (global), rustc/cargo = stable, just/gh 有版本輸出。
+Expected: 每容器 mise 有 node@lts + rust@stable + oh-my-pi (global), rustc/cargo = stable, just/gh/omp 有版本輸出。
 
 - [ ] **Step 4: 驗證 daemon 不受影響 (spec §11 核心承諾)**
 
