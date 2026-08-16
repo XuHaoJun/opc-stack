@@ -9,4 +9,11 @@ opc_nix_seed
 . /usr/local/bin/opc-gh-seed.sh
 opc_gh_seed
 
+# The runtime server (and the omp executor it spawns) runs as the `node`
+# user via gosu. The nix-seed creates /paperclip/.omp as root (HOME=/paperclip
+# at entrypoint time) — hand it to node so omp's SQLite state opens cleanly.
+if [ -d /paperclip/.omp ]; then
+    chown -R node:node /paperclip/.omp 2>/dev/null || true
+fi
+
 exec "$@"

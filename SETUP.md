@@ -206,6 +206,12 @@ docker compose exec -u root paperclip nix profile add nixpkgs#<tool>
 Each boot self-heals: if the profile ever loses the preinstalled tools, the
 entrypoint re-adds them automatically.
 
+`omp` (Oh My Pi) — the Paperclip executor agent runtime — is auto-installed
+into the paperclip container on first boot (and re-added if missing) from
+`github:numtide/llm-agents.nix#omp` (binary cache: cache.numtide.com). It
+runs as the `OMP Engineer` agent via the claude_local adapter with
+`agentCommand: "omp acp --yolo"`.
+
 Search: `nix search nixpkgs <name>`. Wipe a store: `docker volume rm opc_hermes-nix`.
 
 ## Isolation & privileges
