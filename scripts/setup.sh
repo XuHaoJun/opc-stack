@@ -26,7 +26,10 @@ if [[ "${BUZZ_RELAY_URL:-}" == "ws://localhost"* ]] && command -v hostname >/dev
 fi
 
 echo "── [2/5] submodules ──"
-git submodule update --init --recursive
+# Top-level only (--recursive would hit a broken nested submodule in
+# upstream tencentdb-agent-memory: MemoryProxy/packages/cost-guard has a
+# gitlink but no .gitmodules entry). None of our builds use nested submodules.
+git submodule update --init
 
 echo "── [3/5] patches ──"
 scripts/prepare.sh
