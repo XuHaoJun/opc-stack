@@ -40,16 +40,6 @@ opc_nix_seed() {
                 nixpkgs#just nixpkgs#mise nixpkgs#gh || true
     fi
 
-    # omp (Oh My Pi) — the executor agent runtime (paperclip claude_local
-    # adapter, agentCommand "omp acp --yolo"). Installed from the
-    # numtide/llm-agents.nix flake (binary cache at cache.numtide.com);
-    # re-added automatically if the profile lost it (fresh volume).
-    if [ ! -e "$PROFILE/bin/omp" ]; then
-        echo "[nix] omp missing from profile; installing (flake github:numtide/llm-agents.nix)"
-        HOME=/root PATH="/nix/var/nix/profiles/default/bin:$PATH" \
-            nix profile add github:numtide/llm-agents.nix#omp || true
-    fi
-
     # omp default model (used when omp runs inside this container).
     _omp_cfg="${OMP_CONFIG_DIR:-${HOME:-/root}/.omp}/agent/config.yml"
     if [ ! -f "$_omp_cfg" ]; then
