@@ -1,0 +1,385 @@
+name: ${COMPOSE_PROJECT_NAME:-opc}
+
+services:
+  # ══════════════════════════ Buzz ══════════════════════════
+  buzz-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: buzz
+      POSTGRES_PASSWORD: ${BUZZ_DB_PASSWORD:?set in .env}
+      POSTGRES_DB: buzz
+    volumes:
+      - buzz-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buzz -d buzz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  buzz-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${BUZZ_REDIS_PASSWORD:?set in .env}"]
+    volumes:
+      - buzz-redisdata:/data
+
+  buzz-minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${BUZZ_S3_ACCESS_KEY:?set in .env}
+      MINIO_ROOT_PASSWORD: ${BUZZ_S3_SECRET_KEY:?set in .env}
+    volumes:
+      - buzz-miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  buzz-minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      buzz-minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set local http://buzz-minio:9000 "$${BUZZ_S3_ACCESS_KEY}" "$${BUZZ_S3_SECRET_KEY}" &&
+        mc mb --ignore-existing "local/$${BUZZ_S3_BUCKET:-buzz-media}"
+    environment:
+      BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set in .env}
+      BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set in .env}
+      BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
+
+  # Generates relay/owner + front-door agent Nostr keys into the shared
+  # opc-keys volume (idempotent, one-shot).
+  buzz-keys:
+    build:
+      context: ./upstream/buzz
+      dockerfile: opc/Dockerfile
+      target: opc-relay
+    image: ${IMAGE_PREFIX:-opc}/buzz:local
+    restart: "no"
+    command: ["/usr/local/bin/opc-generate-keys.sh"]
+    volumes:
+      - opc-keys:/keys
+
+  buzz:
+    build:
+      context: ./upstream/buzz
+      dockerfile: opc/Dockerfile
+      target: opc-relay
+    image: ${IMAGE_PREFIX:-opc}/buzz:local
+    init: true
+    restart: unless-stopped
+    depends_on:
+      buzz-db:
+        condition: service_healthy
+      buzz-redis:
+        condition: service_started
+      buzz-minio:
+        condition: service_healthy
+      buzz-minio-init:
+        condition: service_completed_successfully
+      buzz-keys:
+        condition: service_completed_successfully
+    environment:
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_HEALTH_PORT: "8080"
+      BUZZ_KEYS_DIR: /keys
+      DATABASE_URL: postgres://buzz:${BUZZ_DB_PASSWORD}@buzz-db:5432/buzz
+      REDIS_URL: redis://:${BUZZ_REDIS_PASSWORD}@buzz-redis:6379
+      RELAY_URL: ${BUZZ_RELAY_URL:-ws://localhost:3000}
+      BUZZ_AUTO_MIGRATE: "true"
+      BUZZ_SERVE_GIT_WEB_GUI: "true"
+      BUZZ_S3_ENDPOINT: http://buzz-minio:9000
+      BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY}
+      BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY}
+      BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
+      BUZZ_S3_REGION: us-east-1
+      BUZZ_S3_ADDRESSING_STYLE: path
+      # A3 gate: 32 concurrent conditional PUTs to one object hang MinIO on a
+      # fresh volume; 8 keeps the conformance check without the stall.
+      BUZZ_GIT_PROBE_WRITERS: "8"
+      BUZZ_GIT_REPO_PATH: /data/git/repos
+      RUST_LOG: buzz_relay=info
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
+    ports:
+      - "${BUZZ_PORT:-3000}:3000"
+    volumes:
+      - buzz-git:/data/git
+      - buzz-nix:/nix
+      - opc-keys:/keys:ro
+      - buzz-omp:/root/.omp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/_readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  # Grants the front-door agent pubkey relay membership (idempotent, one-shot).
+  buzz-bootstrap:
+    image: ${IMAGE_PREFIX:-opc}/buzz:local
+    restart: "no"
+    command: ["/usr/local/bin/opc-add-member.sh"]
+    depends_on:
+      buzz:
+        condition: service_healthy
+    environment:
+      KEYS_DIR: /keys
+      BUZZ_RELAY_URL: ${BUZZ_RELAY_URL:-ws://localhost:3000}
+      DATABASE_URL: postgres://buzz:${BUZZ_DB_PASSWORD}@buzz-db:5432/buzz
+      REDIS_URL: redis://:${BUZZ_REDIS_PASSWORD}@buzz-redis:6379
+      BUZZ_S3_ENDPOINT: http://buzz-minio:9000
+      BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY}
+      BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY}
+      BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
+      BUZZ_S3_REGION: us-east-1
+      BUZZ_S3_ADDRESSING_STYLE: path
+    volumes:
+      - opc-keys:/keys:ro
+      - frontdoor-omp:/root/.omp
+
+  # Buzz front door: buzz-acp spawning `hermes acp` (PRD Decision D topology).
+  frontdoor:
+    build:
+      context: ./upstream/buzz
+      dockerfile: opc/Dockerfile
+    # ACP sidecar of the relay: shares its network namespace so the canonical
+    # relay host (localhost:3000) resolves to the relay itself.
+    network_mode: service:buzz
+    image: ${IMAGE_PREFIX:-opc}/frontdoor:local
+    init: true
+    restart: unless-stopped
+    depends_on:
+      buzz:
+        condition: service_healthy
+      buzz-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      BUZZ_KEYS_DIR: /keys
+      BUZZ_RELAY_URL: ${BUZZ_RELAY_URL:-ws://localhost:3000}
+      BUZZ_ACP_AGENT_COMMAND: hermes
+      BUZZ_ACP_AGENT_ARGS: acp
+      BUZZ_ACP_RESPOND_TO: anyone
+      # Respond to every stream message in its channels (no @mention needed):
+      # the desktop's mention autocomplete labels relay agents "not in channel"
+      # even when they are members, which blocks mention-tag insertion.
+      BUZZ_ACP_NO_MENTION_FILTER: "true"
+      HERMES_HOME: /opt/data
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
+      OPENAI_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+    volumes:
+      - frontdoor-hermes:/opt/data
+      - frontdoor-nix:/nix
+      - opc-keys:/keys:ro
+
+  # ══════════════════════════ Hermes ══════════════════════════
+  hermes:
+    build:
+      context: ./upstream/hermes
+      dockerfile: opc/Dockerfile
+    image: ${IMAGE_PREFIX:-opc}/hermes:local
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    environment:
+      HERMES_UID: "10000"
+      HERMES_GID: "10000"
+      HERMES_HOME: /opt/data
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_PORT: "9119"
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USERNAME:?set in .env}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:?set in .env}
+      HERMES_GATEWAY_BOOTSTRAP_STATE: running
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: "8642"
+      API_SERVER_KEY: ${HERMES_API_SERVER_KEY:?set in .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
+      OPENAI_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+    ports:
+      - "${HERMES_DASHBOARD_PORT:-9119}:9119"
+      - "${HERMES_API_PORT:-8642}:8642"
+    volumes:
+      - hermes-data:/opt/data
+      - hermes-nix:/nix
+      - hermes-omp:/root/.omp
+    healthcheck:
+      test: ["CMD-SHELL", "code=$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9119/); [ \"$$code\" = \"200\" ] || [ \"$$code\" = \"401\" ] || [ \"$$code\" = \"302\" ]"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+
+  # ══════════════════════════ Paperclip ══════════════════════════
+  paperclip:
+    build:
+      context: ./upstream/paperclip
+      dockerfile: opc/Dockerfile
+    image: ${IMAGE_PREFIX:-opc}/paperclip:local
+    init: true
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3100"
+      SERVE_UI: "true"
+      PAPERCLIP_HOME: /paperclip
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: private
+      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set in .env}
+      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    ports:
+      - "${PAPERCLIP_PORT:-3100}:3100"
+    volumes:
+      - paperclip-data:/paperclip
+      - paperclip-nix:/nix
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 60
+      start_period: 90s
+
+  # ══════════════════════════ TencentDB-Agent-Memory ══════════════════════════
+  tencentdb-core:
+    build:
+      context: ./upstream/tencentdb-agent-memory/MemoryCore
+      dockerfile: Dockerfile
+    image: ${IMAGE_PREFIX:-opc}/tencentdb-core:local
+    restart: unless-stopped
+    environment:
+      TDAI_GATEWAY_HOST: 0.0.0.0
+      TDAI_GATEWAY_PORT: "8420"
+      TDAI_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+      TDAI_DATA_DIR: /data/tdai-memory
+      TDAI_SKILL_ENABLED: "true"
+      TDAI_LLM_API_KEY: ${OPENCODE_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
+      TDAI_LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}
+      TDAI_LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENCODE_GO_MODEL:-deepseek-v4-pro}}
+    ports:
+      - "${TENCENTDB_CORE_PORT:-8420}:8420"
+    volumes:
+      - tencentdb-core-data:/data/tdai-memory
+
+  # First-boot admin: POST /v3/internal/meta/user/init-admin (idempotent).
+  tencentdb-bootstrap:
+    image: ${IMAGE_PREFIX:-opc}/tencentdb-core:local
+    restart: "no"
+    depends_on:
+      tencentdb-core:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for i in $$(seq 1 60); do
+          curl -fsS http://tencentdb-core:8420/health >/dev/null 2>&1 && break
+          sleep 2
+        done
+        code=$$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+          http://tencentdb-core:8420/v3/internal/meta/user/init-admin \
+          -H 'Content-Type: application/json' \
+          -H 'x-tdai-service-id: default' \
+          -H "Authorization: Bearer $${TENCENTDB_GATEWAY_API_KEY:-}" \
+          -d "{\"username\":\"$${TENCENTDB_ADMIN_USERNAME:-admin}\",\"user_key\":\"$${TENCENTDB_ADMIN_USER_KEY}\"}")
+        echo "tencentdb init-admin -> HTTP $$code"
+        [ "$$code" = "200" ] || [ "$$code" = "409" ]
+    environment:
+      TENCENTDB_ADMIN_USERNAME: ${TENCENTDB_ADMIN_USERNAME:-admin}
+      TENCENTDB_ADMIN_USER_KEY: ${TENCENTDB_ADMIN_USER_KEY:?set in .env}
+      TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+
+  tencentdb-hub:
+    build:
+      context: ./upstream/tencentdb-agent-memory
+      dockerfile: opc/hub.Dockerfile
+    image: ${IMAGE_PREFIX:-opc}/tencentdb-hub:local
+    restart: unless-stopped
+    depends_on:
+      tencentdb-core:
+        condition: service_healthy
+    environment:
+      PANEL_PORT: "8125"
+      KNOWLEDGE_PORT: "8424"
+      REMOTE_INSTANCE_ID: default
+      REMOTE_INSTANCE_NAME: local
+      REMOTE_INSTANCE_URL: http://tencentdb-core:8420
+      REMOTE_INSTANCE_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+      KNOWLEDGE_PUBLIC_BASE_URL: ${TENCENTDB_KNOWLEDGE_PUBLIC_URL:-http://localhost:8424/v3}
+      LLM_MODE: custom
+      LLM_PROTOCOL: openai
+      LLM_API_KEY: ${OPENCODE_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
+      LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}
+      LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENCODE_GO_MODEL:-deepseek-v4-pro}}
+    ports:
+      - "${TENCENTDB_PANEL_PORT:-8125}:8125"
+      - "${TENCENTDB_KNOWLEDGE_PORT:-8424}:8424"
+    volumes:
+      - tencentdb-hub-data:/data/knowledge
+
+  tencentdb-proxy:
+    build:
+      context: ./upstream/tencentdb-agent-memory/MemoryProxy
+      dockerfile: opc/proxy.Dockerfile
+    image: ${IMAGE_PREFIX:-opc}/tencentdb-proxy:local
+    restart: unless-stopped
+    depends_on:
+      tencentdb-core:
+        condition: service_healthy
+      tencentdb-hub:
+        condition: service_started
+    environment:
+      PROXY_UPSTREAM_URL: ${PROXY_UPSTREAM_URL:-${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}
+      PROXY_UPSTREAM_API_KEY: ${OPENCODE_API_KEY:-${PROXY_UPSTREAM_API_KEY:-}}
+      PROXY_TDAI_ENDPOINT: http://tencentdb-core:8420
+      PROXY_TDAI_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+      PROXY_KNOWLEDGE_ENDPOINT: http://tencentdb-hub:8424
+      PROXY_KNOWLEDGE_TOKEN: ""
+    ports:
+      - "${TENCENTDB_PROXY_PORT:-8096}:8096"
+    volumes:
+      - tencentdb-proxy-data:/data
+
+volumes:
+  opc-keys:
+  buzz-pgdata:
+  buzz-redisdata:
+  buzz-miniodata:
+  buzz-git:
+  buzz-nix:
+  frontdoor-hermes:
+  frontdoor-nix:
+  hermes-data:
+  hermes-nix:
+  paperclip-data:
+  paperclip-nix:
+  buzz-omp:
+  frontdoor-omp:
+  hermes-omp:
+  tencentdb-core-data:
+  tencentdb-hub-data:
+  tencentdb-proxy-data:

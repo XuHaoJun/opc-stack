@@ -1,0 +1,15 @@
+# Secrets / local config
+.env
+.env.bak
+*.local.env
+
+# Logs / scratch
+*.log
+/tmp/
+
+# Editor/OS noise
+.DS_Store
+*.swp
+
+# Node deps (acp-smoke-test.mjs runs inside the paperclip container, not here)
+node_modules/
