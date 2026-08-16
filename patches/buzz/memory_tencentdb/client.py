@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 10  # seconds
 
+# Gateway zod caps (v2.0.0): message content ≤ 8192, search query ≤ 2048.
+# OPC fix: truncate at the boundary so a single oversized turn can't fail the
+# whole L0 write (observed as `messages.0.content: Too big` 400s dropping
+# turns) or degrade recall (query 400s on prefetch).
+MAX_MESSAGE_CONTENT_CHARS = 8000
+MAX_QUERY_CHARS = 2000
+_TRUNCATION_MARKER = "\n…[truncated by memory-tencentdb (Gateway size limit)]"
+
 
 class MemoryTencentdbSdkClient:
     """HTTP client for the memory-tencentdb Gateway sidecar."""
@@ -45,6 +53,23 @@ class MemoryTencentdbSdkClient:
         headers["Authorization"] = f"Bearer {self._api_key or 'local'}"
         headers["x-tdai-service-id"] = self._service_id
         return headers
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        """Cap a string at ``limit`` chars, preserving head AND tail.
+
+        Keeps the head (leading thread context) and the tail (the user's own
+        words sit after injected context) with a marker between them, so both
+        ends survive while the payload stays under the Gateway's zod cap.
+        """
+        if not text:
+            return ""
+        if len(text) <= limit:
+            return text
+        marker_len = len(_TRUNCATION_MARKER)
+        head_len = (limit - marker_len) // 2
+        tail_len = limit - marker_len - head_len
+        return text[:head_len] + _TRUNCATION_MARKER + text[-tail_len:]
 
     def _post(self, path: str, body: Dict[str, Any], timeout: Optional[int] = None) -> Dict[str, Any]:
         """Make a POST request to the Gateway and unwrap the v3 envelope."""
@@ -128,7 +153,10 @@ class MemoryTencentdbSdkClient:
             "agent_id": agent_id,
             "user_id": user_id,
             "session_id": session_id,
-            "messages": messages,
+            "messages": [
+                {**m, "content": self._truncate(m.get("content", ""), MAX_MESSAGE_CONTENT_CHARS)}
+                for m in messages
+            ],
         }
         return self._post("/v3/conversation/add", body)
 
@@ -147,7 +175,7 @@ class MemoryTencentdbSdkClient:
             "team_id": team_id,
             "agent_id": agent_id,
             "user_id": user_id,
-            "query": query,
+            "query": self._truncate(query, MAX_QUERY_CHARS),
             "limit": limit,
         }
         if session_id:
@@ -171,7 +199,7 @@ class MemoryTencentdbSdkClient:
             "team_id": team_id,
             "agent_id": agent_id,
             "user_id": user_id,
-            "query": query,
+            "query": self._truncate(query, MAX_QUERY_CHARS),
             "limit": limit,
         }
         if type_filter:

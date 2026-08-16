@@ -17,6 +17,13 @@ if [ -f /keys/paperclip-api.key ]; then
     export PAPERCLIP_API_KEY="$(cat /keys/paperclip-api.key)"
     echo "[hermes] PAPERCLIP_API_KEY loaded from keys volume"
 fi
+# TencentDB admin user_id written by the tencentdb-bootstrap one-shot: scopes
+# memory writes (L0/L1) under the panel owner so the Memory Hub panel at 8125
+# can render them (the panel queries with asset.owner_user_id).
+if [ -f /keys/tencentdb-admin-user-id ]; then
+    export MEMORY_TENCENTDB_USER_ID="$(cat /keys/tencentdb-admin-user-id)"
+    echo "[hermes] MEMORY_TENCENTDB_USER_ID loaded from keys volume"
+fi
 
 HH="${HERMES_HOME:-/opt/data}"
 

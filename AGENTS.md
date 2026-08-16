@@ -40,12 +40,16 @@ docker compose down           # 停 (volume 保留); down -v 全清
 - Paperclip `pi_local` adapter 不兼容 omp v17 (flag 差異); 整合 omp 用 `claude_local` + `engine:"acp"` + `agentCommand:"omp acp --yolo"` (handshake 已驗證, 見 SETUP.md)。
 - PyPI 的 hermes-agent 停在 0.19.0 → 0.20.1 用 editable install from git tag (`pip install -e "…[acp]"`)。
 - TencentDB `MemoryKnowledge/Dockerfile` upstream 是壞的 → hub 用 `deploy/panel-knowledge-combined`。
+- **TencentDB 面板 (8125) 是 meta-plane 驅動**: L0-L3 寫進 data plane 後, team/agent 沒在 meta registry (`/v3/meta/*`, sqlite `tdai_metadata_default`) 登記 → 面板全空 (`ensureChatMemoryAsset` 每筆 conversation/add 都 warn `agent not found`)。provision 由 `tencentdb-bootstrap` one-shot 處理 (`opc-tencentdb-provision.sh`), agent_id **必須以 `agt` 開頭** (面板用 `lastIndexOf('-agt')` 解析 `chat_memory-{team}-{agent}`)。
+- **TencentDB L0/L1 以 user_id 隔離**: 面板用 `asset.owner_user_id` 查 data plane, 所以 plugin 的 `MEMORY_TENCENTDB_USER_ID` 必須 = admin user_id (bootstrap 寫入 `/keys/tencentdb-admin-user-id`, entrypoint export)。留空 = `default` → 面板層級全 0。
+- TencentDB Gateway zod 上限: message content ≤8192 / query ≤2048 → plugin (`client.py`) 在邊界截斷 (頭尾保留 + marker), 超過會整筆 L0 寫入 400 掉。改 plugin 記得同步 `patches/hermes/` 與 `patches/buzz/` 兩份。
 - nix static build 不吃 `/nix/etc/nix/nix.conf` 預設路徑 → 靠 `NIX_USER_CONF_FILES` env; build 時需要 nixbld group+user。
 
 ## 檔案地圖
 
 - `docker-compose.yml` / `.env.example` / `SETUP.md` — 部署核心
 - `patches/<proj>/` — 改寫的 Dockerfiles + entrypoints (唯一客製來源; 內容 = 各 repo 的 opc/ 目錄)
+- `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
 - `scripts/` — setup / prepare / upgrade / test-connectivity
 - `upstream/<proj>/opc/` — prepare.sh 產物, 勿手改
 - `acp-smoke-test.mjs` — omp ACP handshake 驗證 script (在 paperclip 容器內跑)

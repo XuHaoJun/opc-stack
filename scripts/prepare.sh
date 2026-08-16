@@ -33,5 +33,6 @@ apply_patch hermes
 apply_patch paperclip
 apply_patch tencentdb-agent-memory
 apply_patch tencentdb-agent-memory/MemoryProxy
+apply_patch tencentdb-agent-memory/MemoryCore
 
 echo "prepare: done"

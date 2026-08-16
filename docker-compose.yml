@@ -193,12 +193,15 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       # TencentDB Knowledge Plane (PRD v10.1): memory_tencentdb provider
       # connects to the containerized MemoryCore gateway; the Buzz front-door
-      # agent scopes its memories under team=opc / agent=hermes-front-door.
+      # agent scopes its memories under team=opc / agent=agt-hermes-front-door
+      # (agt- prefix required by the Memory Hub panel's asset-id parsing).
+      # user_id comes from /keys/tencentdb-admin-user-id (written by the
+      # tencentdb-bootstrap one-shot) so the panel can render L0/L1.
       MEMORY_TENCENTDB_GATEWAY_HOST: tencentdb-core
       MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
-      MEMORY_TENCENTDB_AGENT_ID: hermes-front-door
+      MEMORY_TENCENTDB_AGENT_ID: agt-hermes-front-door
       # Paperclip work-plane integration (GitHub dev flow): REST base + agent
       # API key for creating/tracking tickets; watcher posts results to Buzz.
       PAPERCLIP_API_URL: http://paperclip:3100
@@ -243,7 +246,8 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       # TencentDB Knowledge Plane (PRD v10.1): memory_tencentdb provider
       # connects to the containerized MemoryCore gateway; team=opc, agent_id
-      # falls back to the active hermes profile (agent_identity glue).
+      # falls back to the active hermes profile (agent_identity glue), user_id
+      # from /keys/tencentdb-admin-user-id like the frontdoor.
       MEMORY_TENCENTDB_GATEWAY_HOST: tencentdb-core
       MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
@@ -383,7 +387,7 @@ services:
   tencentdb-core:
     build:
       context: ./upstream/tencentdb-agent-memory/MemoryCore
-      dockerfile: Dockerfile
+      dockerfile: opc/Dockerfile
     image: ${IMAGE_PREFIX:-opc}/tencentdb-core:local
     restart: unless-stopped
     environment:
@@ -400,7 +404,11 @@ services:
     volumes:
       - tencentdb-core-data:/data/tdai-memory
 
-  # First-boot admin: POST /v3/internal/meta/user/init-admin (idempotent).
+  # First-boot admin: POST /v3/internal/meta/user/init-admin (idempotent),
+  # then meta-plane provisioning (team "opc" + agent "agt-hermes-front-door" —
+  # the tenancy ids the hermes memory_tencentdb plugin writes under; without
+  # them the Memory Hub panel at 8125 stays empty even though L0-L3 data
+  # accumulates).
   tencentdb-bootstrap:
     image: ${IMAGE_PREFIX:-opc}/tencentdb-core:local
     restart: "no"
@@ -422,10 +430,18 @@ services:
           -d "{\"username\":\"$${TENCENTDB_ADMIN_USERNAME:-admin}\",\"user_key\":\"$${TENCENTDB_ADMIN_USER_KEY}\"}")
         echo "tencentdb init-admin -> HTTP $$code"
         [ "$$code" = "200" ] || [ "$$code" = "409" ]
+        exec /usr/local/bin/opc-tencentdb-provision.sh
     environment:
       TENCENTDB_ADMIN_USERNAME: ${TENCENTDB_ADMIN_USERNAME:-admin}
       TENCENTDB_ADMIN_USER_KEY: ${TENCENTDB_ADMIN_USER_KEY:?set in .env}
       TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+      TENCENTDB_GATEWAY_URL: http://tencentdb-core:8420
+      TENCENTDB_TEAM_ID: ${TENCENTDB_TEAM_ID:-opc}
+      TENCENTDB_TEAM_NAME: ${TENCENTDB_TEAM_NAME:-OPC}
+      TENCENTDB_AGENT_ID: ${TENCENTDB_AGENT_ID:-agt-hermes-front-door}
+      TENCENTDB_AGENT_NAME: ${TENCENTDB_AGENT_NAME:-Hermes Front Door}
+    volumes:
+      - opc-keys:/keys
 
   tencentdb-hub:
     build:

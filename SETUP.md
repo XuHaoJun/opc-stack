@@ -131,9 +131,12 @@ pubkey can then connect; no invites needed).
   MemoryProvider is seeded into both Hermes containers (Buzz front door +
   gateway) and connects to the containerized MemoryCore gateway
   (`tencentdb-core:8420`; gateway key = `TENCENTDB_GATEWAY_API_KEY`). Memory
-  scope: team `opc`; agent id = `hermes-front-door` (front door) or the active
-  Hermes profile (gateway workers — per-profile memory via `agent_identity`).
-  Create Team/Agent loadouts in the panel (http://localhost:8125) and confirm
+  scope: team `opc`; agent id = `agt-hermes-front-door` (front door; the
+  `agt` prefix is required by the Memory Hub panel's asset-id parsing) or the
+  active Hermes profile (gateway workers — per-profile memory via
+  `agent_identity`). The `tencentdb-bootstrap` one-shot provisions the
+  Team/Agent loadouts in the kernel meta registry automatically — the panel
+  (http://localhost:8125) renders them without manual setup. Confirm
   `memory-tencentdb Gateway already running` in hermes/frontdoor logs.
 - **TencentDB memory for other coding agents** (Codex/Claude/… — PRD phase K3,
   optional): point an agent's LLM base URL at the proxy
