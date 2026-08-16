@@ -72,7 +72,8 @@ the script lacks.
 - Created: `.claude/skills/upgrade-opc-stack/SKILL.md`,
   `.claude/skills/upgrade-opc-stack/scripts/{backup-volumes,restore-volumes}.sh`,
   `.claude/skills/upgrade-opc-stack/references/risk-checklist.md`
-- Modified: `.gitignore` (`backups/`)
+- Modified: `.gitignore` (`backups/`), `scripts/upgrade.sh` (fix: tencentdb
+  submodule path map — `upstream/tencentdb` does not exist; eval surfaced it)
 - Docs: SETUP.md upgrade section re-pointed at the skill
 
 ## Verification

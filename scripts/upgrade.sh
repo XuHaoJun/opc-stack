@@ -31,18 +31,28 @@ if [ -z "${SERVICES[$PROJ]:-}" ]; then
   echo "unknown component '$PROJ' (pick from: ${!SERVICES[*]})"; exit 1
 fi
 
+# Component → submodule directory (tencentdb's submodule is NOT named after
+# the component — same mismatch prepare.sh already handles).
+declare -A SUBMODULE=(
+  [buzz]=buzz
+  [hermes]=hermes
+  [paperclip]=paperclip
+  [tencentdb]=tencentdb-agent-memory
+)
+UP="upstream/${SUBMODULE[$PROJ]}"
+
 echo "── fetch + verify tag ──"
-git -C "upstream/$PROJ" fetch origin --tags --prune
-if ! git -C "upstream/$PROJ" ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | grep -q .; then
+git -C "$UP" fetch origin --tags --prune
+if ! git -C "$UP" ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | grep -q .; then
   echo "tag '$TAG' not found on upstream origin (see list above)"; exit 1
 fi
-OLD="$(git -C "upstream/$PROJ" describe --tags --always)"
+OLD="$(git -C "$UP" describe --tags --always)"
 
 echo "── checkout $PROJ: $OLD → $TAG ──"
 # Drop stale patched files so a new version's checkout never collides with them.
-find "upstream/$PROJ" -type d -name opc -prune -exec rm -rf {} +
-git -C "upstream/$PROJ" checkout "$TAG"
-git add "upstream/$PROJ"
+find "$UP" -type d -name opc -prune -exec rm -rf {} +
+git -C "$UP" checkout "$TAG"
+git add "$UP"
 
 echo "── re-apply patches ──"
 scripts/prepare.sh

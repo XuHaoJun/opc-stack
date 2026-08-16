@@ -40,9 +40,14 @@ service endpoint and the frontdoor→relay link without ever calling an LLM.
 
 ## Upgrading a component
 
-```bash
-scripts/upgrade.sh <buzz|hermes|paperclip|tencentdb> <tag>
-```
+**Recommended path: the `upgrade-opc-stack` skill** (`.claude/skills/upgrade-opc-stack/`).
+It wraps `scripts/upgrade.sh` with a risk assessment, unconditional backup of
+stateful volumes (`.claude/skills/upgrade-opc-stack/scripts/backup-volumes.sh`),
+a user approval gate, post-upgrade verification, and an on-approval rollback
+(`restore-volumes.sh`). Ask your agent to "upgrade <component> to <tag>" and it
+runs the full flow.
+
+The raw engine, for scripted/CI use:
 
 - Verifies the tag exists on upstream (`git ls-remote --tags`), removes stale
   patched files from the submodule worktree, checks out the new tag, records
