@@ -212,3 +212,48 @@ opc_mise_seed
 2. 實作: patches/nix-seed → compose → 3 Dockerfiles → mise-seed.sh → entrypoints → self-heal
 3. 驗證計畫 (§7) 全數通過
 4. AGENTS.md / SETUP.md 更新 (nix-seed 新 build context、mise volume、`docker compose up -d --build` 流程不變)
+
+## 11. Rollout: 執行中 stack 的無縫接軌 (調查結論 2026-08-16)
+
+三個 scout 調查 (hermes / paperclip / compose 機制, 詳見 `agent://HermesShutdownResume`、`agent://PaperclipShutdownResume`、`agent://ComposeRedeployMechanics`)。
+
+### 11.1 Redeploy 機制
+
+- `docker compose up -d --build`: build 後比對 image digest, 變更的才 recreate (stop→remove→create→start)。無 build 的 backing infra (buzz-db/redis/minio) **全程不中斷**。
+- 全 repo 無 `stop_grace_period` → 全部容器 10s SIGTERM grace (docker 預設)。
+- recreate 順序 = depends_on DAG (buzz chain 5 層序列化; hermes/paperclip/tencentdb 平行)。單容器 downtime ≈ 10s grace + recreate; 典型總體 ~30-60s。
+- 所有資料在 named volumes (`opc_hermes-data`, `opc_paperclip-data`, `opc_*-nix` 等) — recreate 不丟資料。paperclip 的 DB 是 **embedded postgres** (`/paperclip/instances/default/db`), 也在 volume 上。
+
+### 11.2 Hermes — graceful shutdown + auto-resume: YES
+
+- in-flight 工作 = `$HERMES_HOME/sessions/sessions.json` (含 active_turn_token, 精確標記進行中 turn) + `state.db` (SQLite, per-turn transcript, WAL)。
+- SIGTERM → s6 (shutdownd -g 3000) → gateway handler → **先 pre-mark resume_pending 再 drain** (marker 先寫, SIGKILL 也安全) → interrupt tool subprocess → clean exit。
+- 重啟: `_recover_unclean_sessions` (active_turn_token ≤1h) + `_schedule_resume_pending_sessions` → 同 session_id 合成 continuation turn, model 收到 "[System note: previous turn was interrupted...]" 續跑。
+- `--replace` = stale-lock takeover, 新容器乾淨接管舊 gateway。
+- cron in-flight runs: shutdown 時標 interrupted, **不 requeue** — 依 schedule 下個 tick。
+- 10s grace 內 drain 用 restart_drain_timeout=0 (立即 interrupt); 即使 SIGKILL, pre-drain marker 保證 resume。
+
+### 11.3 Paperclip — graceful shutdown + auto-resume: YES
+
+- SIGTERM → tini (init:true) → node server → `drainRunningRunsForShutdown` (heartbeat.ts:9040): 終止 adapter child (SIGTERM→SIGKILL), run 標 `interrupted` (`server_shutdown_interrupted`), **queue retry** (`enqueueProcessLossRetry`), 停 embedded postgres, exit 0。
+- 重啟: `reapOrphanedRuns` (stuck running → failed/process_lost, `processLossRetryCount<1` 且 tracked-local-child → retry 一次) + `resumeQueuedRuns` → **auto-resume YES** (從 persisted session 重新執行, 非同一 process)。
+- 5-min periodic reaper 為 backstop。
+- 調查當下有一個 live run (`[acpx] spawning agent: omp acp --yolo` 15:45) — redeploy 時會被 interrupt + retry, 不遺失。
+
+### 11.4 One-shots recreate 重跑
+
+- buzz-keys / buzz-bootstrap / tencentdb-bootstrap: **idempotent, 安全** (verified; DB 層 ON CONFLICT DO NOTHING / 檔案存在即 skip / 409 accepted)。
+- paperclip-bootstrap: 上次 **Exited(1)** — `[pc-bootstrap] bootstrap/claim failed: HTTP 403`。**但 key 檔案已存在** (`/keys/paperclip-api.key` 在 opc-keys volume, 已確認) 且無 service depends_on 它 → **benign**; redeploy 重跑可能再噴 403, 不影響 stack。
+
+### 11.5 Wedge 風險 (既有, 非本變更引入)
+
+- buzz chain: buzz healthcheck 失敗 (~10min worst) → buzz-bootstrap/frontdoor 不啟動, `up -d` 阻塞。
+- tencentdb-core image-level HEALTHCHECK → 3 個 dependent 阻塞。
+- 無 circular dependency; hermes 完全獨立。
+
+### 11.6 本變更對 rollout 的影響
+
+- 新增 `nix-seed` one-shot (command: true) — 無害。
+- 既有 nix volume: seed 不重跑 (非空), self-heal 補 just/mise/omp。
+- 新 `*-mise` volumes: 空 → 首次開機各容器裝 node@lts + rust@stable (~1-3 min/容器, 平行) — daemon 不受影響 (PATH 尾)。
+- 結論: **可以在執行中 stack 直接 redeploy**; hermes/paperclip 的 in-flight 工作會被優雅中斷並自動續跑, 資料零遺失。
