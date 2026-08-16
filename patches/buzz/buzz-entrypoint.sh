@@ -6,6 +6,10 @@ set -eu
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
+# Mise toolchains: node@lts + rust@stable + omp on the *-mise volume.
+. /usr/local/bin/opc-mise-seed.sh
+opc_mise_seed
+
 if [ -n "${BUZZ_KEYS_DIR:-}" ] && [ -f "${BUZZ_KEYS_DIR}/relay.nsec" ]; then
     export BUZZ_RELAY_PRIVATE_KEY="$(cat "${BUZZ_KEYS_DIR}/relay.nsec")"
     export RELAY_OWNER_PUBKEY="$(cat "${BUZZ_KEYS_DIR}/relay.pub")"

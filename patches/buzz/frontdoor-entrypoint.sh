@@ -8,6 +8,10 @@ set -eu
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
+# Mise toolchains: node@lts + rust@stable + omp on the *-mise volume.
+. /usr/local/bin/opc-mise-seed.sh
+opc_mise_seed
+
 . /usr/local/bin/opc-gh-seed.sh
 opc_gh_seed
 
