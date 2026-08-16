@@ -7,6 +7,17 @@
 #      docker-entrypoint.sh (uid remap + gosu node) takes over.
 
 # syntax=docker/dockerfile:1.20
+# Shared nix seed image (compose passes the IMAGE_PREFIX-qualified name).
+# Declared globally so FROM ${NIX_SEED_IMAGE} expands; the `nix-seed` stage
+# below materializes it for COPY --from (which cannot expand variables).
+ARG NIX_SEED_IMAGE=opc/nix-seed:local
+# Shared seed (nix + 8 tools) built once in patches/nix-seed (compose service
+# `nix-seed`); a tool-list change rebuilds only that image. Seed image alias:
+# COPY --from cannot expand variables (BuildKit), so the global
+# NIX_SEED_IMAGE ARG (compose passes the IMAGE_PREFIX-qualified name) is
+# materialized as a stage and copied from by name. The COPY --from=nix-seed
+# in the runtime stage below consumes it.
+FROM ${NIX_SEED_IMAGE} AS nix-seed
 FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -98,33 +109,31 @@ EXPOSE 3100
 
 # ---------- OPC stack overlay: nix tool persistence ----------
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-gh-seed.sh \
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
+             /usr/local/bin/opc-gh-seed.sh \
              /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh
 
+# Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
+# above); a tool-list change rebuilds only the nix-seed image.
 RUN groupadd -r nixbld \
     && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \
     && gpasswd -a nixbld1 nixbld \
-    && mkdir -m 0755 /nix \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends xz-utils \
-    && rm -rf /var/lib/apt/lists/* \
-    && HOME=/root sh -c 'curl -fsSL https://nixos.org/nix/install -o /tmp/nix-install.sh \
-        && sh /tmp/nix-install.sh --no-daemon --yes \
-        && rm -f /tmp/nix-install.sh' \
-    && mkdir -p /nix/etc/nix \
-    && printf 'experimental-features = nix-command flakes\nsandbox = false\naccept-flake-config = true\n' > /nix/etc/nix/nix.conf \
-    && HOME=/root PATH="/nix/var/nix/profiles/default/bin:$PATH" \
-        nix --extra-experimental-features 'nix-command flakes' \
-        profile install --profile /nix/var/nix/profiles/per-user/root/profile \
-        nixpkgs#ripgrep nixpkgs#jq nixpkgs#fd nixpkgs#htop nixpkgs#bat \
-    && cp -a /nix /nix-seed
+    && mkdir -m 0755 /nix
+COPY --from=nix-seed /nix-seed /nix-seed
 ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/default/bin:${PATH}" \
     NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root" \
     NIX_USER_CONF_FILES="/nix/etc/nix/nix.conf" \
     NIX_SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+
+# mise-managed toolchains (node/rust/omp) live on the persistent *-mise volume
+# (opc-mise-seed.sh); PATH tail keeps the baked node 24 authoritative.
+ENV MISE_DATA_DIR=/opt/mise \
+    MISE_CACHE_DIR=/opt/mise/cache \
+    MISE_CONFIG_DIR=/opt/mise/config
 
 ENTRYPOINT ["/usr/local/bin/nix-entrypoint.sh", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
