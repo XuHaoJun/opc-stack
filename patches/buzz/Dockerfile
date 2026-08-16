@@ -181,5 +181,9 @@ ENV PATH="/opt/hermes-venv/bin:${PATH}" \
     HERMES_HOME=/opt/data
 RUN mkdir -p /opt/data
 
+# memory_tencentdb MemoryProvider (TencentDB Knowledge Plane, PRD v10.1) —
+# seeded into $HERMES_HOME/plugins/ at boot by frontdoor-entrypoint.sh.
+COPY opc/memory_tencentdb/ /opt/hermes/memory_tencentdb/
+
 ENTRYPOINT ["/usr/local/bin/frontdoor-entrypoint.sh"]
 CMD []

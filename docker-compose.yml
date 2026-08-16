@@ -182,6 +182,14 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       XAI_API_KEY: ${XAI_API_KEY:-}
+      # TencentDB Knowledge Plane (PRD v10.1): memory_tencentdb provider
+      # connects to the containerized MemoryCore gateway; the Buzz front-door
+      # agent scopes its memories under team=opc / agent=hermes-front-door.
+      MEMORY_TENCENTDB_GATEWAY_HOST: tencentdb-core
+      MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
+      MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+      MEMORY_TENCENTDB_TEAM_ID: opc
+      MEMORY_TENCENTDB_AGENT_ID: hermes-front-door
     volumes:
       - frontdoor-hermes:/opt/data
       - frontdoor-nix:/nix
@@ -218,6 +226,13 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       XAI_API_KEY: ${XAI_API_KEY:-}
+      # TencentDB Knowledge Plane (PRD v10.1): memory_tencentdb provider
+      # connects to the containerized MemoryCore gateway; team=opc, agent_id
+      # falls back to the active hermes profile (agent_identity glue).
+      MEMORY_TENCENTDB_GATEWAY_HOST: tencentdb-core
+      MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
+      MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+      MEMORY_TENCENTDB_TEAM_ID: opc
     ports:
       - "${HERMES_DASHBOARD_PORT:-9119}:9119"
       - "${HERMES_API_PORT:-8642}:8642"

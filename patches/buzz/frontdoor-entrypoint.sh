@@ -16,6 +16,19 @@ export BUZZ_RELAY_URL BUZZ_ACP_AGENT_COMMAND BUZZ_ACP_AGENT_ARGS
 echo "[frontdoor] relay=${BUZZ_RELAY_URL} agent=${BUZZ_ACP_AGENT_COMMAND} ${BUZZ_ACP_AGENT_ARGS}"
 
 HH="${HERMES_HOME:-/opt/data}"
+
+# TencentDB Knowledge Plane (PRD v10.1): sync the memory_tencentdb Hermes
+# MemoryProvider into $HERMES_HOME/plugins/ (user-plugin discovery path) on
+# every boot — image updates propagate into existing volumes.
+MP_SRC="/opt/hermes/memory_tencentdb"
+MP_DST="$HH/plugins/memory_tencentdb"
+if [ -d "$MP_SRC" ]; then
+    mkdir -p "$HH/plugins"
+    rm -rf "$MP_DST"
+    cp -r "$MP_SRC" "$MP_DST"
+    echo "[frontdoor] synced memory provider: memory_tencentdb"
+fi
+
 if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<'YAML'
@@ -31,12 +44,14 @@ kanban:
   dispatch_in_gateway: false
   review_dispatch: false
   auto_decompose: false
+memory:
+  provider: memory_tencentdb
 model:
   provider: custom
   base_url: https://opencode.ai/zen/go/v1
   default: deepseek-v4-pro
 YAML
-    echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; model=OpenCode Go)"
+    echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=OpenCode Go)"
 fi
 
 : "${OPENAI_API_KEY:=$OPENCODE_API_KEY}"

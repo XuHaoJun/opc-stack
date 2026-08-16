@@ -126,11 +126,19 @@ pubkey can then connect; no invites needed).
 
 - **Paperclip → Hermes**: in Paperclip create an agent with adapter
   `Hermes Gateway`: `apiBaseUrl: http://hermes:8642`, `apiKey: <HERMES_API_SERVER_KEY>`.
-- **TencentDB memory for coding agents**: point an agent's LLM base URL at the
-  proxy: `http://localhost:8096/<agent>/<spaceId>` with headers
+- **TencentDB Knowledge Plane (Hermes, PRD v10.1)**: the `memory_tencentdb`
+  MemoryProvider is seeded into both Hermes containers (Buzz front door +
+  gateway) and connects to the containerized MemoryCore gateway
+  (`tencentdb-core:8420`; gateway key = `TENCENTDB_GATEWAY_API_KEY`). Memory
+  scope: team `opc`; agent id = `hermes-front-door` (front door) or the active
+  Hermes profile (gateway workers — per-profile memory via `agent_identity`).
+  Create Team/Agent loadouts in the panel (http://localhost:8125) and confirm
+  `memory-tencentdb Gateway already running` in hermes/frontdoor logs.
+- **TencentDB memory for other coding agents** (Codex/Claude/… — PRD phase K3,
+  optional): point an agent's LLM base URL at the proxy
+  `http://localhost:8096/<agent>/<spaceId>` with headers
   `x-team-id` / `x-agent-id` / `x-task-id` (create Team/Agent/Task in the
-  panel first). E.g. for Hermes set `base_url: http://localhost:8096/hermes/<spaceId>`
-  in the profile config. See `upstream/tencentdb-agent-memory/INSTALL.md`.
+  panel first). See `upstream/tencentdb-agent-memory/INSTALL.md`.
 
 ## Nix-based persistent tools (hermes, buzz, paperclip — OS level)
 
