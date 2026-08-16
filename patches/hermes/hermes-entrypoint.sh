@@ -11,6 +11,13 @@ opc_nix_seed
 . /usr/local/bin/opc-gh-seed.sh
 opc_gh_seed
 
+# Paperclip board API key written by the paperclip-bootstrap one-shot
+# (compose PAPERCLIP_API_KEY env remains an override).
+if [ -f /keys/paperclip-api.key ]; then
+    export PAPERCLIP_API_KEY="$(cat /keys/paperclip-api.key)"
+    echo "[hermes] PAPERCLIP_API_KEY loaded from keys volume"
+fi
+
 HH="${HERMES_HOME:-/opt/data}"
 
 # TencentDB Knowledge Plane (PRD v10.1): sync the memory_tencentdb Hermes

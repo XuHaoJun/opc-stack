@@ -12,6 +12,12 @@ opc_nix_seed
 opc_gh_seed
 
 export BUZZ_PRIVATE_KEY="$(cat "${BUZZ_KEYS_DIR:-/keys}/agent.nsec")"
+# Paperclip board API key written by the paperclip-bootstrap one-shot
+# (compose PAPERCLIP_API_KEY env remains an override).
+if [ -f "${BUZZ_KEYS_DIR:-/keys}/paperclip-api.key" ]; then
+    export PAPERCLIP_API_KEY="$(cat "${BUZZ_KEYS_DIR:-/keys}/paperclip-api.key")"
+    echo "[frontdoor] PAPERCLIP_API_KEY loaded from keys volume"
+fi
 : "${BUZZ_RELAY_URL:=ws://buzz:3000}"
 : "${BUZZ_ACP_AGENT_COMMAND:=hermes}"
 : "${BUZZ_ACP_AGENT_ARGS:=acp}"

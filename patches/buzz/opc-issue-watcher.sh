@@ -100,8 +100,10 @@ watch() {
 sweep() {
     mkdir -p "$STATE_DIR"
     local company issues ids id channel pid
+    # Agent API keys answer /agents/me; board keys list /companies.
     company="$(api_get "/agents/me" | jq -r '.companyId // .company_id // empty' 2>/dev/null)"
-    [ -n "$company" ] || { log "sweep: no companyId from /agents/me"; exit 1; }
+    [ -n "$company" ] || company="$(api_get "/companies" | jq -r '.[0].id // empty' 2>/dev/null)"
+    [ -n "$company" ] || { log "sweep: no company resolvable (auth?)"; exit 1; }
     issues="$(api_get "/companies/$company/issues")"
     ids="$(printf '%s' "$issues" | jq -r '
         if type == "array" then .[]

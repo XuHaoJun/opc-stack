@@ -253,6 +253,7 @@ services:
       - hermes-data:/opt/data
       - hermes-nix:/nix
       - hermes-omp:/root/.omp
+      - opc-keys:/keys:ro
       - opc-gh-creds:/creds
     healthcheck:
       test: ["CMD-SHELL", "code=$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9119/); [ \"$$code\" = \"200\" ] || [ \"$$code\" = \"401\" ] || [ \"$$code\" = \"302\" ]"]
@@ -299,6 +300,25 @@ services:
       timeout: 10s
       retries: 60
       start_period: 90s
+
+  # First-boot bootstrap: admin (default creds) + company + executor agent +
+  # board API key (→ /keys/paperclip-api.key). Idempotent, one-shot.
+  paperclip-bootstrap:
+    image: ${IMAGE_PREFIX:-opc}/paperclip:local
+    restart: "no"
+    depends_on:
+      paperclip:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/opc-paperclip-bootstrap.sh"]
+    environment:
+      PAPERCLIP_API_URL: http://paperclip:3100
+      PAPERCLIP_ADMIN_EMAIL: ${PAPERCLIP_ADMIN_EMAIL:-admin@opc.local}
+      PAPERCLIP_ADMIN_PASSWORD: ${PAPERCLIP_ADMIN_PASSWORD:?set in .env}
+      PAPERCLIP_ADMIN_NAME: ${PAPERCLIP_ADMIN_NAME:-Admin}
+      PAPERCLIP_COMPANY_NAME: ${PAPERCLIP_COMPANY_NAME:-OPC}
+      PAPERCLIP_EXECUTOR_AGENT_NAME: ${PAPERCLIP_EXECUTOR_AGENT_NAME:-OMP Engineer}
+    volumes:
+      - opc-keys:/keys
 
   # ══════════════════════════ TencentDB-Agent-Memory ══════════════════════════
   tencentdb-core:

@@ -19,12 +19,17 @@ set in this container).
 
 | Action | Command |
 |---|---|
-| Find your company id | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/agents/me"` → `.companyId` |
-| Create issue | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"title":"...","description":"...","priority":"medium"}' "$PAPERCLIP_API_URL/api/companies/<companyId>/issues"` |
+| Find your company id | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies"` → `[0].id` (board key; agent keys: `/api/agents/me` → `.companyId`) |
+| Create issue | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"title":"...","description":"...","priority":"medium","assigneeAgentId":"<executor-agent-id>"}' "$PAPERCLIP_API_URL/api/companies/<companyId>/issues"` |
 | Get issue | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>"` → `.status`, `.title` |
 | Add comment | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"body":"..."}' "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | List comments | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | Set status | `curl -fsS -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"status":"done"}' "$PAPERCLIP_API_URL/api/issues/<issueId>"` |
+| Find executor agent | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies/<companyId>/agents"` → find the agent named `OMP Engineer`, take `.id` |
+
+The API key is a board key auto-created by the stack bootstrap (authenticates
+as the admin user). Assign every development issue to the executor agent
+(`assigneeAgentId` above) so Paperclip's heartbeat wakes it.
 
 Issue statuses: `backlog | todo | in_progress | in_review | done | blocked | cancelled`.
 List issues (for progress checks): `GET /api/companies/<companyId>/issues`.

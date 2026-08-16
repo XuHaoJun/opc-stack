@@ -89,7 +89,7 @@ install). Any OpenAI-compatible endpoint works for every project above.
 
 | Project | URL | What you do there |
 |---|---|---|
-| **Paperclip** | http://localhost:3100 | First boot shows a **Claim** flow → create admin → sign in → create your first company. Then Agents → add a **Hermes Gateway** agent: `apiBaseUrl: http://hermes:8642`, `apiKey: <HERMES_API_SERVER_KEY from .env>`. |
+| **Paperclip** | http://localhost:3100 | Auto-bootstrapped by the `paperclip-bootstrap` one-shot: first admin (log in with `PAPERCLIP_ADMIN_EMAIL` / `PAPERCLIP_ADMIN_PASSWORD` from `.env`), default company, the OMP executor agent, and the frontdoor API key (written to the keys volume — no manual step). Then, optionally, Agents → add a **Hermes Gateway** agent: `apiBaseUrl: http://hermes:8642`, `apiKey: <HERMES_API_SERVER_KEY from .env>`. |
 | **Hermes dashboard** | http://localhost:9119 | Basic auth: `HERMES_DASHBOARD_USERNAME` / `HERMES_DASHBOARD_PASSWORD` from `.env`. Create profiles, set model/provider, browse Kanban (disabled by config in this stack). |
 | **Hermes API server** | http://localhost:8642 | OpenAI-compatible gateway (`API_SERVER_KEY`). Swagger under `/docs` if exposed. |
 | **Buzz** | http://localhost:3000 | Git repos browser (`BUZZ_SERVE_GIT_WEB_GUI`). Buzz's real surface is the **desktop app**: download Buzz Desktop, add workspace `ws://<this-machine-LAN-IP>:3000`, then ask the owner for an invite code (relay is closed by default — see below). |
@@ -154,10 +154,7 @@ Setup (one-time):
 
 1. **Host prereqs**: `~/.ssh` (config + keys), `~/.config/gh` (logged in,
    `gh auth status`), `~/.gitconfig` (`[user] name/email`).
-2. **Paperclip API key**: Paperclip → Settings → API keys → create an agent
-   key (scoped to the frontdoor agent). Put it in `.env` as
-   `PAPERCLIP_API_KEY=…`, then `docker compose up -d hermes frontdoor`.
-3. **Sync credentials** (any time they change on the host):
+2. **Sync credentials** (any time they change on the host):
    ```bash
    scripts/sync-gh-creds.sh
    ```
@@ -165,6 +162,10 @@ Setup (one-time):
    named volume (mounted at `/creds` in paperclip/hermes/frontdoor); rewrites
    ssh `IdentityFile` paths to the container layout and pre-seeds the
    `github.com` host key. Re-run after key/token changes — no rebuild needed.
+
+The Paperclip admin/company/executor agent/API key are created automatically
+by the `paperclip-bootstrap` one-shot (see Setup pages above); the frontdoor
+and hermes entrypoints load `PAPERCLIP_API_KEY` from the keys volume at boot.
 
 How it works: entrypoints set `GIT_SSH_COMMAND` / `GH_CONFIG_DIR` /
 `GIT_CONFIG_GLOBAL` from `/creds` (paperclip's omp inherits them), the
