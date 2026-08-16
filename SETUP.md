@@ -64,11 +64,12 @@ The raw engine, for scripted/CI use:
 ## LLM provider: OpenCode Go (default)
 
 The stack ships pre-configured for **OpenCode Go** (`https://opencode.ai/zen/go/v1`,
-model `deepseek-v4-pro`). Set `OPENCODE_API_KEY` in `.env` and everything uses it:
+default model `deepseek-v4-flash`, override via `OPENCODE_GO_MODEL` in `.env`). Set
+`OPENCODE_API_KEY` in `.env` and everything uses it:
 
 | Project | Where the model/key is configured | UI-editable? |
 |---|---|---|
-| Hermes (gateway + front door) | config.yaml seeded to `provider: custom`, `base_url: opencode.ai/zen/go/v1`, `default: deepseek-v4-pro`; key via `OPENAI_API_KEY` (= your `OPENCODE_API_KEY`) | **Yes — dashboard http://localhost:9119 → config/model pages** |
+| Hermes (gateway + front door) | config.yaml seeded to `provider: custom`, `base_url: opencode.ai/zen/go/v1`, `default: deepseek-v4-flash`; key via `OPENAI_API_KEY` (= your `OPENCODE_API_KEY`) | **Yes — dashboard http://localhost:9119 → config/model pages** |
 | Paperclip | Agents use the Hermes Gateway adapter → model lives in Hermes | Agent adapter fields in the Paperclip UI |
 | TencentDB memory | `TDAI_LLM_*` / `LLM_*` / proxy upstream — all default to OpenCode Go | Panel has ApiKeys + knowledge LLM-binding pages; core extraction follows env |
 | Buzz | None needed | — |

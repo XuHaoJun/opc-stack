@@ -31,7 +31,7 @@ fi
 
 if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
-    cat > "$HH/config.yaml" <<'YAML'
+    cat > "$HH/config.yaml" <<YAML
 agent:
   disabled_toolsets:
     - kanban
@@ -48,10 +48,17 @@ memory:
   provider: memory_tencentdb
 model:
   provider: custom
-  base_url: https://opencode.ai/zen/go/v1
-  default: deepseek-v4-pro
+  base_url: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+  default: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}
 YAML
-    echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=OpenCode Go)"
+    echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENCODE_GO_MODEL:-deepseek-v4-flash})"
+fi
+
+# Refresh seeded model lines on existing volumes that still carry the legacy
+# hardcoded default (config.yaml is dashboard-editable afterwards; only the
+# exact legacy values are rewritten, not user edits).
+if [ -f "$HH/config.yaml" ]; then
+    sed -i "s|^  default: deepseek-v4-pro$|  default: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}|; s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}|" "$HH/config.yaml"
 fi
 
 : "${OPENAI_API_KEY:=$OPENCODE_API_KEY}"

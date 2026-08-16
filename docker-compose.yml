@@ -177,6 +177,8 @@ services:
       OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
       OPENAI_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}
+      OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -221,6 +223,8 @@ services:
       OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
       OPENAI_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}
+      OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -295,7 +299,7 @@ services:
       TDAI_SKILL_ENABLED: "true"
       TDAI_LLM_API_KEY: ${OPENCODE_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
       TDAI_LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}
-      TDAI_LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENCODE_GO_MODEL:-deepseek-v4-pro}}
+      TDAI_LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENCODE_GO_MODEL:-deepseek-v4-flash}}
     ports:
       - "${TENCENTDB_CORE_PORT:-8420}:8420"
     volumes:
@@ -349,7 +353,7 @@ services:
       LLM_PROTOCOL: openai
       LLM_API_KEY: ${OPENCODE_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
       LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}
-      LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENCODE_GO_MODEL:-deepseek-v4-pro}}
+      LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENCODE_GO_MODEL:-deepseek-v4-flash}}
     ports:
       - "${TENCENTDB_PANEL_PORT:-8125}:8125"
       - "${TENCENTDB_KNOWLEDGE_PORT:-8424}:8424"

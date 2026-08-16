@@ -39,12 +39,18 @@ opc_nix_seed() {
     _omp_cfg="${OMP_CONFIG_DIR:-${HOME:-/root}/.omp}/agent/config.yml"
     if [ ! -f "$_omp_cfg" ]; then
         mkdir -p "$(dirname "$_omp_cfg")"
-        cat > "$_omp_cfg" <<'YAML'
+        cat > "$_omp_cfg" <<YAML
 modelRoles:
-  default: opencode-go/deepseek-v4-pro
+  default: opencode-go/${OPENCODE_GO_MODEL:-deepseek-v4-flash}
 startup:
   quiet: true
 YAML
-        echo "[nix] seeded omp config: model=opencode-go/deepseek-v4-pro"
+        echo "[nix] seeded omp config: model=opencode-go/${OPENCODE_GO_MODEL:-deepseek-v4-flash}"
+    fi
+
+    # Refresh a legacy hardcoded model left in an existing omp config (seeded
+    # by an older image) — exact-value match only, never user edits.
+    if [ -f "$_omp_cfg" ]; then
+        sed -i "s|default: opencode-go/deepseek-v4-pro$|default: opencode-go/${OPENCODE_GO_MODEL:-deepseek-v4-flash}|" "$_omp_cfg" 2>/dev/null || true
     fi
 }
