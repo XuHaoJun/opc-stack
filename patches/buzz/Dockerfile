@@ -20,6 +20,10 @@ ARG DEBIAN_VERSION=bookworm
 
 ARG EXTRA_CA_CERTS=
 ARG NPM_REGISTRY=
+# Shared nix seed image (compose passes the IMAGE_PREFIX-qualified name).
+# Declared globally so FROM ${NIX_SEED_IMAGE} expands; the `nix-seed` stage
+# below materializes it for COPY --from (which cannot expand variables).
+ARG NIX_SEED_IMAGE=opc/nix-seed:local
 
 # ─── Stage 1: cargo-chef base ───────────────────────────────────────────────
 FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS chef
@@ -121,6 +125,11 @@ EXPOSE 3000 8080 9102
 RUN mkdir -p /data/git && chown buzz:buzz /data/git
 
 # ─── Stage 6: relay + tooling image (OPC) ───────────────────────────────────
+# Seed image alias: COPY --from cannot expand variables (BuildKit), so the
+# global NIX_SEED_IMAGE ARG (compose passes the IMAGE_PREFIX-qualified name)
+# is materialized as a stage and copied from by name.
+FROM ${NIX_SEED_IMAGE} AS nix-seed
+
 FROM runtime-base AS opc-relay
 COPY --from=stripped-binaries /build/target/release/buzz-relay /usr/local/bin/buzz-relay
 COPY --from=stripped-binaries /build/target/release/buzz-admin /usr/local/bin/buzz-admin
@@ -129,6 +138,7 @@ COPY --from=stripped-binaries /build/target/release/buzz-acp /usr/local/bin/buzz
 COPY --from=stripped-binaries /build/target/release/buzz /usr/local/bin/buzz
 # OPC tooling: nix seed helpers + entrypoints.
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/opc-issue-watcher.sh /usr/local/bin/opc-issue-watcher.sh
 COPY opc/buzz-entrypoint.sh /usr/local/bin/buzz-entrypoint.sh
@@ -136,31 +146,29 @@ COPY opc/frontdoor-entrypoint.sh /usr/local/bin/frontdoor-entrypoint.sh
 COPY opc/opc-register-agent.sh /usr/local/bin/opc-register-agent.sh
 COPY opc/generate-keys.sh /usr/local/bin/opc-generate-keys.sh
 COPY opc/add-member.sh /usr/local/bin/opc-add-member.sh
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-gh-seed.sh \
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
+             /usr/local/bin/opc-gh-seed.sh \
              /usr/local/bin/opc-issue-watcher.sh /usr/local/bin/buzz-entrypoint.sh \
              /usr/local/bin/frontdoor-entrypoint.sh /usr/local/bin/opc-generate-keys.sh \
              /usr/local/bin/opc-add-member.sh
 
-# Single-user Nix (static binary). The whole /nix tree is duplicated to
-# /nix-seed so the empty-volume case can be seeded at first boot.
+# Shared seed (nix + 9 tools) built once in patches/nix-seed (compose
+# service `nix-seed`); a tool-list change rebuilds only that image.
 RUN groupadd -r nixbld \
     && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \
     && gpasswd -a nixbld1 nixbld \
-    && mkdir -m 0755 /nix \
-    && HOME=/root sh -c 'curl -fsSL https://nixos.org/nix/install -o /tmp/nix-install.sh \
-        && sh /tmp/nix-install.sh --no-daemon --yes \
-        && rm -f /tmp/nix-install.sh' \
-    && mkdir -p /nix/etc/nix \
-    && printf 'experimental-features = nix-command flakes\nsandbox = false\naccept-flake-config = true\n' > /nix/etc/nix/nix.conf \
-        nix --extra-experimental-features 'nix-command flakes' \
-        profile install --profile /nix/var/nix/profiles/per-user/root/profile \
-        nixpkgs#ripgrep nixpkgs#jq nixpkgs#fd nixpkgs#htop nixpkgs#bat \
-    && cp -a /nix /nix-seed
+    && mkdir -m 0755 /nix
+COPY --from=nix-seed /nix-seed /nix-seed
 
 ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/default/bin:${PATH}" \
     NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root" \
     NIX_USER_CONF_FILES="/nix/etc/nix/nix.conf" \
     NIX_SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+
+# mise-managed toolchains live on the persistent *-mise volume (opc-mise-seed.sh).
+ENV MISE_DATA_DIR=/opt/mise \
+    MISE_CACHE_DIR=/opt/mise/cache \
+    MISE_CONFIG_DIR=/opt/mise/config
 
 WORKDIR /var/lib/buzz
 ENTRYPOINT ["/usr/local/bin/buzz-entrypoint.sh"]
