@@ -6,7 +6,7 @@
 
 **Architecture:** `patches/nix-seed/Dockerfile` 是唯一 nix install 處 (pin nix 2.35.2 + nixpkgs 8be7bd0c83f1 + 9 工具, `cp -al` hardlink seed); buzz/hermes/paperclip 三 Dockerfile 的 1.02–1.45GB nix RUN 換成 `COPY --from=opc/nix-seed:local /nix-seed /nix-seed`。mise binary 從 nix profile 來, toolchain data 在 per-container `*-mise:/opt/mise` volume, entrypoint source 的 `opc-mise-seed.sh` 空狀態自動 `mise use -g node@lts` + `rust@stable`。PATH 尾掛 mise shims → hermes/paperclip 的 baked node 不受影響。
 
-**Tech Stack:** Docker multi-stage, docker compose 5.x (build.depends_on), nix 2.35.2, mise (node/rustup backend), shell (POSIX sh entrypoints)。
+**Tech Stack:** Docker multi-stage, docker compose 5.x (service-level depends_on (nix-seed: condition service_completed_successfully)), nix 2.35.2, mise (node/rustup backend), shell (POSIX sh entrypoints)。
 
 ## Global Constraints
 
@@ -120,14 +120,14 @@ git commit -m "feat: shared nix-seed image — pinned nix 2.35.2 + 8 tools (rg/j
 
 ---
 
-### Task 2: compose — nix-seed service + build.depends_on + mise volumes
+### Task 2: compose — nix-seed service + depends_on + mise volumes
 
 **Files:**
 - Modify: `docker-compose.yml`
 
 **Interfaces:**
 - Consumes: Task 1 的 `opc/nix-seed:local` image tag。
-- Produces: compose service `nix-seed` (one-shot); 5 個 build service 的 `build.depends_on: [nix-seed]`; 4 個 `*-mise:/opt/mise` volume mount + 宣告。Task 3-5 build 時透過 compose 拿到 seed image。
+- Produces: compose service `nix-seed` (one-shot); 5 個 build service 的 service-level `depends_on: { nix-seed: { condition: service_completed_successfully } }` (注意: `build.depends_on` 不是有效的 Compose key — 2026-08-17 驗證 compose 5.4 schema 拒絕; 用 service-level depends_on 保證 start 順序, build 順序靠 seed image 已存在或 `docker compose build --with-dependencies <svc>`); 4 個 `*-mise:/opt/mise` volume mount + 宣告。Task 3-5 build 時透過 compose 拿到 seed image。
 
 - [ ] **Step 1: Add nix-seed service** (放在 `buzz-keys` 之前, 仿 one-shot 模式)
 
@@ -144,19 +144,20 @@ git commit -m "feat: shared nix-seed image — pinned nix 2.35.2 + 8 tools (rg/j
     command: ["true"]
 ```
 
-- [ ] **Step 2: Add build.depends_on + NIX_SEED_IMAGE arg to the 5 build services**
+- [ ] **Step 2: Add service-level depends_on + NIX_SEED_IMAGE arg to the 5 build services**
 
-`buzz-keys`、`buzz`、`frontdoor` (三個同 context `./upstream/buzz`) 與 `hermes`、`paperclip` 的 build 區塊各加:
+`buzz-keys`、`buzz`、`frontdoor` (三個同 context `./upstream/buzz`) 與 `hermes`、`paperclip` 各加 build args, 以及 service 層級 depends_on (放在 service 的 `depends_on:` 區塊, 與既有 depends_on 並列):
 ```yaml
     build:
       context: ./upstream/<proj>
       dockerfile: opc/Dockerfile
-      depends_on:
-        - nix-seed
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
+    depends_on:
+      nix-seed:
+        condition: service_completed_successfully
 ```
-(frontdoor 保留原 target/無 target; buzz-keys/buzz 保留 `target: opc-relay`。)
+(frontdoor 保留原 target/無 target; buzz-keys/buzz 保留 `target: opc-relay`。注意: `build.depends_on` 不是有效 Compose key — 用 service-level depends_on; `docker compose build <svc>` 不會自動建 seed, 但 seed image 已在 Task 1 建立, fresh machine 用 `docker compose build --with-dependencies <svc>` 或先 `docker compose build nix-seed`。)
 
 - [ ] **Step 3: Add mise volumes 到 4 個 service** (`buzz`、`frontdoor`、`hermes`、`paperclip` 的 volumes 區塊各加一行)
 
@@ -189,7 +190,7 @@ Expected: CONFIG-OK, SEED-BUILD-OK (layer cache 命中 Task 1, 秒級)。
 
 ```bash
 git add docker-compose.yml
-git commit -m "feat: compose — nix-seed one-shot service, build.depends_on, *-mise volumes"
+git commit -m "feat: compose — nix-seed one-shot service, depends_on, *-mise volumes"
 ```
 
 ---
