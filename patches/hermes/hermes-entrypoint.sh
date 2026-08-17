@@ -40,6 +40,12 @@ if [ -d "$MP_SRC" ]; then
     mkdir -p "$HH/plugins"
     rm -rf "$MP_DST"
     cp -r "$MP_SRC" "$MP_DST"
+    # Runtime user must own the seeded tree: s6 stage2 only chowns when the
+    # top-level $HERMES_HOME owner is wrong (it isn't — /opt/data is already
+    # the runtime uid), so root-owned plugins/skills would survive boot. Then
+    # the dashboard shows no skills and skill-hub ops EACCES (bundled-skill
+    # sync also fails to write into root-owned skills/).
+    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/plugins" 2>/dev/null || true
     echo "[hermes] synced memory provider: memory_tencentdb"
 fi
 
@@ -50,6 +56,9 @@ if [ -d "$SK_SRC" ]; then
     mkdir -p "$HH/skills"
     rm -rf "$SK_DST"
     cp -r "$SK_SRC" "$SK_DST"
+    # See MP block above: hermes runtime must own skills/ to run the
+    # bundled-skill sync and the skill hub (.hub/lock.json).
+    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/skills" 2>/dev/null || true
     echo "[hermes] synced skill: paperclip-api"
 fi
 

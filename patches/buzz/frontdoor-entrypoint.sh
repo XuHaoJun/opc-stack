@@ -16,6 +16,17 @@ opc_mise_seed
 opc_gh_seed
 
 export BUZZ_PRIVATE_KEY="$(cat "${BUZZ_KEYS_DIR:-/keys}/agent.nsec")"
+# ACP observer frames (the desktop's live agent transcript) are encrypted to
+# the agent owner. The owner is the human who owns the agent (set via
+# BUZZ_ACP_AGENT_OWNER in .env / compose, matching the relay's
+# agent_owner_pubkey); fall back to the relay/owner key when unset. Without
+# an owner, buzz-acp logs "relay observer requested but no agent owner was
+# resolved" and never publishes frames — the desktop shows "No ACP activity
+# yet" while the agent works (BUZZ_ACP_RELAY_OBSERVER=true is set in compose).
+if [ -z "${BUZZ_ACP_AGENT_OWNER:-}" ] && [ -f "${BUZZ_KEYS_DIR:-/keys}/relay.pub" ]; then
+    export BUZZ_ACP_AGENT_OWNER="$(cat "${BUZZ_KEYS_DIR:-/keys}/relay.pub")"
+    echo "[frontdoor] ACP agent owner fallback: ${BUZZ_ACP_AGENT_OWNER}"
+fi
 # Paperclip board API key written by the paperclip-bootstrap one-shot
 # (compose PAPERCLIP_API_KEY env remains an override).
 if [ -f "${BUZZ_KEYS_DIR:-/keys}/paperclip-api.key" ]; then
@@ -50,6 +61,10 @@ if [ -d "$MP_SRC" ]; then
     mkdir -p "$HH/plugins"
     rm -rf "$MP_DST"
     cp -r "$MP_SRC" "$MP_DST"
+    # Runtime user must own the seeded tree: the shared $HERMES_HOME lives
+    # with the hermes runtime (uid HERMES_UID/10000); root-owned plugins/
+    # skills make the dashboard show no skills and skill-hub ops EACCES.
+    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/plugins" 2>/dev/null || true
     echo "[frontdoor] synced memory provider: memory_tencentdb"
 fi
 
@@ -108,6 +123,9 @@ if [ -d "$SK_SRC" ]; then
     mkdir -p "$HH/skills"
     rm -rf "$SK_DST"
     cp -r "$SK_SRC" "$SK_DST"
+    # See MP block above: hermes runtime must own skills/ to run the
+    # bundled-skill sync and the skill hub (.hub/lock.json).
+    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/skills" 2>/dev/null || true
     echo "[frontdoor] synced skill: paperclip-api"
 fi
 

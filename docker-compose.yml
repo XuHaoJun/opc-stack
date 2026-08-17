@@ -197,6 +197,16 @@ services:
       # the desktop's mention autocomplete labels relay agents "not in channel"
       # even when they are members, which blocks mention-tag insertion.
       BUZZ_ACP_NO_MENTION_FILTER: "true"
+      # Publish encrypted ACP observer frames over the relay. Without this the
+      # Buzz desktop shows the agent as "working" (typing indicators) but its
+      # ACP activity panel stays "No ACP activity yet" — the live transcript
+      # is fed by these frames, and buzz-acp defaults relay_observer=false.
+      BUZZ_ACP_RELAY_OBSERVER: "true"
+      # Recipient of those frames: the owner's pubkey (set in .env — the
+      # human who owns the agent, per the relay's agent_owner_pubkey). The
+      # desktop must sign in with this key to decrypt. Entrypoint falls back
+      # to /keys/relay.pub when unset.
+      BUZZ_ACP_AGENT_OWNER: ${BUZZ_ACP_AGENT_OWNER:-}
       # Expose the ACP agent's chain-of-thought: buzz-acp only debug-logs
       # `agent_thought_chunk` updates (target `acp::thought`) and never relays
       # them, so the default `buzz_acp=info` filter hides thinking. The
