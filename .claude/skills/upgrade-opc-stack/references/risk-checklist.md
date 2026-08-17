@@ -31,7 +31,7 @@ dependents; `docker compose stop` also stops dependencies):
 | Component | Scheme | Example (current) | Classification |
 |---|---|---|---|
 | buzz | `desktop-vX.Y.Z` | `desktop-v0.5.14` | strip `desktop-v` → semver |
-| hermes | `vYYYY.M.D` (date) | `v2026.8.13` (= v0.20.1) | date-based; check embedded version (`pyproject.toml` at tag) |
+| hermes | `vYYYY.M.D` (date) | `v2026.8.16` (= v0.20.2) | date-based; check embedded version (`pyproject.toml` at tag) |
 | paperclip | `canary/vYYYY.MDD.N-canary.K` or stable `v…` | `canary/v2026.722.1-canary.0` | canary = pre-release |
 | tencentdb | `vX.Y.Z[-beta.N]` | `v2.0.0` | semver + prerelease |
 

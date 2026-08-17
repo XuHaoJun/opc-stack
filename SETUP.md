@@ -104,7 +104,7 @@ install). Any OpenAI-compatible endpoint works for every project above.
 | Project | Repo | Tag |
 |---|---|---|
 | Buzz | block/buzz | desktop-v0.5.14 |
-| Hermes | NousResearch/hermes-agent | v2026.8.13 (= v0.20.1) |
+| Hermes | NousResearch/hermes-agent | v2026.8.16 (= v0.20.2) |
 | Paperclip | paperclipai/paperclip | canary/v2026.722.1-canary.0 |
 | TencentDB-Agent-Memory | TencentCloud/TencentDB-Agent-Memory | v2.0.0 (branch feat/server_team) |
 
