@@ -15,6 +15,13 @@
 # and applies the hermes default env (HERMES_ACP_SKIP_CONFIGURED_MCP=1).
 : "${HERMES_UID:=10000}"
 : "${HERMES_GID:=10000}"
+# The agent needs a writable HOME (/root is root-owned in this image), so
+# point it at the shared home — matching the hermes image where the hermes
+# user's home IS /opt/data. Set here, NOT in the entrypoint: entrypoint
+# seeds (nix .nix-profile symlink, omp config) must stay at /root, because
+# the dashboard's managed-files view resolves every entry under /opt/data
+# and 403s anything escaping it ("Path outside managed files root").
+export HOME="${HERMES_HOME:-/opt/data}"
 # --clear-groups (not --init-groups): the buzz image has no passwd entry for
 # uid 10000, and setpriv's initgroups lookup refuses unknown users.
 exec setpriv --reuid="$HERMES_UID" --regid="$HERMES_GID" --clear-groups \

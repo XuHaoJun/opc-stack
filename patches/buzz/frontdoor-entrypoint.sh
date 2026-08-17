@@ -5,12 +5,6 @@
 # only durable work plane) and model = OpenCode Go, then execs buzz-acp.
 set -eu
 
-# The ACP agent (and its terminal tool children) run as the hermes runtime
-# uid (HERMES_UID/10000) — the same identity as hermes-dashboard on the
-# shared home. Point HOME at that home so the nix/omp seeds below and tool
-# subprocesses (git, node, playwright) land somewhere the agent can write.
-export HOME="${HERMES_HOME:-/opt/data}"
-
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
@@ -80,6 +74,21 @@ chmod +x /usr/local/bin/buzz
 echo "[frontdoor] buzz wrapper installed (agent identity for CLI)"
 
 HH="${HERMES_HOME:-/opt/data}"
+
+# The ACP agent runs with HOME=$HERMES_HOME (set in opc-hermes-acp.sh), so
+# its omp config must live in the home: the nix seed writes /root/.omp
+# (entrypoint HOME) which the agent cannot see. Seed once, like the nix
+# seed does; the final whole-home chown below fixes ownership.
+if [ ! -f "$HH/.omp/agent/config.yml" ]; then
+    mkdir -p "$HH/.omp/agent"
+    cat > "$HH/.omp/agent/config.yml" <<YAML
+modelRoles:
+  default: opencode-go/${OPENCODE_GO_MODEL:-deepseek-v4-flash}
+startup:
+  quiet: true
+YAML
+    echo "[frontdoor] seeded $HH/.omp/agent/config.yml (omp model=${OPENCODE_GO_MODEL:-deepseek-v4-flash})"
+fi
 
 # Runtime-uid key copy for the buzz wrapper: /keys is mounted read-only, so
 # the agent's terminal children (uid 10000) cannot read the 600-root key
