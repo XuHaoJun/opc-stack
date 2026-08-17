@@ -69,7 +69,10 @@ RUN pnpm install --frozen-lockfile
 FROM base AS build
 WORKDIR /app
 COPY --from=deps /app /app
-COPY . .
+# opc/ (OPC overlay, synced from patches/) is copied explicitly in the
+# production stage; excluding it keeps entrypoint/script edits from
+# invalidating the pnpm build cache.
+COPY --exclude=opc . .
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build

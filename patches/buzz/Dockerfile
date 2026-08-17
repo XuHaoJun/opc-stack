@@ -40,7 +40,10 @@ WORKDIR /build
 
 # ─── Stage 2: plan dependency graph ─────────────────────────────────────────
 FROM chef AS planner
-COPY . .
+# opc/ (OPC overlay, synced from patches/) is copied explicitly in the
+# runtime stage; excluding it keeps entrypoint/script edits from
+# invalidating the planner/builder cache layers.
+COPY --exclude=opc . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ─── Stage 3: cook dependencies, then build the binaries ────────────────────
@@ -56,7 +59,7 @@ RUN apt-get update \
 ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
-COPY . .
+COPY --exclude=opc . .
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay \

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # OPC stack image for Hermes Agent — adapted from the upstream Dockerfile
 # (NousResearch/hermes-agent @ tag v2026.8.13, version 0.20.1).
 # Changes vs upstream:
@@ -165,7 +166,10 @@ COPY apps/shared/ apps/shared/
 RUN cd web && npm run build && \
     cd ../ui-tui && npm run build
 
-COPY --link --chmod=a+rX,go-w . .
+# opc/ (OPC overlay, synced from patches/) is copied explicitly below;
+# excluding it keeps entrypoint/script edits from invalidating the
+# `uv pip install -e .` layer.
+COPY --link --chmod=a+rX,go-w --exclude=opc . .
 
 RUN uv pip install --no-cache-dir --no-deps -e "."
 
