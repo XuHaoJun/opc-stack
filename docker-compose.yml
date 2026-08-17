@@ -92,6 +92,26 @@ services:
       - ./scripts/hooks/ssh.sh:/hooks/ssh.sh:ro
       - ./scripts/hooks/gitconfig.sh:/hooks/gitconfig.sh:ro
 
+  # Second host-sync instance: mirrors ONLY ~/.claude/.credentials.json into
+  # the prototyper agent's home volume, so paperclip's claude_local adapter
+  # can use the host's Claude subscription. Deliberately NOT ~/.claude
+  # wholesale — settings.json (host hooks), plugins/, skills/, projects/ and
+  # history stay on the host so the container's Claude is clean (see
+  # scripts/hooks/claude-cred.sh). Unlike the gh instance this one is
+  # non-fatal: no Claude login just means claude_local is unavailable, and
+  # omp (the primary engine) is unaffected.
+  host-sync-claude:
+    image: alpine:3.20
+    restart: "no"
+    entrypoint: ["sh", "/worker.sh"]
+    environment:
+      HOST_SYNC_SOURCES: "claude-cred"
+    volumes:
+      - opc-prototyper-home:/dst
+      - ${HOME}/.claude/.credentials.json:/src/claude-cred:ro
+      - ./scripts/host-sync-worker.sh:/worker.sh:ro
+      - ./scripts/hooks/claude-cred.sh:/hooks/claude-cred.sh:ro
+
   # Generates relay/owner + front-door agent Nostr keys into the shared
   # opc-keys volume (idempotent, one-shot).
   buzz-keys:
@@ -449,6 +469,10 @@ services:
       # from the paperclip work plane — same rationale as frontdoor).
       host-sync:
         condition: service_completed_successfully
+      # Claude Code credential for the prototyper agent's home (non-fatal:
+      # the one-shot exits 0 even with no host login).
+      host-sync-claude:
+        condition: service_completed_successfully
     environment:
       HOST: 0.0.0.0
       PORT: "3100"
@@ -474,6 +498,12 @@ services:
       - paperclip-nix:/nix
       - paperclip-mise:/opt/mise
       - opc-gh-creds:/creds
+      # HOME for the prototyper agent (adapterConfig env.HOME). Holds only
+      # .claude/.credentials.json + a minimal .claude.json; the agent's own
+      # Claude state (sessions, projects) accumulates here and survives
+      # re-syncs. Named by role, not engine — swapping claude→omp later
+      # keeps the same home.
+      - opc-prototyper-home:/agent-homes/prototyper
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -614,6 +644,7 @@ services:
 volumes:
   opc-keys:
   opc-gh-creds:
+  opc-prototyper-home:
   buzz-pgdata:
   buzz-redisdata:
   buzz-miniodata:

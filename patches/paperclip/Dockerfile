@@ -114,10 +114,11 @@ EXPOSE 3100
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
 COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
+COPY opc/opc-claude-seed.sh /usr/local/bin/opc-claude-seed.sh
 COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
-             /usr/local/bin/opc-gh-seed.sh \
+             /usr/local/bin/opc-gh-seed.sh /usr/local/bin/opc-claude-seed.sh \
              /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh
 
 # Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
