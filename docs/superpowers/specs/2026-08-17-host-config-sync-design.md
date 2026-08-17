@@ -57,10 +57,11 @@ compose service: host-sync (取代 gh-creds-sync; 4 消費者 depends_on 同步�
 ```
 host-sync.sh --volume <compose-key> \
              --src <name>=<hostpath>... \
-             [--hook <name>=<script>...] [--stdin <name>]
+             [--hook <name>=<script>...]
 ```
 
 - Worker 的寫入 target 固定 `/dst` — CLI 把 volume 掛在 `/dst` (throwaway 容器內部), 消費者掛 volume 的位置 (`/creds`) 由消費者自己決定, 與此無關。
+- stdin 直接穿透給容器 (wrapper 把 `ssh-keyscan github.com` pipe 進來; ssh hook 在 known_hosts 缺 github.com 時才讀)。CLI 偵測 TTY 時餵 `/dev/null`, 避免 hook 的 `cat` 卡在互動輸入。
 - `--volume` 用 compose 解析 project prefix (沿用現行 `opc_opc-gh-creds` 解析邏輯)。
 - 組 binds: `volume:target`、各 `hostpath:/src/<name>:ro`、各 hook `script:/hooks/<name>.sh:ro`、worker `/worker.sh:ro`。
 - `docker run --rm -i alpine:3.20 sh /worker.sh`; `--stdin <name>` 時把該 hook 的 stdin 餵給容器 (keyscan 用途 — worker 原樣轉交, 只有對應 hook 讀)。
@@ -71,13 +72,12 @@ host-sync.sh --volume <compose-key> \
 薄參數組呼叫 `host-sync.sh`:
 
 ```
-host-sync.sh --volume opc-gh-creds \
+ssh-keyscan github.com | host-sync.sh --volume opc-gh-creds \
   --src ssh=$HOME/.ssh --src gh=$HOME/.config/gh --src gitconfig=$HOME/.gitconfig \
-  --hook ssh=scripts/hooks/ssh.sh --hook gitconfig=scripts/hooks/gitconfig.sh \
-  --stdin ssh
+  --hook ssh=scripts/hooks/ssh.sh --hook gitconfig=scripts/hooks/gitconfig.sh
 ```
 
-(keyscan `ssh-keyscan github.com` 在 wrapper 側產生, 走 `--stdin ssh`。) 保留手動重同步語義與錯誤訊息。
+(keyscan `ssh-keyscan github.com` 在 wrapper 側產生, pipe 進 CLI 走 stdin 穿透。) 保留手動重同步語義與錯誤訊息。
 
 ### Compose (`host-sync` service)
 

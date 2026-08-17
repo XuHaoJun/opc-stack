@@ -1,8 +1,9 @@
 #!/bin/sh
 # opc-gh-seed.sh — source from an OPC entrypoint.
 #
-# Points git/ssh/gh at the opc-gh-creds volume (/creds) populated by
-# scripts/sync-gh-creds.sh on the host. Env-based so it works for any
+# Points git/ssh/gh at the opc-gh-creds volume (/creds) populated by the
+# host-sync compose one-shot on every `up` (or scripts/sync-gh-creds.sh
+# after host credential changes). Env-based so it works for any
 # runtime uid (paperclip node/1000, hermes 10000, frontdoor root) without
 # guessing HOME. Idempotent; re-fixes key permissions every boot.
 opc_gh_seed() {

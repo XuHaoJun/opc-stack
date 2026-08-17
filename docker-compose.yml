@@ -66,6 +66,32 @@ services:
     restart: "no"
     command: ["true"]
 
+  # Mirrors declared host config sources into a named volume on every `up`
+  # (generic host-config-sync mechanism; see docs/superpowers/specs/
+  # 2026-08-17-host-config-sync-design.md). This instance syncs GitHub
+  # credentials (~/.ssh + ~/.config/gh + ~/.gitconfig) into opc-gh-creds, so
+  # `docker compose down -v` + `up -d` never leaves /creds empty (entrypoints
+  # point git/ssh/gh at /creds via env — an empty volume silently breaks git
+  # push / gh auth). Same worker as scripts/host-sync.sh; scripts/
+  # sync-gh-creds.sh stays for manual refresh after host credential changes
+  # (it also re-keyscans github.com, which this container-side path cannot).
+  # Host sources must exist — a missing bind source fails `up` loudly rather
+  # than syncing partial creds.
+  host-sync:
+    image: alpine:3.20
+    restart: "no"
+    entrypoint: ["sh", "/worker.sh"]
+    environment:
+      HOST_SYNC_SOURCES: "ssh gh gitconfig"
+    volumes:
+      - opc-gh-creds:/dst
+      - ${HOME}/.ssh:/src/ssh:ro
+      - ${HOME}/.config/gh:/src/gh:ro
+      - ${HOME}/.gitconfig:/src/gitconfig:ro
+      - ./scripts/host-sync-worker.sh:/worker.sh:ro
+      - ./scripts/hooks/ssh.sh:/hooks/ssh.sh:ro
+      - ./scripts/hooks/gitconfig.sh:/hooks/gitconfig.sh:ro
+
   # Generates relay/owner + front-door agent Nostr keys into the shared
   # opc-keys volume (idempotent, one-shot).
   buzz-keys:
@@ -187,6 +213,11 @@ services:
         condition: service_completed_successfully
       nix-seed:
         condition: service_completed_successfully
+      # Credentials for the agent's GitHub dev flow (git push / gh): the
+      # host-sync one-shot mirrors host ~/.ssh + ~/.config/gh +
+      # ~/.gitconfig into opc-gh-creds (/creds) on every up.
+      host-sync:
+        condition: service_completed_successfully
       # Key producers: paperclip-bootstrap writes /keys/paperclip-api.key and
       # tencentdb-bootstrap writes /keys/tencentdb-admin-user-id. Without
       # these, the entrypoint's key check races the one-shots on a fresh
@@ -283,6 +314,10 @@ services:
     depends_on:
       nix-seed:
         condition: service_completed_successfully
+      # GitHub credentials for the gateway's paperclip/gh dev flow (same
+      # rationale as frontdoor).
+      host-sync:
+        condition: service_completed_successfully
       # Key producers (same race as frontdoor): the gateway's paperclip skill
       # needs PAPERCLIP_API_KEY; memory writes need tencentdb-admin-user-id.
       paperclip-bootstrap:
@@ -355,6 +390,9 @@ services:
     # s6 main program; the supervised `dashboard` service does the real work
     # (same slot the gateway container uses for its own dashboard).
     command: ["sleep", "infinity"]
+    depends_on:
+      host-sync:
+        condition: service_completed_successfully
     environment:
       HERMES_HOME: /opt/data
       HERMES_DASHBOARD: "1"
@@ -406,6 +444,10 @@ services:
     restart: unless-stopped
     depends_on:
       nix-seed:
+        condition: service_completed_successfully
+      # GitHub credentials for the executor agent's dev flow (git push / gh
+      # from the paperclip work plane — same rationale as frontdoor).
+      host-sync:
         condition: service_completed_successfully
     environment:
       HOST: 0.0.0.0

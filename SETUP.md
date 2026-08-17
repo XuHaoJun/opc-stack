@@ -180,14 +180,17 @@ Setup (one-time):
 
 1. **Host prereqs**: `~/.ssh` (config + keys), `~/.config/gh` (logged in,
    `gh auth status`), `~/.gitconfig` (`[user] name/email`).
-2. **Sync credentials** (any time they change on the host):
+2. **Sync credentials**: automatic — the `host-sync` compose one-shot
+   mirrors `~/.ssh`, `~/.config/gh`, and `~/.gitconfig` into the
+   `opc-gh-creds` named volume (mounted at `/creds` in
+   paperclip/hermes/frontdoor) on every `docker compose up`, so
+   `down -v` + `up -d` needs no manual step. Only after host credential
+   *changes* (new key, `gh auth login`, gitconfig edit) re-run manually:
    ```bash
    scripts/sync-gh-creds.sh
    ```
-   Copies `~/.ssh`, `~/.config/gh`, and git identity into the `opc_gh-creds`
-   named volume (mounted at `/creds` in paperclip/hermes/frontdoor); rewrites
-   ssh `IdentityFile` paths to the container layout and pre-seeds the
-   `github.com` host key. Re-run after key/token changes — no rebuild needed.
+   Rewrites ssh `IdentityFile` paths to the container layout and pre-seeds
+   the `github.com` host key. No rebuild needed.
 
 The Paperclip admin/company/executor agent/API key are created automatically
 by the `paperclip-bootstrap` one-shot (see Setup pages above); the frontdoor
@@ -217,8 +220,10 @@ docker compose exec frontdoor cat /opt/data/issue-watchers/watcher.log
 - `Hostname 'X' is not allowed for this Paperclip instance` (browser/API from
   a LAN IP) → add X to `PAPERCLIP_ALLOWED_HOSTNAMES` in `.env`
   (comma-separated), then `docker compose up -d paperclip`.
-- `gh auth status` fails → re-run `scripts/sync-gh-creds.sh`
-  (`docker compose restart frontdoor hermes paperclip` re-applies key perms).
+- `gh auth status` fails → after `down -v` + `up -d` the `host-sync`
+  one-shot re-syncs automatically; if host credentials changed instead, re-run
+  `scripts/sync-gh-creds.sh` (`docker compose restart frontdoor hermes
+  paperclip` re-applies key perms).
 
 ## Nix-based persistent tools (hermes, buzz, paperclip — OS level)
 
