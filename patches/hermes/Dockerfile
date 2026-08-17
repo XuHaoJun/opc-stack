@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.19
 # OPC stack image for Hermes Agent — adapted from the upstream Dockerfile
 # (NousResearch/hermes-agent @ tag v2026.8.13, version 0.20.1).
 # Changes vs upstream:

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.19
 #
 # OPC stack image for Buzz — adapted from the upstream ghcr.io/block/buzz
 # Dockerfile (tag desktop-v0.5.14). Changes vs upstream:
