@@ -41,6 +41,7 @@ docker compose down           # 停 (volume 保留); down -v 全清
 - `buzz-admin` 讀 `RELAY_URL` env (不是 BUZZ_RELAY_URL); add-member 需 DATABASE_URL/REDIS_URL + relay key + S3 env。
 - Paperclip `pi_local` adapter 不兼容 omp v17 (flag 差異); 整合 omp 用 `claude_local` + `engine:"acp"` + `agentCommand:"omp acp --yolo"` (handshake 已驗證, 見 SETUP.md)。
 - PyPI 的 hermes-agent 停在 0.19.0 → 0.20.1 用 editable install from git tag (`pip install -e "…[acp]"`)。
+- **frontdoor 的 hermes acp 必須以 uid 10000 跑** (buzz-acp 以 root spawn, 靠 `patches/buzz/opc-hermes-acp.sh` setpriv wrapper drop): 共享 home (frontdoor-hermes volume) 同時被 hermes-dashboard (uid 10000) 服務, root 寫的 `state.db` 對 10000 是 read-only → 大量 `TUI session store unavailable` warning。`/keys` 是 ro mount, agent 子進程的 buzz wrapper 改讀 `$HERMES_HOME/.agent.nsec` (entrypoint 開機複製)。
 - TencentDB `MemoryKnowledge/Dockerfile` upstream 是壞的 → hub 用 `deploy/panel-knowledge-combined`。
 - **TencentDB 面板 (8125) 是 meta-plane 驅動**: L0-L3 寫進 data plane 後, team/agent 沒在 meta registry (`/v3/meta/*`, sqlite `tdai_metadata_default`) 登記 → 面板全空 (`ensureChatMemoryAsset` 每筆 conversation/add 都 warn `agent not found`)。provision 由 `tencentdb-bootstrap` one-shot 處理 (`opc-tencentdb-provision.sh`), agent_id **必須以 `agt` 開頭** (面板用 `lastIndexOf('-agt')` 解析 `chat_memory-{team}-{agent}`)。
 - **TencentDB L0/L1 以 user_id 隔離**: 面板用 `asset.owner_user_id` 查 data plane, 所以 plugin 的 `MEMORY_TENCENTDB_USER_ID` 必須 = admin user_id (bootstrap 寫入 `/keys/tencentdb-admin-user-id`, entrypoint export)。留空 = `default` → 面板層級全 0。

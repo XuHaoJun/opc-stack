@@ -40,12 +40,6 @@ if [ -d "$MP_SRC" ]; then
     mkdir -p "$HH/plugins"
     rm -rf "$MP_DST"
     cp -r "$MP_SRC" "$MP_DST"
-    # Runtime user must own the seeded tree: s6 stage2 only chowns when the
-    # top-level $HERMES_HOME owner is wrong (it isn't — /opt/data is already
-    # the runtime uid), so root-owned plugins/skills would survive boot. Then
-    # the dashboard shows no skills and skill-hub ops EACCES (bundled-skill
-    # sync also fails to write into root-owned skills/).
-    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/plugins" 2>/dev/null || true
     echo "[hermes] synced memory provider: memory_tencentdb"
 fi
 
@@ -56,9 +50,6 @@ if [ -d "$SK_SRC" ]; then
     mkdir -p "$HH/skills"
     rm -rf "$SK_DST"
     cp -r "$SK_SRC" "$SK_DST"
-    # See MP block above: hermes runtime must own skills/ to run the
-    # bundled-skill sync and the skill hub (.hub/lock.json).
-    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/skills" 2>/dev/null || true
     echo "[hermes] synced skill: paperclip-api"
 fi
 
@@ -101,5 +92,15 @@ fi
 : "${OPENAI_API_KEY:=$OPENCODE_API_KEY}"
 : "${OPENAI_BASE_URL:=${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}"
 export OPENAI_API_KEY OPENAI_BASE_URL
+
+# Single-owner home: everything under $HERMES_HOME must belong to the hermes
+# runtime uid (10000) — the dashboard/gateway services run as that user, and
+# the Buzz front-door agent (same shared frontdoor-hermes volume) runs as it
+# too via its setpriv wrapper. A root-owned state.db/-wal is read-only for
+# uid 10000 (preflight fails → "TUI session store unavailable" spam) and
+# SQLite WAL cannot be shared across two unix users. Root entrypoint seeds
+# (config.yaml, plugins, skills) are written before this line, so chown -R
+# at boot keeps ownership deterministic even on pre-existing volumes.
+chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH" 2>/dev/null || true
 
 exec /opt/hermes/docker/entrypoint-dispatch.sh "$@"

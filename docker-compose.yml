@@ -190,7 +190,13 @@ services:
     environment:
       BUZZ_KEYS_DIR: /keys
       BUZZ_RELAY_URL: ${BUZZ_RELAY_URL:-ws://localhost:3000}
-      BUZZ_ACP_AGENT_COMMAND: hermes
+      # Setpriv wrapper (patches/buzz/opc-hermes-acp.sh): buzz-acp spawns the
+      # agent as root, the wrapper drops it to the hermes runtime uid (10000)
+      # so the shared frontdoor-hermes home stays single-owner — a root-owned
+      # state.db is read-only for hermes-dashboard ("TUI session store
+      # unavailable" spam) and SQLite WAL can't be shared across two unix
+      # users. Basename keeps buzz-acp's harness identity "hermes".
+      BUZZ_ACP_AGENT_COMMAND: /usr/local/libexec/hermes
       BUZZ_ACP_AGENT_ARGS: acp
       BUZZ_ACP_RESPOND_TO: anyone
       # Respond to every stream message in its channels (no @mention needed):

@@ -146,6 +146,10 @@ COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/opc-issue-watcher.sh /usr/local/bin/opc-issue-watcher.sh
 COPY opc/buzz-entrypoint.sh /usr/local/bin/buzz-entrypoint.sh
 COPY opc/frontdoor-entrypoint.sh /usr/local/bin/frontdoor-entrypoint.sh
+# Agent spawn wrapper: buzz-acp runs it as root, it drops to the hermes
+# runtime uid (10000) so the shared frontdoor-hermes home stays single-owner
+# (root-owned state.db is read-only for hermes-dashboard → warning spam).
+COPY opc/opc-hermes-acp.sh /usr/local/libexec/hermes
 COPY opc/opc-register-agent.sh /usr/local/bin/opc-register-agent.sh
 COPY opc/generate-keys.sh /usr/local/bin/opc-generate-keys.sh
 COPY opc/add-member.sh /usr/local/bin/opc-add-member.sh
@@ -153,7 +157,7 @@ RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh \
              /usr/local/bin/opc-issue-watcher.sh /usr/local/bin/buzz-entrypoint.sh \
              /usr/local/bin/frontdoor-entrypoint.sh /usr/local/bin/opc-generate-keys.sh \
-             /usr/local/bin/opc-add-member.sh
+             /usr/local/bin/opc-add-member.sh /usr/local/libexec/hermes
 
 # Shared seed (nix + 9 tools) built once in patches/nix-seed (compose
 # service `nix-seed`); a tool-list change rebuilds only that image.

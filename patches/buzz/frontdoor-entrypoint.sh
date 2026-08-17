@@ -5,6 +5,12 @@
 # only durable work plane) and model = OpenCode Go, then execs buzz-acp.
 set -eu
 
+# The ACP agent (and its terminal tool children) run as the hermes runtime
+# uid (HERMES_UID/10000) — the same identity as hermes-dashboard on the
+# shared home. Point HOME at that home so the nix/omp seeds below and tool
+# subprocesses (git, node, playwright) land somewhere the agent can write.
+export HOME="${HERMES_HOME:-/opt/data}"
+
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
@@ -41,7 +47,11 @@ if [ -f "${BUZZ_KEYS_DIR:-/keys}/tencentdb-admin-user-id" ]; then
     echo "[frontdoor] MEMORY_TENCENTDB_USER_ID loaded from keys volume"
 fi
 : "${BUZZ_RELAY_URL:=ws://buzz:3000}"
-: "${BUZZ_ACP_AGENT_COMMAND:=hermes}"
+# opc-hermes-acp.sh wrapper (installed as /usr/local/libexec/hermes): drops
+# the spawned agent from root to the hermes runtime uid (10000) so the
+# shared home stays single-owner; basename keeps buzz-acp's harness
+# identity "hermes" (observer frames + HERMES_ACP_SKIP_CONFIGURED_MCP).
+: "${BUZZ_ACP_AGENT_COMMAND:=/usr/local/libexec/hermes}"
 : "${BUZZ_ACP_AGENT_ARGS:=acp}"
 export BUZZ_RELAY_URL BUZZ_ACP_AGENT_COMMAND BUZZ_ACP_AGENT_ARGS
 # Persist the resolved relay URL for the issue watcher (the agent's terminal
@@ -54,13 +64,15 @@ echo "[frontdoor] relay=${BUZZ_RELAY_URL} agent=${BUZZ_ACP_AGENT_COMMAND} ${BUZZ
 # BUZZ_PRIVATE_KEY/BUZZ_RELAY_URL from tool subprocess env (GHSA-rhgp-j443-
 # p4rf: provider credentials never reach terminal/execute_code children), so
 # the CLI can't authenticate. Wrap /usr/local/bin/buzz to inject the agent
-# identity at runtime; terminal children run as root and can read /keys.
+# identity at runtime; terminal children (uid 10000) read the key copy in
+# $HERMES_HOME/.agent.nsec (the /keys volume is read-only, so the entrypoint
+# copies it there below).
 if [ ! -f /usr/local/bin/buzz.bin ]; then
     mv /usr/local/bin/buzz /usr/local/bin/buzz.bin
 fi
 cat > /usr/local/bin/buzz <<EOF
 #!/bin/sh
-export BUZZ_PRIVATE_KEY="\${BUZZ_PRIVATE_KEY:-\$(cat /keys/agent.nsec)}"
+export BUZZ_PRIVATE_KEY="\${BUZZ_PRIVATE_KEY:-\$(cat "\${HERMES_HOME:-/opt/data}/.agent.nsec" 2>/dev/null)}"
 export BUZZ_RELAY_URL="\${BUZZ_RELAY_URL:-$BUZZ_RELAY_URL}"
 exec /usr/local/bin/buzz.bin "\$@"
 EOF
@@ -68,6 +80,17 @@ chmod +x /usr/local/bin/buzz
 echo "[frontdoor] buzz wrapper installed (agent identity for CLI)"
 
 HH="${HERMES_HOME:-/opt/data}"
+
+# Runtime-uid key copy for the buzz wrapper: /keys is mounted read-only, so
+# the agent's terminal children (uid 10000) cannot read the 600-root key
+# file there. Drop a copy into the shared home, owned by the runtime uid.
+if [ -f "${BUZZ_KEYS_DIR:-/keys}/agent.nsec" ]; then
+    mkdir -p "$HH"
+    cp "${BUZZ_KEYS_DIR:-/keys}/agent.nsec" "$HH/.agent.nsec"
+    chown "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/.agent.nsec" 2>/dev/null || true
+    chmod 600 "$HH/.agent.nsec"
+    echo "[frontdoor] agent key copied to $HH/.agent.nsec for runtime uid"
+fi
 
 # TencentDB Knowledge Plane (PRD v10.1): sync the memory_tencentdb Hermes
 # MemoryProvider into $HERMES_HOME/plugins/ (user-plugin discovery path) on
@@ -78,10 +101,6 @@ if [ -d "$MP_SRC" ]; then
     mkdir -p "$HH/plugins"
     rm -rf "$MP_DST"
     cp -r "$MP_SRC" "$MP_DST"
-    # Runtime user must own the seeded tree: the shared $HERMES_HOME lives
-    # with the hermes runtime (uid HERMES_UID/10000); root-owned plugins/
-    # skills make the dashboard show no skills and skill-hub ops EACCES.
-    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/plugins" 2>/dev/null || true
     echo "[frontdoor] synced memory provider: memory_tencentdb"
 fi
 
@@ -141,9 +160,6 @@ if [ -d "$SK_SRC" ]; then
     mkdir -p "$HH/skills"
     rm -rf "$SK_DST"
     cp -r "$SK_SRC" "$SK_DST"
-    # See MP block above: hermes runtime must own skills/ to run the
-    # bundled-skill sync and the skill hub (.hub/lock.json).
-    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/skills" 2>/dev/null || true
     echo "[frontdoor] synced skill: paperclip-api"
 fi
 
@@ -152,6 +168,17 @@ fi
 # agent, re-attached here for any that survived the restart.
 mkdir -p /opt/data/issue-watchers
 /usr/local/bin/opc-issue-watcher.sh sweep >> /opt/data/issue-watchers/sweep.log 2>&1 &
+
+# Single-owner shared home: every hermes process touching this volume runs
+# as uid 10000 (the ACP agent via the setpriv wrapper, and hermes-dashboard).
+# All root entrypoint seeds above land before this line; any root-owned
+# leftovers from earlier boots (state.db, -wal/-shm, sessions/, cache/) are
+# read-only for uid 10000 — SQLite WAL cannot be shared across two unix
+# users, so a root-owned state.db trips hermes's writability preflight and
+# spams "TUI session store unavailable" while the dashboard loses its
+# Sessions/Chat features. Root-created artifacts written after this line
+# (issue-watcher sweep.log) are harmless diagnostics.
+chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH" 2>/dev/null || true
 
 # Mirror buzz-acp's own logs (Rust tracing, incl. `acp::thought` reasoning
 # enabled via RUST_LOG) AND the ACP agent's python stderr logs into the shared
