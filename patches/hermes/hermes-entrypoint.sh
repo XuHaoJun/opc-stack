@@ -15,8 +15,37 @@ opc_mise_seed
 . /usr/local/bin/opc-gh-seed.sh
 opc_gh_seed
 
-# Paperclip board API key written by the paperclip-bootstrap one-shot
-# (compose PAPERCLIP_API_KEY env remains an override).
+# Bootstrap one-shots write /keys/paperclip-api.key (paperclip-bootstrap) and
+# /keys/tencentdb-admin-user-id (tencentdb-bootstrap) after `docker compose
+# down -v`. A container that boots before its one-shot finishes would run with
+# empty PAPERCLIP_API_KEY — the paperclip skill then gets
+# 403 "Board access required" on every call and looks like a dead integration.
+# compose depends_on orders services; this bounded wait covers manual
+# / --no-deps / recreated-container starts where the file may lag the process.
+wait_for_keys() {
+    missing=""
+    for f in "$@"; do
+        [ -s "$f" ] || missing="$missing $f"
+    done
+    [ -z "$missing" ] && return 0
+    echo "[hermes] waiting for key file(s):$missing (bootstrap one-shot)…"
+    n=0
+    while [ "$n" -lt 90 ]; do
+        n=$((n + 1))
+        sleep 2
+        missing=""
+        for f in "$@"; do
+            [ -s "$f" ] || missing="$missing $f"
+        done
+        [ -z "$missing" ] && { echo "[hermes] key files ready after $((n * 2))s"; return 0; }
+    done
+    echo "[hermes] WARNING: key files still missing after 180s:$missing — paperclip/memory integrations unavailable"
+    return 1
+}
+wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id
+
+# Paperclip board API key written by the paperclip-bootstrap one-shot: the
+# keys volume is the single source of truth (no .env variable anymore).
 if [ -f /keys/paperclip-api.key ]; then
     export PAPERCLIP_API_KEY="$(cat /keys/paperclip-api.key)"
     echo "[hermes] PAPERCLIP_API_KEY loaded from keys volume"

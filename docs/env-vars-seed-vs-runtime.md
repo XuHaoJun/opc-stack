@@ -38,7 +38,7 @@
 | `BUZZ_S3_ACCESS_KEY` / `BUZZ_S3_SECRET_KEY` | minio root creds 燒在 minio data volume 首次 init;事後改會弄掛 `buzz-minio-init` 的 `mc alias set` 與 buzz 的 S3 存取 |
 | `BUZZ_S3_BUCKET` | `mc mb --ignore-existing` 冪等;改名字只是新增空 bucket,舊媒體留在舊 bucket(要手動搬) |
 | `PAPERCLIP_ADMIN_EMAIL/PASSWORD/NAME`、`PAPERCLIP_COMPANY_NAME`、`PAPERCLIP_EXECUTOR_AGENT_NAME` | 只被 `paperclip-bootstrap` one-shot 吃(idempotent:admin/company/agent 已存在即跳過)。事後改 admin 密碼要在 Paperclip UI 改 |
-| `PAPERCLIP_API_KEY` | hermes/frontdoor entrypoint 優先讀 `/keys/paperclip-api.key`(bootstrap 寫,只回傳一次),env 只是 fallback。換 key 要清 opc-keys volume 內該檔或重跑 bootstrap |
+| `PAPERCLIP_API_KEY`(無 .env 變數;entrypoint 從 `/keys/paperclip-api.key` 注入) | bootstrap 寫 key 檔(只回傳一次)。換 key 要清 opc-keys volume 內該檔或重跑 bootstrap |
 | `TENCENTDB_ADMIN_USERNAME/USER_KEY` | `init-admin` idempotent(已存在回 409);事後改沒效果,且 USER_KEY 改了會使 provision 的 `/v3/meta/auth/verify` 失敗 |
 | `TENCENTDB_TEAM_ID/NAME`、`TENCENTDB_AGENT_ID/NAME` | 只進 `tencentdb-bootstrap` 的 get-before-create;hermes/frontdoor 的 memory 寫入在 compose 硬編碼 `team=opc` / `agt-hermes-front-door`(未接 .env)。事後改只生空 team/agent,資料仍寫在原 id 下 |
 | `PROXY_UPSTREAM_URL` / `PROXY_UPSTREAM_API_KEY` | **大坑**:`proxy-entrypoint.sh` 只在 `if [ ! -f /data/config.yaml ]` 時從 env 生成設定,該檔在 `tencentdb-proxy-data` volume 內 → 第一次 boot 後 env 失效。改法:刪/改該 config 再 recreate proxy。`TENCENTDB_GATEWAY_API_KEY` 對 proxy 的影響同理(PROXY_TDAI_API_KEY 也燒進去) |

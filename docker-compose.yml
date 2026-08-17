@@ -187,6 +187,15 @@ services:
         condition: service_completed_successfully
       nix-seed:
         condition: service_completed_successfully
+      # Key producers: paperclip-bootstrap writes /keys/paperclip-api.key and
+      # tencentdb-bootstrap writes /keys/tencentdb-admin-user-id. Without
+      # these, the entrypoint's key check races the one-shots on a fresh
+      # `down -v` boot and the agent silently runs with empty PAPERCLIP_API_KEY
+      # (paperclip skill → 403 "Board access required").
+      paperclip-bootstrap:
+        condition: service_completed_successfully
+      tencentdb-bootstrap:
+        condition: service_completed_successfully
     environment:
       BUZZ_KEYS_DIR: /keys
       BUZZ_RELAY_URL: ${BUZZ_RELAY_URL:-ws://localhost:3000}
@@ -227,12 +236,13 @@ services:
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
       # Agent model: deepseek-v4-flash degenerates (garbage output) with
       # hermes's long system prompt on the OpenCode Go endpoint — verified by
-      # replaying hermes's exact request. Default gpt-5.6-luna (cost): clean
-      # text, but intermittently returns empty streams on follow-up calls
-      # (hermes EmptyStreamError). deepseek-v4-pro is the reliable fallback —
-      # clean, proper stream termination, pricier. Override via
-      # BUZZ_AGENT_MODEL in .env.
-      OPENCODE_GO_MODEL: ${BUZZ_AGENT_MODEL:-gpt-5.6-luna}
+      # replaying hermes's exact request. Default deepseek-v4-pro (reliable):
+      # follows the skills index (paperclip-api assign/PR flow works), clean
+      # stream termination. gpt-5.6-luna is the cheaper alternative but
+      # intermittently returns empty streams (hermes EmptyStreamError) and
+      # skips the skills index — the paperclip flow fails with it. Override
+      # via BUZZ_AGENT_MODEL in .env.
+      OPENCODE_GO_MODEL: ${BUZZ_AGENT_MODEL:-deepseek-v4-pro}
       OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -250,10 +260,10 @@ services:
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
       MEMORY_TENCENTDB_AGENT_ID: agt-hermes-front-door
-      # Paperclip work-plane integration (GitHub dev flow): REST base + agent
-      # API key for creating/tracking tickets; watcher posts results to Buzz.
+      # Paperclip work-plane integration (GitHub dev flow): REST base only —
+      # the board API key is injected by the entrypoint from
+      # /keys/paperclip-api.key (paperclip-bootstrap writes it); no .env var.
       PAPERCLIP_API_URL: http://paperclip:3100
-      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
     volumes:
       - frontdoor-hermes:/opt/data
       - frontdoor-nix:/nix
@@ -272,6 +282,12 @@ services:
     restart: unless-stopped
     depends_on:
       nix-seed:
+        condition: service_completed_successfully
+      # Key producers (same race as frontdoor): the gateway's paperclip skill
+      # needs PAPERCLIP_API_KEY; memory writes need tencentdb-admin-user-id.
+      paperclip-bootstrap:
+        condition: service_completed_successfully
+      tencentdb-bootstrap:
         condition: service_completed_successfully
     command: ["gateway", "run"]
     environment:
@@ -306,10 +322,9 @@ services:
       MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
-      # Paperclip work-plane integration (GitHub dev flow): REST base + agent
-      # API key for creating/tracking tickets.
+      # Paperclip work-plane integration (GitHub dev flow): REST base only —
+      # board API key comes from /keys/paperclip-api.key via the entrypoint.
       PAPERCLIP_API_URL: http://paperclip:3100
-      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
     ports:
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:
@@ -364,7 +379,6 @@ services:
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
       PAPERCLIP_API_URL: http://paperclip:3100
-      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
     ports:
       - "${HERMES_DASHBOARD_PORT:-9119}:9119"
     volumes:

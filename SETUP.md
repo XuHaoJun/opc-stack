@@ -209,7 +209,8 @@ docker compose exec frontdoor cat /opt/data/issue-watchers/watcher.log
 ```
 
 - `sweep: no companyId from /agents/me` in watcher.log → either
-  `PAPERCLIP_API_KEY` missing/empty in `.env` (or wrong key scope), or the
+  `/keys/paperclip-api.key` missing/stale in the `opc-keys` volume (wrong
+  scope, or the volume predates the paperclip-bootstrap), or the
   private-hostname guard blocked the call — `PAPERCLIP_ALLOWED_HOSTNAMES` in
   `.env` must contain `paperclip` (internal docker DNS name) plus any LAN IP
   you access the board from. `docker compose up -d paperclip` after changes.

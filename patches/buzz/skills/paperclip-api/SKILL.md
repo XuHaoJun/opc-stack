@@ -1,6 +1,6 @@
 ---
 name: paperclip-api
-description: Create and track Paperclip tickets (issues) via the REST API, and deliver GitHub project links back to Buzz. Use when the user asks to develop/build/create software or a project, asks for progress on a ticket, or asks to push work to GitHub.
+description: Assign PRs to Paperclip's executor; resolves conflicts.
 ---
 
 # Paperclip REST API — ticket creation & tracking
@@ -53,6 +53,23 @@ List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 1. `GET /api/issues/<issueId>` → `.status`.
 2. If `done`: read comments, find the `https://github.com/...` URL, reply with it.
 3. Otherwise reply with the current status (in_progress / blocked / etc.).
+
+## Workflow: "assign <existing PR/issue> to paperclip"
+
+The user points at an EXISTING GitHub PR/issue and wants paperclip's executor
+agent (OMP Engineer) to take it over — resolve merge conflicts, address review
+comments, finish the work. Do NOT treat paperclip as a Buzz member: there is
+no Buzz-side assignment. Create a ticket exactly like "develop <X>":
+
+1. Extract `owner/repo` and the PR/issue number from the GitHub URL.
+2. Create the issue with:
+   - `title`: the task, e.g. `Resolve conflicts on <owner>/<repo>#<n>`.
+   - `description`: the PR/issue URL plus the concrete task, and the
+     acceptance criteria verbatim — omp must clone the repo, work the existing
+     branch/PR (not create a new repo), push the fix back to that PR, paste
+     the PR link into the ticket comment, then set status `done`.
+3. Assign to the executor agent (`assigneeAgentId`), add the `BUZZ_CHANNEL:`
+   marker comment immediately, spawn the watcher, reply to the user.
 
 ## Notes
 
