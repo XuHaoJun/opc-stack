@@ -35,4 +35,10 @@ if [ -d /paperclip/.omp ]; then
     chown -R node:node /paperclip/.omp 2>/dev/null || true
 fi
 
+# Preview servers die with the container; nothing in paperclip brings them
+# back. Waits for the API in the background (it is served by the process we
+# exec below) and restarts whatever desiredState says should be running.
+. /usr/local/bin/opc-prototype-restore.sh
+opc_prototype_restore_bg
+
 exec "$@"

@@ -138,6 +138,7 @@ COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/opc-claude-seed.sh /usr/local/bin/opc-claude-seed.sh
 COPY opc/opc-devenv-seed.sh /usr/local/bin/opc-devenv-seed.sh
+COPY opc/opc-prototype-restore.sh /usr/local/bin/opc-prototype-restore.sh
 # devenv CLI + providers + control schema (see the devenv spec).
 COPY opc/devenv/ /usr/local/lib/devenv/
 # `prototype` CLI: the paperclip-aware workflow layer (project + git + lease).
@@ -151,7 +152,7 @@ COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh /usr/local/bin/opc-claude-seed.sh \
-             /usr/local/bin/opc-devenv-seed.sh \
+             /usr/local/bin/opc-devenv-seed.sh /usr/local/bin/opc-prototype-restore.sh \
              /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh \
     && chmod +x /usr/local/lib/devenv/devenv /usr/local/lib/devenv/providers/*.sh \
     && chmod +x /usr/local/lib/prototype/prototype \

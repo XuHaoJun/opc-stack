@@ -5,6 +5,7 @@
 #   prototype expose    <name> --command CMD [--idle 7d|never] [--start|--stop]
 #   prototype skill add <name> --from <git-url> [--path DIR] [--ref REF] [--only a,b]
 #   prototype list
+#   prototype restore   [--dry-run]
 #   prototype destroy   <name>
 #
 # WHY THIS IS NOT A `devenv` SUBCOMMAND
@@ -335,6 +336,57 @@ SRC
     note "prototype: $count skill(s) in $dir/.claude/skills (pinned $sha)"
 }
 
+# Bring back every service that is supposed to be running.
+#
+# Paperclip records desiredState on the workspace but has NO boot reconciler
+# that acts on it (checked: the server has five periodic timers and none of
+# them touch workspaces). Runtime services are child processes of the paperclip
+# server, so a container recreate — an image rebuild, `compose up -d`, a host
+# reboot — kills every preview and nothing brings it back. The prototype looks
+# fine on the board, its URL is simply dead, and no log says why. That was
+# happening several times an hour during development.
+#
+# Liveness is probed on 127.0.0.1:<port> INSIDE the container rather than
+# trusted from the DB: after a recreate the rows still say "running" while no
+# process exists. The dev servers bind 0.0.0.0 (devenv insists on it), so
+# loopback here is a true test of "is something actually listening".
+cmd_restore() {
+    dry=0
+    [ "${1:-}" = "--dry-run" ] && dry=1
+
+    company="$(company_id)"
+    [ -n "$company" ] || die "cannot reach Paperclip" 4
+
+    started=0; skipped=0
+    for pid in $(api GET "/companies/$company/projects" | jq -r '.[].id'); do
+        proj="$(api GET "/projects/$pid")" || continue
+        pname="$(printf '%s' "$proj" | jq -r '.name')"
+        # Only the primary workspace: that is where `prototype expose` writes.
+        ws="$(printf '%s' "$proj" | jq -c '(.workspaces // [])[] | select(.isPrimary == true)' | head -1)"
+        [ -n "$ws" ] || continue
+        want="$(printf '%s' "$ws" | jq -r '.runtimeConfig.desiredState // ""')"
+        [ "$want" = "running" ] || continue
+
+        port="$(printf '%s' "$ws" | jq -r '[.runtimeConfig.workspaceRuntime.services[]? | .port] | first // empty')"
+        if [ -n "$port" ] && curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$port/" 2>/dev/null; then
+            skipped=$((skipped + 1)); continue
+        fi
+
+        wsid="$(printf '%s' "$ws" | jq -r '.id')"
+        if [ "$dry" = 1 ]; then
+            note "prototype: would restart '$pname' (port ${port:-?})"
+            started=$((started + 1)); continue
+        fi
+        if printf '{}' | api POST "/projects/$pid/workspaces/$wsid/runtime-services/start" >/dev/null 2>&1; then
+            note "prototype: restarted '$pname' (port ${port:-?})"
+            started=$((started + 1))
+        else
+            note "prototype: WARNING could not restart '$pname'"
+        fi
+    done
+    note "prototype: restore done — $started started, $skipped already up"
+}
+
 cmd_list() {
     company="$(company_id)"
     printf '%-24s %-8s %-26s %s\n' NAME PORT URL DIR
@@ -397,6 +449,7 @@ case "${1:-}" in
     create)  shift; cmd_create  "$@" ;;
     expose)  shift; cmd_expose  "$@" ;;
     list)    shift; cmd_list    "$@" ;;
+    restore) shift; cmd_restore "$@" ;;
     destroy) shift; cmd_destroy "$@" ;;
     skill)
         shift
@@ -404,6 +457,6 @@ case "${1:-}" in
             add) shift; cmd_skill_add "$@" ;;
             *) die "usage: prototype skill add <name> --from <git-url>" 2 ;;
         esac ;;
-    -h|--help|help|"") sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command '$1' (create|expose|skill|list|destroy)" 2 ;;
+    -h|--help|help|"") sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (create|expose|skill|list|restore|destroy)" 2 ;;
 esac
