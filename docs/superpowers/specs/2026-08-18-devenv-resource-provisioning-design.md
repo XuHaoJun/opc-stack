@@ -1,7 +1,7 @@
 # Devenv Resource Provisioning — Design Spec
 
 日期: 2026-08-18
-狀態: 待實作
+狀態: 已實作 (compose + CLI + bootstrap; paperclip UI 的 skill/agent 步驟未做)
 
 ## 背景
 
@@ -392,6 +392,24 @@ ACL 與 per-tenant role 的價值在**防手滑** (tenant A 不會誤刪 tenant 
 6. 建 Prototyper agent, **先只掛 `devenv`** → 驗證 9 (風險 1)
 7. 通過後補掛 `prototype`, 驗證 8
 8. AGENTS.md: 常用指令 / 已知坑 / 檔案地圖
+
+## 實作偏差 (spec 寫定後在實作中修正)
+
+1. **密碼用推導而非儲存**。spec 的 schema 沒有放 secret 的欄位, 但「冪等 = 回傳同一組憑證」必須讓
+   密碼可重現。改成 `sha256(DEVENV_SECRET_SALT | key | provider)` — 冪等成立, 且登記表裡沒有明文
+   密碼。代價: 換 salt 會讓所有已發出的 `.env` 失效 (已記在 `.env.example` 與 AGENTS.md)。
+   連帶在 bootstrap 加 `REVOKE CONNECT ON DATABASE devenv_control FROM PUBLIC` — 新資料庫預設
+   給 PUBLIC CONNECT, 不撤掉的話租戶角色讀得到登記表。
+2. **`psql -w`**。密碼缺失時 psql 會互動式提示, 在非互動的 agent run 裡等於**無限掛住且沒有輸出**。
+   實測踩到 (測試腳本 sed 取不到密碼 → 整個 exec 卡死)。`-w` 讓它立刻失敗。
+3. **`client_min_messages=warning`**。冪等 DDL 每次重跑都噴 "already exists" NOTICE, 會蓋掉
+   caller 真正要看的那一行。
+4. **devenv-pg volume 掛 `/var/lib/postgresql`**, 不是 spec 寫的 `/var/lib/postgresql/data` —
+   pg18 改了慣例, 沿用 pg17 掛法 image 直接拒絕啟動。
+5. **所有 devenv 變數改成有預設值** (`:-` 而非 `:?`)。原本比照 stack 其他密碼用必填, 但這是 dev
+   lane, 不該讓 `up` 因為它失敗。憑證弱是刻意的: loopback-only、放的是可丟棄的資料。
+6. **`created_by` 由 `DEVENV_OWNER` 決定**, 沒設則記 `user@hostname`。agent 身分在 adapterConfig
+   的 `env.DEVENV_OWNER` 標。
 
 ## 參考
 

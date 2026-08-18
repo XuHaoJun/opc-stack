@@ -17,6 +17,10 @@ opc_gh_seed
 . /usr/local/bin/opc-claude-seed.sh
 opc_claude_seed
 
+# devenv control DB + schema (optional lane; never fatal).
+. /usr/local/bin/opc-devenv-seed.sh
+opc_devenv_seed
+
 # The runtime server (and the omp executor it spawns) runs as the `node`
 # user via gosu. The nix-seed creates /paperclip/.omp as root (HOME=/paperclip
 # at entrypoint time) — hand it to node so omp's SQLite state opens cleanly.

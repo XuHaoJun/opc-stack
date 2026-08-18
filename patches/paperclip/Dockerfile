@@ -23,6 +23,7 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 \
+       postgresql-client redis-tools \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
@@ -115,11 +116,17 @@ COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
 COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/opc-claude-seed.sh /usr/local/bin/opc-claude-seed.sh
+COPY opc/opc-devenv-seed.sh /usr/local/bin/opc-devenv-seed.sh
+# devenv CLI + providers + control schema (see the devenv spec).
+COPY opc/devenv/ /usr/local/lib/devenv/
 COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh /usr/local/bin/opc-claude-seed.sh \
-             /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh
+             /usr/local/bin/opc-devenv-seed.sh \
+             /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh \
+    && chmod +x /usr/local/lib/devenv/devenv /usr/local/lib/devenv/providers/*.sh \
+    && ln -sf /usr/local/lib/devenv/devenv /usr/local/bin/devenv
 
 # Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
 # above); a tool-list change rebuilds only the nix-seed image.

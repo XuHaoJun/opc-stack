@@ -473,6 +473,12 @@ services:
       # the one-shot exits 0 even with no host login).
       host-sync-claude:
         condition: service_completed_successfully
+      # devenv backends — the entrypoint applies the control schema at boot,
+      # so they must already accept connections.
+      devenv-pg:
+        condition: service_healthy
+      devenv-valkey:
+        condition: service_healthy
     environment:
       HOST: 0.0.0.0
       PORT: "3100"
@@ -491,6 +497,20 @@ services:
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # devenv: admin credentials for the CLI + boot schema apply. Agents never
+      # read these directly — they get scoped per-tenant URLs in their .env.
+      DEVENV_PG_HOST: devenv-pg
+      DEVENV_PG_PORT: "5432"
+      DEVENV_PG_ADMIN_USER: postgres
+      DEVENV_PG_ADMIN_PASSWORD: ${DEVENV_PG_PASSWORD:-devenv}
+      DEVENV_VALKEY_HOST: devenv-valkey
+      DEVENV_VALKEY_PORT: "6379"
+      DEVENV_VALKEY_PASSWORD: ${DEVENV_VALKEY_PASSWORD:-devenv}
+      DEVENV_VALKEY_DATABASES: "64"
+      # Per-tenant passwords are derived from this, not stored — so provision
+      # stays idempotent without keeping plaintext secrets in the registry.
+      # Changing it invalidates every already-issued .env.
+      DEVENV_SECRET_SALT: ${DEVENV_SECRET_SALT:-opc-devenv-default-salt}
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
     volumes:
@@ -529,6 +549,64 @@ services:
       PAPERCLIP_EXECUTOR_AGENT_NAME: ${PAPERCLIP_EXECUTOR_AGENT_NAME:-OMP Engineer}
     volumes:
       - opc-keys:/keys
+
+  # ══════════════════════════ devenv (agent 開發資源) ══════════════════════════
+  # Shared backends that Paperclip agents lease per-tenant via the `devenv` CLI
+  # (baked into the paperclip image). Chosen over giving agents docker: no host
+  # mount, no privileged, no nested runtime — see
+  # docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md.
+  #
+  # Host ports bind 127.0.0.1 only: the point is that YOU can point a SQL client
+  # at a prototype's data, not that the LAN can.
+  #
+  # Every credential here has a working default — this lane must come up on a
+  # fresh clone with no .env edits. They are weak on purpose: loopback-only
+  # scratch backends for throwaway data. Override in .env if you ever put
+  # something you would miss in here.
+  devenv-pg:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${DEVENV_PG_PASSWORD:-devenv}
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:${DEVENV_PG_PORT:-5433}:5432"
+    volumes:
+      # pg18+ wants the mount one level up (data lands in a subdirectory) so
+      # `pg_upgrade --link` isn't blocked by a mount-point boundary. Mounting
+      # /var/lib/postgresql/data as on pg17 makes the image refuse to start.
+      - devenv-pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # --databases 64 → tenant ids 1..63 (0 reserved for devenv itself). The
+  # `db=<dbid>` ACL op that makes those ids a real isolation boundary landed in
+  # valkey 9.1.0; 9.0.x does not have it, so this tag is a floor, not a taste.
+  devenv-valkey:
+    image: valkey/valkey:9.1.1-alpine
+    restart: unless-stopped
+    command:
+      - "valkey-server"
+      - "--databases"
+      - "64"
+      - "--requirepass"
+      - "${DEVENV_VALKEY_PASSWORD:-devenv}"
+      - "--appendonly"
+      - "yes"
+    ports:
+      - "127.0.0.1:${DEVENV_VALKEY_PORT:-6380}:6379"
+    volumes:
+      - devenv-valkey-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$$DEVENV_VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    environment:
+      DEVENV_VALKEY_PASSWORD: ${DEVENV_VALKEY_PASSWORD:-devenv}
 
   # ══════════════════════════ TencentDB-Agent-Memory ══════════════════════════
   tencentdb-core:
@@ -645,6 +723,8 @@ volumes:
   opc-keys:
   opc-gh-creds:
   opc-prototyper-home:
+  devenv-pg-data:
+  devenv-valkey-data:
   buzz-pgdata:
   buzz-redisdata:
   buzz-miniodata:
