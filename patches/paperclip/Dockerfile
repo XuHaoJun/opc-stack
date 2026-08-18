@@ -1,10 +1,14 @@
 # OPC stack image for Paperclip — adapted from the upstream Dockerfile
-# (paperclipai/paperclip @ tag v2026.722.0).
+# (paperclipai/paperclip @ tag v2026.817.0).
 # Changes vs upstream:
 #   1. Single-user Nix layer: OS tools installed via `nix profile install`
 #      persist on the /nix volume across compose down/up and recreates.
 #   2. Entrypoint wrapper seeds the /nix volume before the upstream
 #      docker-entrypoint.sh (uid remap + gosu node) takes over.
+#   3. Upstream's `cloud` / `cloud-plugins` stages are omitted: compose builds
+#      this file with no --target, so the LAST stage wins. Keeping them would
+#      silently make `cloud` the default image. The OPC overlay below is
+#      appended to `production` and must stay the final stage.
 
 # syntax=docker/dockerfile:1.20
 # Shared nix seed image (compose passes the IMAGE_PREFIX-qualified name).
@@ -82,9 +86,22 @@ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" &
 FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
+# Version/commit stamps: the image has no .git, so server-info cannot derive
+# them at runtime and falls back to these. Empty for local builds, which is
+# what compose does — /api/health then reports its normal fallback.
+ARG PAPERCLIP_BUILD_VERSION=""
+ARG PAPERCLIP_BUILD_COMMIT=""
+# Busts the tool layer below when it changes (upstream CI stamps an ISO week
+# so the @latest CLIs advance weekly). Empty here: the OPC stack pins its
+# rebuilds to explicit upgrades, so the tools move when we say so.
+ARG CLI_TOOLS_CACHE_EPOCH=""
 WORKDIR /app
-COPY --chown=node:node --from=build /app /app
-RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
+# Tool + OS layer BEFORE the app copy (upstream ordering since v2026.817.0):
+# it references nothing from /app, and the app copy changes on every commit —
+# ordered the other way this layer (four CLI toolchains + apt, the most
+# expensive one in the file) could never hit the cache.
+RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
+  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
   && rm -rf /var/lib/apt/lists/* \
@@ -94,7 +111,11 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+COPY --chown=node:node --from=build /app /app
+
 ENV NODE_ENV=production \
+  PAPERCLIP_BUILD_VERSION=${PAPERCLIP_BUILD_VERSION} \
+  PAPERCLIP_BUILD_COMMIT=${PAPERCLIP_BUILD_COMMIT} \
   HOME=/paperclip \
   HOST=0.0.0.0 \
   PORT=3100 \
