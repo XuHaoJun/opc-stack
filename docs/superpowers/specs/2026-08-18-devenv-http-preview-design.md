@@ -58,17 +58,27 @@ MCP 只給了 start/stop/restart/wait,**沒有寫 config 的 tool**。唯一入�
 
 ## 目標
 
-1. 多個 prototype 並行,各自拿到穩定、host 連得到的 preview URL。
-2. Agent 一兩行指令搞定,不必手寫 JSON config、不必知道 port 怎麼來的。
-3. 沿用 devenv 既有租約模型 —— 不新增第二套資源管理概念。
-4. 出錯時錯在明處(尤其「顯示 healthy 但連不上」這種必須不可能發生)。
+1. 多個 prototype 並行,各自拿到穩定、host 連得到的 preview URL ——
+   **URL 跨 session 不變,可以加書籤**。
+2. Prototype 有名字、可列舉、說名字就能找到並繼續改。
+3. Agent 一兩行指令搞定,不必手寫 JSON config、不必知道 port 怎麼來的。
+4. 沿用 devenv 既有租約模型 —— 不新增第二套資源管理概念。
+5. 出錯時錯在明處(尤其「顯示 healthy 但連不上」這種必須不可能發生)。
+6. **刪除只在人明確要求時發生**,且是一個指令而非四個步驟。
+
+## 版本說明
+
+v1 假設 prototype 是拋棄式的,把生命週期綁在 issue 上。使用者澄清後那個前提不成立
+(prototype 有價值就長期保留、只有人同意才刪),**v2 把模型從 issue 改成 project**。
+受影響的不只是模型: `devenv expose` 的目標換層、`PAPERCLIP_WORKSPACE_ID` 從陷阱變正解、
+自動回收從「延後」變成「永不」。詳見決策二與生命週期規則。
 
 ## 非目標
 
 - 反向代理 / 單一 port 多路複用 / 自訂網域。單機單人,port 直通最簡單。
 - HTTPS。
 - 對外(公網)暴露。全部綁 host loopback。
-- 自動回收。跟既有 devenv 一致: 手動 `release`,累積靠 view 看見。
+- **任何形式的自動回收/自動刪除。** 這不是「延後」,是規則 —— 見「生命週期規則 1」。
 
 ---
 
@@ -141,51 +151,18 @@ ports:
 
 ---
 
-## 決策二: `provision` 與 `expose` 拆成兩個 subcommand
-
-考慮過併成 `provision --expose-service web="pnpm dev"`(agent 一步到位),否決,決定性理由是**時序**:
-
-```
-provision (拿 DB + port) → 寫入 .env → scaffold 專案 → 此時才知道 dev command
-```
-
-專案尚未建立時 agent 說不出 `pnpm dev`。合併版會逼它先猜再回頭改,而「改」在合併版
-意味著重跑租約操作。拆開後 `expose` 天生可重跑,租約不被觸碰。
-
-附帶好處:
-- Paperclip 升版改 API shape,壞的是 `expose`,租約流程不受影響。
-- 非 paperclip 情境(`docker exec` 手動操作)`provision` 照樣可用。
-
-代價 —— agent 可能漏跑 `expose` —— 用 `devenv list` 標記補掉(見下)。
-
----
-
-## `http` provider
+## `http` provider (已實作)
 
 ### 分配
 
-與 `valkey_db` 同構: registry 欄位 + UNIQUE 讓 DB 當仲裁者,並行呼叫互斥,輸家重試。
+registry 欄位 `http_port_start` / `http_port_count`,一個租約持有**連續區間**
+`[start, start+count)`。`--with http` 租 1 個,`--with http=3` 租 3 個。
 
-```sql
-ALTER TABLE devenv_tenant
-  ADD COLUMN IF NOT EXISTS http_port_start int UNIQUE,   -- NULL = 未租
-  ADD COLUMN IF NOT EXISTS http_port_count int NOT NULL DEFAULT 0;
-```
+⚠️ `http_port_start UNIQUE` **不足以防重疊**: A 租 21000+3、B 租 21001+1 起點不同卻相撞。
+分配用 `LOCK TABLE devenv_tenant IN EXCLUSIVE MODE`(不是 row lock —— 見「實作偏差」1)。
 
-`--with http` 租 1 個;`--with http=3` 租**連續** 3 個(web + api + worker)。
-連續配置讓「第 2 個 port」可預測,不必再查表。
-
-⚠️ 既有的 `--with` 解析是純逗號切分 + 白名單比對
-(`case "$prov" in postgres|valkey)`),`http=3` 會被判為 unknown provider。
-解析要改成先切出 `name=arg`,只有 `http` 接受 `=N`(1..COUNT),其餘 provider 帶 `=` 一律報錯 ——
-沉默忽略參數比拒絕更糟。
-
-分配 = 找最小的 `p ∈ [BASE, BASE+COUNT)` 使 `[p, p+n)` 不與任何既有租約區間重疊。
-
-⚠️ `http_port_start UNIQUE` 只擋得住起點相同,擋不住區間重疊
-(A 租 21000+3、B 租 21001+1 起點不同但重疊)。所以 `n > 1` 時 **UNIQUE 不是充分的仲裁者** ——
-分配 SQL 必須在單一 statement 內完成重疊檢查與 INSERT/UPDATE,或以
-`SELECT … FOR UPDATE` 鎖住 registry。實作時採後者(range 表小,鎖成本可忽略)。
+⚠️ 既有 `--with` 是純逗號切分 + 白名單,`http=3` 會被判 unknown provider。
+解析改成先切 `name=arg`,只有 `http` 接受 `=N`,其餘帶 `=` 一律報錯。
 
 ### 產出
 
@@ -198,80 +175,165 @@ HOST=0.0.0.0
 
 **`HOST=0.0.0.0` 是本設計最重要的一行。**
 
-vite / next / nuxt 預設綁 loopback。Docker publish 的流量從容器 eth0 進來,綁 loopback 就完全不通 ——
-但 Paperclip 的 readiness 是**從容器內**打 `127.0.0.1`,照樣通過。
+vite / next / nuxt 預設綁 loopback。Docker publish 的流量從容器 eth0 進來,綁 loopback
+就完全不通 —— 但 Paperclip 的 readiness 是**從容器內**打 `127.0.0.1`,照樣通過。
 結果是 board 顯示綠色 live、點下去連不上,而所有健康指標都說沒問題。
 
-provider 把正確預設直接寫進 `.env`,這個坑就不存在。這是 provider 該做的事:
-讓正確的做法成為預設,而不是寫進文件叫人記得。
+實測確認過這個坑存在:
 
-`DEV_URL` 的 host 部分由 `DEVENV_HTTP_PUBLIC_HOST`(預設 `localhost`)決定,
-搭配 compose 的 bind 位址一起改。
+| | 容器內 readiness (127.0.0.1) | host 瀏覽器 |
+|---|---|---|
+| 綁 loopback | **200** | **連線被拒** |
+| 綁 `0.0.0.0` | 200 | 200 |
+
+provider 把正確預設寫進 `.env`,而不是寫進文件叫人記得。
+
+`DEV_URL` 的 host 由 `DEVENV_HTTP_PUBLIC_HOST`(預設 `localhost`)決定,
+要與 compose 的 bind 位址一起改。
 
 ### release
 
-歸還 = registry 欄位清空(由既有的 `DELETE FROM devenv_tenant` 涵蓋)。
-port 沒有需要清理的伺服器端狀態,不像 valkey 要 FLUSHDB。
+port 沒有伺服器端狀態要清(不像 valkey 要 FLUSHDB、postgres 要 DROP),
+歸還由 registry row 刪除涵蓋。
 
-但**若該 port 上還有 service 在跑**,release 後 port 會被重新配發給下一個租戶,
-造成新租戶啟動失敗。`release` 先嘗試 `expose --stop`。
-
-⚠️ 這一步經常會失敗,而且是預期內的: `release` 多半由人從 `docker exec` 跑,
-沒有 `PAPERCLIP_TASK_ID` / `PAPERCLIP_API_KEY`,拿不到 execution workspace(見下方前置條件表)。
-所以是 best-effort,**但失敗時要大聲 warn**,明講「port 已歸還,但可能還有 service 佔著,
-請從 board 停掉 `<name>`」—— 這個殘留風險必須被看見,不能默默吞掉。
+但**若該 port 上還有 service 在跑**,下一個租戶會啟動失敗。`release` 會警告 ——
+且**只能警告**: release 多半由人從 `docker exec` 跑,沒有 paperclip 憑證可以去停它。
 
 ---
 
-## `devenv expose`
+## 決策二: prototype 是一個 Paperclip project (v2 修正)
+
+### 原本的設計是錯的
+
+v1 假設 prototype 是**拋棄式**的,於是把生命週期綁在 issue 上:一個 prototype =
+一張 issue = 一個 execution workspace。理由是只有 execution workspace 這層有回收機制
+(`ExecutionWorkspaceCloseReadiness` 會規劃 `stop_runtime_services` /
+`git_worktree_remove` / `remove_local_directory`)。
+
+使用者澄清後這個前提不成立:
+
+> prototype 對我來說就是能快速開發出來, 但發現有價值或可能有潛力的話, 會持續保留
+> …我只要說名字就能找到並正確持續更新
+> …都是要經過我的同意才刪掉, 不會隨意刪除
+
+拋棄式的假設一拿掉,v1 就從優點變成缺陷: issue 關掉,workspace 被回收,
+「繼續更新」時那個東西已經不存在了。**回收機制在這裡是負債不是資產。**
+
+### 修正後的模型
 
 ```
-devenv expose <name> --command <cmd> [--key KEY] [--cwd DIR] [--port-index N] [--start] [--stop]
+prototype「recipe-bot」
+ ├ Paperclip project     name="recipe-bot"              ← 名字、可列舉、長期存在
+ ├ project workspace     cwd=/prototypes/recipe-bot     ← 自己的 git init
+ ├ devenv key            recipe-bot                     ← DATABASE_URL / DEV_PORT 固定
+ ├ runtime service       掛在 PROJECT workspace 上       ← DEV_URL 跨 session 不變
+ └ issue × N             每次「再改一下」= 新開一張, 掛同一個 project
 ```
 
-把一個 service 宣告寫進**當前 execution workspace** 的 `config.workspaceRuntime.services[]`
-(依 `name` upsert,不覆蓋其他 service),然後可選地啟動它。
+Issue 降級為「一次變更請求」。關掉 issue 不動 workspace ——
+策略用 `project_primary` / `shared_workspace`,close readiness 有
+`isProjectPrimaryWorkspace` 保護旗標。
 
-- `--key` 指定用哪個租約的 port,省略則取 `.env` 的 `DEVENV_KEY`。
-- `--port-index N` 在租了多個 port (`--with http=3`) 時挑第 N 個(0-based,預設 0)——
-  一個 workspace 要同時 expose web 與 api 時用。
+**不需要 git worktree。** v1 需要它是為了 per-issue 隔離;
+現在每個 prototype 本來就有自己的目錄,`git init` 純粹給 agent 做版本控制,
+這對「持續更新」反而是需要的。
 
-### 憑證與定位: 全部現成
+`isolated_workspace` 只是 *mode*,決定隔離方式的是 *strategy*
+(`execution-workspace-policy.ts:80`: 「Mode alone never implies git_worktree」)—— 兩者不要混淆。
 
-Agent run 的環境裡已有(acpx 引擎 `packages/adapter-utils/src/acpx-engine/execute.ts:1036-1099`
-統一注入,prototyper 的 `claude_local` + `engine:"acp"` 走的正是這條):
+### 同一個 prototype 的並行 issue
 
-- `PAPERCLIP_API_URL` / `PAPERCLIP_API_KEY` —— API key 是 runtime 注入的 per-run token,
-  且**明確禁止**從 adapterConfig 帶入。不需要為 devenv 發任何新憑證。
-- `PAPERCLIP_TASK_ID` —— 當前 issue id。
+v2026.817.0 新增 `sharedWorkspaceConcurrency: "auto" | "serialize" | "allow"`。
+共用目錄的兩張 issue 設 `serialize` 排隊。升版白撿到的。
 
-### ⚠️ `PAPERCLIP_WORKSPACE_ID` 不能用
+---
 
-直覺會拿它去 PATCH,但它是 **project workspace id,不是 execution workspace id**。
-證據: `heartbeat.ts:12932` 把 `executionWorkspace.workspaceId` 塞進去,而
-`workspace-runtime.ts` 建 service record 時是 `projectWorkspaceId: input.workspace.workspaceId`。
+## 生命週期規則 (硬性)
 
-拿它去 `PATCH /execution-workspaces/:id` 會 404,或更糟 —— 若 id 恰好撞上某個
-execution workspace,會改到別人的 config。
+### 1. 永不自動刪除
 
-正確解析路徑(與 MCP `getIssueWorkspaceRuntime()` 同一條,`packages/mcp-server/src/tools.ts:226`):
+使用者規則: **prototype 與正式 project 同級,只有人明確同意才刪。**
+
+已驗證這在 upstream 是結構性成立而非靠自律: paperclip server 全部只有 5 個週期性
+timer(heartbeat 排程 / DB 備份 / plugin log 保留 / external objects / plugin job 排程),
+**沒有一個碰 workspace 或 project**。`cleanupEligibleAt` 只是標記欄位,沒有 reaper 讀它;
+`workspace-instance-cleanup` 僅在明確 close 時呼叫。
+
+⚠️ 前一份 devenv spec 有一節「**延後**: 自動回收與通知」。那個措辭暗示「以後會做」。
+**改成規則**: 不是延後,是永遠不做。避免未來看到「延後」就順手實作。
+
+### 2. 三件事必須分開
+
+| | 內容 | 誰能動 |
+|---|---|---|
+| **租約** | 名字 / DATABASE_URL / port | 只有 `devenv destroy` |
+| **程序** | dev server process | 隨時停起,**停了什麼都沒少** |
+| **資料** | workspace 目錄 + 資料庫 | 只有 `devenv destroy` |
+
+### 3. 閒置停止: prototype 7 天, 正式永不
+
+`stopPolicy: {type: "idle_timeout", idleSeconds: 604800}`。
+
+已驗證 `idle_timeout` 是實作而非只有 schema
+(`workspace-runtime.ts:4632`,`setTimeout(idleSeconds * 1000)`);
+7 天 = 604,800,000 ms,在 Node 的 2^31-1 (~24.8 天) 上限內。
+
+**正式開發的 service 不得有 stopPolicy。** 這是 lane 差異,由 `expose --idle` 表達:
+prototype 預設 `7d`,engineering lane 明確給 `never`。旋鈕做成中性參數而非
+`--prototype` 旗標 —— devenv 是通用租約機制,不是 prototype 專用工具。
+
+### 4. 「叫得回來」是硬需求
+
+> 我要求重新架設起來讓我用, 能生出來就好
+
+冷啟動必須可重現。這是把 service 宣告放在 **project workspace** 而非 execution workspace
+的第二個理由: 沒有任何 issue 在跑的時候,宣告依然在,重啟只要一個 API 呼叫。
+
+保證來自四樣東西都持久化:
+- service 宣告 (command / cwd / port / env) → project workspace `runtimeConfig`
+- port → devenv 租約 (URL 不變, 可加書籤)
+- 資料 → tenant 資料庫
+- 程式碼 → workspace 目錄
+
+`setupCommand`(project workspace 既有欄位)記 `pnpm install` 之類,
+讓放了幾週的 prototype 冷啟動能重建 node_modules。
+
+⚠️ **已知**: 讀 code 找不到 `desiredState` 的開機 reconciler ——
+paperclip 重啟後 preview server 不會自己回來,要按一下。實作第 5 步時實測確認。
+
+---
+
+## `devenv expose` (v2 修正)
 
 ```
-GET /api/issues/$PAPERCLIP_TASK_ID/heartbeat-context
-  → .currentExecutionWorkspace.id
+devenv expose <name> --command <cmd> [--key KEY] [--cwd DIR]
+                     [--port-index N] [--idle 7d|never] [--start|--stop]
 ```
 
-### 流程
+### 目標換層: project workspace
 
-```sh
-BASE="${PAPERCLIP_API_URL%/}"; BASE="${BASE%/api}"     # 與 upstream prompt 同一套正規化
+v1 打 execution workspace。**錯的** —— 服務必須跨 issue 存活。改打 project workspace:
 
-WS=$(GET  $BASE/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context | jq -r .currentExecutionWorkspace.id)
-     PATCH $BASE/api/execution-workspaces/$WS  {config:{workspaceRuntime:{services:[…]}}}
-     POST  $BASE/api/execution-workspaces/$WS/runtime-services/start      # --start 時
+```
+PATCH /projects/:id/workspaces/:wsId                          ← 寫 runtimeConfig
+POST  /projects/:id/workspaces/:wsId/runtime-services/start   ← 啟動
 ```
 
-寫入的 service 宣告(port 用**明確值**,絕不用 `auto` —— `auto` 拿到的 port 沒被 publish):
+execution workspace 沒有自己的設定時會繼承 project workspace 的 `workspaceRuntime`
+(`routes/execution-workspaces.ts:200`),所以 issue 執行期間看到的是同一個服務。
+
+### `PAPERCLIP_WORKSPACE_ID` 從陷阱變成正解
+
+v1 特地把它標為坑: 「它是 project workspace id,不是 execution workspace id,
+拿去 PATCH execution workspace 會 404 或改到別人的」。
+
+**在 v2 這正是需要的 id。** 連帶好處:
+- 不再需要 `GET /issues/:id/heartbeat-context` 解析
+- 不再依賴 `PAPERCLIP_TASK_ID` → `expose` 在沒有 issue 的 run 裡也能用
+
+v1 那條「前置條件不滿足」表因此大幅縮小,只剩 `PAPERCLIP_API_KEY` 與 project id 解析。
+
+### 寫入的宣告
 
 ```json
 {
@@ -282,25 +344,58 @@ WS=$(GET  $BASE/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context | jq -r .current
   "readiness": { "type": "http", "urlTemplate": "http://127.0.0.1:{{port}}" },
   "expose":    { "type": "url",  "urlTemplate": "http://localhost:{{port}}" },
   "lifecycle": "shared",
-  "stopPolicy": { "type": "idle_timeout", "idleSeconds": 1800 }
+  "stopPolicy": { "type": "idle_timeout", "idleSeconds": 604800 }
 }
 ```
 
-readiness 走容器內 `127.0.0.1`、expose 給人看的是 host 位址 —— 兩者本來就是分開的欄位,
-語意剛好對上。
+`--idle never` 時整個 `stopPolicy` 省略。port 用明確值,**絕不用 `auto`** ——
+`auto` 拿到的 port 沒被 publish。
 
-### 前置條件不滿足時
-
-| 情況 | 行為 |
-|---|---|
-| `PAPERCLIP_TASK_ID` 未設(手動 `heartbeat/invoke`,非 issue 喚醒) | exit 2,明講「expose 需要 issue 情境」 |
-| `PAPERCLIP_API_KEY` 未設(容器內手動 exec) | exit 2,建議改用 board UI 設定 |
-| `heartbeat-context` 無 `currentExecutionWorkspace` | exit 2,「此 run 沒有 execution workspace」 |
-| 該 key 沒租 http port | exit 2,「先跑 `devenv provision <key> --with http`」 |
-
-一律不寫半套狀態。
+⚠️ v2026.817.0 起 `WorkspaceRuntimeService.status` 多了 `"provisioning"`,
+`--start` 後的等待邏輯不能只判斷 `!== "running"`。
 
 ---
+
+## `devenv destroy <name>`
+
+刪除是四個步驟(停 service → release 租約 → 刪目錄 → archive project),
+**手動記四步遲早漏一步**,留下孤兒目錄或佔著的 port,
+而那要等到下一個 prototype 起不來才會被發現。
+
+正因為刪除稀有且不可逆,它該是一個指令:
+
+1. 印出將要刪除的東西 —— 資料庫與其大小、port、workspace 目錄與其大小、project 名稱、issue 數
+2. 要求**打一次 prototype 名字**確認(不是 y/N —— 那太容易手滑)
+3. 依序執行,任一步失敗就停下並回報已完成到哪裡
+
+`--yes` 旗標**不提供**。這個指令沒有需要自動化的情境,而它的存在會讓「永不自動刪除」
+這條規則變成一行 script 就能繞過。
+
+---
+
+## 解析: 用名字找到 prototype
+
+> 我只要說名字就能找到並正確持續更新
+
+hermes 的演算法(建立與續作是**同一條路徑**,這是它可靠的原因):
+
+1. `GET /companies/<id>/projects` → 用 `.name` 比對
+2. 找到 → 用該 `projectId` 開新 issue
+3. 找不到 → 建 project + workspace,再開 issue
+
+這個 pattern 現有的 `paperclip-api` skill 已經在用了 —— 目前解析 lane 就是
+「列 agents、用 `.name` 比對、取 `.id`」。同一招換個對象。
+
+### 同一個 buzz thread 續作
+
+thread → project 的對應必須**持久化在 work plane**,存 project workspace 的
+`metadata`(`projectFields` 沒有 metadata,workspace 有)。
+
+**不得存 TencentDB memory。** PRD 硬邊界: memory 只影響 reasoning。
+而且記錯的後果是**改到別的 prototype** —— 這是正確性問題,不是便利性問題。
+
+名字解析是主要機制(在 buzz / dashboard chat / 未來 telegram 一致有效),
+thread 對應只是加速器,壞掉時退回報名字即可。
 
 ## 監控
 
@@ -339,31 +434,63 @@ t.http_port_count,
 1. **`RANGE_END` 與 `COUNT` 不同步** —— compose 無算術能力導致的重複來源。開機檢查 warn,但改壞了在下次 provision 才會炸。**這是本設計最脆弱處。**
 2. **改 range 大小要 recreate paperclip 容器** —— docker 限制,寫進文件。
 3. **prototype 之間互相 hardcode port** —— agent 可能把 `21004` 寫死進 code 而非讀 `.env`。skill 明講要讀 `DEV_PORT`。
-4. **Paperclip 升版改 `workspaceRuntime` schema 或 heartbeat-context 形狀** —— `expose` 會壞,租約不受影響(這正是拆開的理由)。升版檢查清單加一條。
-5. **`http_port_start UNIQUE` 不足以防區間重疊**(見上)—— 靠 `FOR UPDATE` 鎖,不能只靠約束。
+4. **Paperclip 升版改 `workspaceRuntime` schema 或 project-workspace route** —— `expose` 會壞,租約不受影響(這正是把 `provision` 與 `expose` 拆開的理由)。升版檢查清單加一條。
+5. **prototype 名字同時是 project 名、devenv key、目錄名。** 三者必須一致,否則
+   `devenv list` 與 project 清單會對不上。名字規則沿用既有 key 驗證
+   (`^[a-z][a-z0-9-]{1,40}$`),建 project 時一併套用。
+6. **冷啟動可能因為環境過期而失敗**(node_modules 不在、lockfile 對不上)。
+   `setupCommand` 是緩解而非保證 —— 放了半年的 prototype 叫不回來是可能的,
+   屆時是修而不是重建(資料與程式碼都還在)。
 
 ## 驗證計畫
 
-1. `docker compose config` 在**未改 `.env`** 的情況下通過(開箱即用,與既有 devenv 一致)。
-2. `devenv provision p1 --with postgres,http` 兩次 → 同一個 port,`.env` 不重複膨脹。
-3. 兩個 key 並行 provision → 拿到不同 port;`--with http=2` 拿到連續兩個且不與他人重疊。
-4. 池子租滿 → exit 3,訊息可讀。
-5. 起一個**綁 loopback** 的 dummy server → 確認 board 顯示 healthy 但 host 連不上(**證明這個坑真的存在**),再改 `0.0.0.0` → host 連得到。
-6. `devenv expose web --command "…" --start` → board 出現 service control bar + 可點的 live URL;host 瀏覽器實際開得起來。
-7. 重跑 `expose` 改 command → service 被更新而非新增第二筆。
-8. 故意用 `PAPERCLIP_WORKSPACE_ID` 打 PATCH → 記錄實際回應,確認上面的判斷(這條是**驗證我的分析**,不是驗證功能)。
-9. `devenv release p1` → port 歸還可再配發;`devenv list` 的 `!` 標記在未 expose 時出現。
+**1-5 已通過**(步驟 1-4 實作完成時驗證):
+
+1. ✅ `docker compose config` 在未改 `.env` 下通過(開箱即用)。
+2. ✅ 重複 provision → 同一個 port,`.env` 不膨脹。
+3. ✅ 並行 key 拿到不同 port;`http=2` 拿到連續兩個。釋放中間一格後,
+   要 2 個會**跳過**那個洞,要 1 個才回頭用。
+4. ✅ 池子租滿 → exit 3;五條錯誤路徑 exit code 全對;失敗的 provision 會回滾不留幽靈 row。
+5. ✅ 綁 loopback → 容器內 200 / host 拒絕;綁 `0.0.0.0` → 兩邊都 200;
+   從 host LAN IP 連不到(確認只綁 loopback)。
+
+**待驗證**:
+
+6. 建一個 prototype project + workspace(`local_path` + `git init`)→
+   `devenv expose web --command "…" --start` → board 出現 service control bar + live URL,
+   **host 瀏覽器實際開得起來**(這條要人看一眼)。
+7. 開第二張 issue 掛同一個 project → 服務**沒有被重建**,URL 不變,
+   issue 關掉後服務仍在(證明生命週期綁對層了)。
+8. 重跑 `expose` 改 command → service 被更新而非新增第二筆。
+9. 停掉服務再 `--start` → 同一個 URL 回來(「叫得回來」)。
+10. `docker compose restart paperclip` → 記錄服務是否自己回來
+    (預期**不會**,見生命週期規則 4 的已知項)。
+11. `devenv destroy <name>` → 先列出、要求打名字、拒絕錯誤的名字;
+    執行後 DB / port / 目錄 / project 都不在,且 port 可再配發。
+12. hermes 用名字解析: 說一次名字建立、再說一次同名字 → 第二次**續作而非新建**。
 
 ## 實作順序
 
-1. schema: `http_port_start` / `http_port_count` / `http_exposed_at` + view 三欄
-2. `providers/http.sh`: 分配(`FOR UPDATE`)/ 產出 `.env` / release
-3. compose: port range publish + `DEVENV_HTTP_*` env(全部 `:-` 預設)
-4. `opc-devenv-seed.sh`: ephemeral range 重疊檢查 + `BASE/COUNT/RANGE_END` 一致性檢查
-5. `devenv expose`(含 `--stop`,供 release 呼叫)
-6. `devenv list` 補 port 欄與 `!` 標記
-7. prototype skill: provision → scaffold → expose 三步,明講讀 `DEV_PORT`、不要 hardcode
-8. AGENTS.md: 架構條目 + 已知坑(`{{port}}` 非 `${port}`、`WORKSPACE_ID` 是 project 不是 execution、`RANGE_END` 一致性)
+**已完成** (commit `2b35aa8`):
+
+1. ✅ schema: `http_port_start` / `http_port_count` / `http_exposed_at` + view 三欄
+2. ✅ `providers/http.sh`: 分配(`LOCK TABLE`)/ 產出 `.env` / release
+3. ✅ compose: port range publish + `DEVENV_HTTP_*` env(全部 `:-` 預設)
+4. ✅ `opc-devenv-seed.sh`: ephemeral range 重疊 + `BASE/COUNT/RANGE_END` 一致性檢查
+5. ✅ `devenv list` 補 port 欄與 `!` 標記(原第 6 步,順手做掉)
+
+**待做**:
+
+6. `/prototypes` named volume + prototype project/workspace 的建立路徑
+   (`local_path` + `git init` + `sharedWorkspaceConcurrency: serialize`)
+7. `devenv expose`(打 project workspace;`--idle 7d|never`;`--start` / `--stop`)
+8. `devenv destroy <name>`(先列出 → 打名字確認 → 依序執行;**不提供 `--yes`**)
+9. `paperclip-api` skill: 用名字解析 prototype 的三步演算法
+   (列 → 比對 → 找不到才建),**兩份 skill 要同步改**
+10. prototype skill: provision → scaffold → expose,明講讀 `DEV_PORT` 不要 hardcode
+11. AGENTS.md: 架構條目 + 已知坑(`{{port}}` 非 `${port}`、
+    `PAPERCLIP_WORKSPACE_ID` 是 project workspace id、`RANGE_END` 一致性、
+    prototype 永不自動刪除)
 
 ## 實作偏差 (spec 寫定後在實作中修正)
 
