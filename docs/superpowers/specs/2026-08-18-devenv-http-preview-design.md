@@ -298,8 +298,10 @@ prototype 預設 `7d`,engineering lane 明確給 `never`。旋鈕做成中性參
 `setupCommand`(project workspace 既有欄位)記 `pnpm install` 之類,
 讓放了幾週的 prototype 冷啟動能重建 node_modules。
 
-⚠️ **已知**: 讀 code 找不到 `desiredState` 的開機 reconciler ——
-paperclip 重啟後 preview server 不會自己回來,要按一下。實作第 5 步時實測確認。
+✅ **已解決**(原本記為已知缺口)。讀 code 找不到 `desiredState` 的開機 reconciler,
+實測證實為真 —— 而且比預期嚴重: 不只「重啟後要按一下」, 是**每次容器重建都靜悄悄死掉**,
+board 一切正常只有 URL 是死的。補上 `prototype restore` + entrypoint 背景呼叫
+(`opc-prototype-restore.sh`)。實測 `docker compose down && up` 後兩個 prototype 自行復原。
 
 ---
 
