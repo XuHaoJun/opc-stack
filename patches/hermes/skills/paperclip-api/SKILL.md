@@ -1,6 +1,6 @@
 ---
 name: paperclip-api
-description: Assign PRs to Paperclip's executor; resolves conflicts.
+description: Create and track Paperclip tickets; route work to the right execution lane (engineering vs prototype).
 ---
 
 # Paperclip REST API — ticket creation & tracking
@@ -25,11 +25,47 @@ set in this container).
 | Add comment | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"body":"..."}' "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | List comments | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | Set status | `curl -fsS -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"status":"done"}' "$PAPERCLIP_API_URL/api/issues/<issueId>"` |
-| Find executor agent | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies/<companyId>/agents"` → find the agent named `OMP Engineer`, take `.id` |
+| List agents (to resolve a lane) | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies/<companyId>/agents"` → match by `.name`, take `.id` |
 
 The API key is a board key auto-created by the stack bootstrap (authenticates
-as the admin user). Assign every development issue to the executor agent
-(`assigneeAgentId` above) so Paperclip's heartbeat wakes it.
+as the admin user). Every issue MUST carry an `assigneeAgentId` — Paperclip
+does no automatic routing in this stack (no CEO agent, flat org), so an
+unassigned ticket is a ticket nobody wakes up for.
+
+## Routing: pick a lane
+
+The lane decides which agent gets the ticket, and therefore which skills and
+working style are applied. Resolve the lane to an agent id at call time by
+name — never hardcode an id, they change when the stack is rebuilt.
+
+| Lane | Agent name | Use for |
+|---|---|---|
+| `engineering` | `OMP Engineer` | Real work: features, bug fixes, existing PRs/issues, anything whose output is meant to be kept |
+| `prototype` | `Prototyper` | Throwaway experiments that answer a question — "does this feel right", "what would this look like", "can X even work". Output is expected to be discarded |
+
+**Default to `engineering` whenever you are not sure.** The two failure modes
+are not symmetric: a prototype request sent to engineering just gets built
+more carefully than it needed to be, while a real feature sent to the
+prototype lane is built by an agent told to skip tests, error handling and
+abstractions.
+
+Adding a lane later means adding a row here, not changing any prompt.
+
+### The lane is part of the brief
+
+Before creating the ticket, show the user the brief and let them correct it.
+Include the lane as a field, so switching lanes costs them one word:
+
+```
+Lane: prototype
+Title: ...
+Scope: ...
+Acceptance: ...
+```
+
+This works identically in every surface (Buzz channel, dashboard chat,
+Telegram) because it is just text in the conversation — do not depend on any
+UI affordance to carry the routing decision.
 
 Issue statuses: `backlog | todo | in_progress | in_review | done | blocked | cancelled`.
 List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
@@ -37,16 +73,21 @@ List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 ## Workflow: "develop <X>" request
 
 1. **Clarify** the requirements briefly with the user (language, scope, repo name).
-2. **Create the issue** with:
+2. **Show the brief** (including `Lane:`) and wait for the user to confirm or
+   correct it. Do not create the ticket before they answer.
+3. **Create the issue** with `assigneeAgentId` set to the agent resolved from
+   the confirmed lane, and:
    - `title`: the project name.
    - `description`: requirements + acceptance criteria, verbatim including:
      - `完成後: gh repo create <name> --private --source . --remote origin --push, 把 repo URL 貼回本 ticket comment, 然後將 issue status 改為 done`
      - repo visibility, tech stack, and any user preferences.
-3. **Add a channel marker comment** immediately:
+4. **Add a channel marker comment** immediately (Buzz only — skip this and
+   the watcher step on surfaces that are not Buzz):
    `{"body":"BUZZ_CHANNEL: <channel-uuid>"}` — the uuid of the Buzz channel
    the user asked in (look at the conversation context / nostr channel).
-4. **Spawn the watcher** (background): `/usr/local/bin/opc-issue-watcher.sh <issueId> <channel-uuid> &`
-5. **Reply to the user** in Buzz: 「已建立 ticket #<id>, 開發中, 完成後我會在這裡貼 GitHub link。」
+5. **Spawn the watcher** (background, Buzz only): `/usr/local/bin/opc-issue-watcher.sh <issueId> <channel-uuid> &`
+6. **Reply to the user** in whatever surface they asked from:
+   「已建立 ticket #<id> (lane: <lane>), 開發中, 完成後我會貼 GitHub link。」
 
 ## Workflow: "progress? / 好了嗎?" query
 
@@ -56,9 +97,9 @@ List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 
 ## Workflow: "assign <existing PR/issue> to paperclip"
 
-The user points at an EXISTING GitHub PR/issue and wants paperclip's executor
-agent (OMP Engineer) to take it over — resolve merge conflicts, address review
-comments, finish the work. Do NOT treat paperclip as a Buzz member: there is
+The user points at an EXISTING GitHub PR/issue and wants Paperclip to take it
+over — resolve merge conflicts, address review comments, finish the work. This
+is always the `engineering` lane: the output goes back onto a real PR. Do NOT treat paperclip as a Buzz member: there is
 no Buzz-side assignment. Create a ticket exactly like "develop <X>":
 
 1. Extract `owner/repo` and the PR/issue number from the GitHub URL.
@@ -68,12 +109,19 @@ no Buzz-side assignment. Create a ticket exactly like "develop <X>":
      acceptance criteria verbatim — omp must clone the repo, work the existing
      branch/PR (not create a new repo), push the fix back to that PR, paste
      the PR link into the ticket comment, then set status `done`.
-3. Assign to the executor agent (`assigneeAgentId`), add the `BUZZ_CHANNEL:`
-   marker comment immediately, spawn the watcher, reply to the user.
+3. Assign to the `engineering` lane's agent (`assigneeAgentId`); on Buzz also
+   add the `BUZZ_CHANNEL:` marker comment and spawn the watcher; reply to the
+   user.
 
 ## Notes
 
-- omp does the development and GitHub push; it is not your job to write the code.
+- The assigned agent does the development and GitHub push; it is not your job
+  to write the code.
+- Agents differ only in the skills they carry, so the lane you choose IS the
+  configuration — there is no way to "add prototype mode" to a ticket after
+  the fact. Reassigning means the new agent starts from the ticket text alone.
+- The watcher is Buzz-specific. On dashboard chat or Telegram there is no
+  watcher: poll the issue when the user asks, or tell them you will check back.
 - The watcher posts the link automatically when the ticket reaches `done` —
   do not double-post; if you are in a live conversation when it completes,
   you may answer directly.
