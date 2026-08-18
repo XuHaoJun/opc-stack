@@ -92,6 +92,19 @@ devenv_valkey_db_alloc() {
     echo "$_alloc_n"
 }
 
+# Owner attribution, in order of specificity. PAPERCLIP_AGENT_ID is injected
+# by paperclip on every agent run, so leases are attributed automatically —
+# adapterConfig only needs DEVENV_OWNER when you want a friendlier label.
+devenv_owner() {
+    if [ -n "${DEVENV_OWNER:-}" ]; then
+        echo "$DEVENV_OWNER"
+    elif [ -n "${PAPERCLIP_AGENT_ID:-}" ]; then
+        echo "agent:${PAPERCLIP_AGENT_ID}"
+    else
+        echo "$(id -un)@$(hostname)"
+    fi
+}
+
 devenv_slug() {
     echo "devenv_$(echo "$1" | tr '-' '_')"
 }
@@ -157,7 +170,7 @@ cmd_provision() {
             INSERT INTO devenv_tenant (key, slug, lifecycle, providers, created_by)
             VALUES ('$key', '$slug', '$lifecycle',
                     ARRAY[$(echo "$providers" | sed "s/[^ ]*/'&'/g" | tr ' ' ',')],
-                    '${DEVENV_OWNER:-$(id -un)@$(hostname)}')" >/dev/null
+                    '$(devenv_owner)')" >/dev/null
     else
         devenv_psql_control -c \
             "UPDATE devenv_tenant SET last_seen_at = now() WHERE key = '$key'" >/dev/null

@@ -349,13 +349,12 @@ ACL 與 per-tenant role 的價值在**防手滑** (tenant A 不會誤刪 tenant 
 
 ## 已知風險
 
-1. **omp 讀不讀得到 skill root** — ACP lane 的 `prepareClaudeSkillRuntime()` 把 skill 物化到
-   `<stateDir>/runtime-skills/claude/<sha256>/.claude/skills/`, 並以 **prompt 前綴**告知路徑,
-   讀取白名單則寫成 **Claude Code settings 的 `additionalDirectories`**。omp 不讀 Claude
-   settings, 且該路徑在 workspace 之外。`--yolo` 很可能放行, 但未驗證。
-   **緩解**: 實作順序上先只掛一個 skill 驗證; 讀不到就在 `agentCommand` 加
-   `--add-dir <skill root>`, 或讓 skill root 落在 agent HOME 底下 (已驗證 omp binary 的探索
-   路徑含 `.claude/skills`)。
+1. ~~**omp 讀不讀得到 skill root**~~ — **已驗證通過, 風險解除 (2026-08-18)**。Prototyper agent
+   (`claude_local` + `engine:acp` + `omp acp --yolo`, `desiredSkills:["devenv"]`) 收到一張
+   **刻意不提 devenv** 的 ticket ("需要一個帶 pgvector 的 postgres, 自己想辦法取得"), omp 自行
+   找到 skill 並執行 `devenv provision opc-2-smoke`, 回報 hostname、pgvector 0.8.6, 還自己多做
+   了一次 L2 距離驗算。不需要 `--add-dir`, 也不需要把 skill root 搬進 agent HOME。
+   同一次驗證確認 OMP Engineer 的 skill snapshot 是 `desired: []` — 噪音隔離成立。
 2. **valkey `db=` ACL 很新** (9.1.x)。client 端無需改動 (就是 `SELECT n`), 但功能本身年輕。
 3. **測不了容器拓撲** — 見「背景」。
 4. **`.env` 覆寫** — CLI 只覆寫自己管的變數, 不整檔重寫; 需測既有 `.env` 內容不被清掉。
@@ -408,8 +407,11 @@ ACL 與 per-tenant role 的價值在**防手滑** (tenant A 不會誤刪 tenant 
    pg18 改了慣例, 沿用 pg17 掛法 image 直接拒絕啟動。
 5. **所有 devenv 變數改成有預設值** (`:-` 而非 `:?`)。原本比照 stack 其他密碼用必填, 但這是 dev
    lane, 不該讓 `up` 因為它失敗。憑證弱是刻意的: loopback-only、放的是可丟棄的資料。
-6. **`created_by` 由 `DEVENV_OWNER` 決定**, 沒設則記 `user@hostname`。agent 身分在 adapterConfig
-   的 `env.DEVENV_OWNER` 標。
+6. **`created_by` 優先序: `DEVENV_OWNER` → `agent:$PAPERCLIP_AGENT_ID` → `user@hostname`**。
+   原本只認 adapterConfig 的 `env.DEVENV_OWNER`, 但實測那個值在 ACP lane 沒有到達 agent 進程
+   (存成 `{"type":"plain","value":…}`, 而 env 迴圈 `typeof value !== "string"` 直接跳過), 租約
+   被記成 `node@<container>`。`PAPERCLIP_AGENT_ID` 是 paperclip 每次 run 必注入的, 拿它當來源
+   等於自動歸屬、無法忘記設定。
 
 ## 參考
 
