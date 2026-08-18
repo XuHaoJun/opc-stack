@@ -41,13 +41,18 @@ name — never hardcode an id, they change when the stack is rebuilt.
 | Lane | Agent name | Use for |
 |---|---|---|
 | `engineering` | `OMP Engineer` | Real work: features, bug fixes, existing PRs/issues, anything whose output is meant to be kept |
-| `prototype` | `Prototyper` | Throwaway experiments that answer a question — "does this feel right", "what would this look like", "can X even work". Output is expected to be discarded |
+| `prototype` | `Prototyper` | Fast experiments with a live preview URL — "does this feel right", "what would this look like", "can X even work". Built quickly, then **kept for as long as the user wants it**; see the prototype section below |
 
 **Default to `engineering` whenever you are not sure.** The two failure modes
 are not symmetric: a prototype request sent to engineering just gets built
 more carefully than it needed to be, while a real feature sent to the
 prototype lane is built by an agent told to skip tests, error handling and
 abstractions.
+
+Prototype does NOT mean disposable. A prototype lives at a stable URL, keeps
+its database, and is resumed by name whenever the user comes back to it. It is
+deleted only when the user explicitly asks — never as cleanup, never on your
+own initiative.
 
 Adding a lane later means adding a row here, not changing any prompt.
 
@@ -58,6 +63,7 @@ Include the lane as a field, so switching lanes costs them one word:
 
 ```
 Lane: prototype
+Prototype: recipe-bot      <- prototype lane only; see below
 Title: ...
 Scope: ...
 Acceptance: ...
@@ -69,6 +75,48 @@ UI affordance to carry the routing decision.
 
 Issue statuses: `backlog | todo | in_progress | in_review | done | blocked | cancelled`.
 List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
+
+## Prototype lane: names, and how to continue an old one
+
+Every prototype has a NAME, and the name is the handle for everything:
+a Paperclip project, a working directory with its own git repo, a database,
+and a preview URL that does not change. `recipe-bot`, `invoice-ocr`.
+
+Name rules (it is simultaneously a project name, a directory and a database
+identifier): `^[a-z][a-z0-9-]{1,40}$`. Derive one from the request and show it
+in the brief so the user can rename it in one word.
+
+**Before creating any prototype ticket, look the name up:**
+
+```
+curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+  "$PAPERCLIP_API_URL/api/companies/<companyId>/projects" | jq -r '.[].name'
+```
+
+| Result | What to do |
+|---|---|
+| A project with that name exists | This is a CONTINUATION. Create the issue with `"projectId":"<that id>"`. The run then gets the existing working tree, database and preview URL. |
+| No such project | New prototype. Create the issue **without** `projectId` — the Prototyper runs `prototype create <name>` on its first wake, which makes the directory, the git repo, the lease and the project. |
+
+Creating and resuming are the same lookup, which is why "just say the name and
+keep going" works — and why you must never skip it. Creating a second project
+with a near-miss name (`recipe-bot-2`) silently forks the prototype: new
+directory, new database, new URL, and the user's bookmark now points at the
+old one.
+
+If the user is vague ("改一下那個食譜的"), list the prototypes and ask which —
+do not guess. Guessing wrong means editing the wrong prototype.
+
+### Prototype tickets differ from engineering tickets
+
+- **No `gh repo create`, no GitHub push.** A prototype's git repo is local and
+  that is deliberate. Ask instead for: the preview URL posted back as a comment
+  and the issue set to `done`.
+- Always put `Prototype: <name>` on its own line at the top of the
+  `description` — it is how the agent knows which prototype to create or
+  resume, and it survives even if `projectId` was omitted.
+- Never ask the agent to delete anything. Deletion is `prototype destroy`, run
+  by the user, never as part of a ticket.
 
 ## Workflow: "develop <X>" request
 
@@ -92,8 +140,13 @@ List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 ## Workflow: "progress? / 好了嗎?" query
 
 1. `GET /api/issues/<issueId>` → `.status`.
-2. If `done`: read comments, find the `https://github.com/...` URL, reply with it.
+2. If `done`: read comments and reply with the link the agent posted —
+   a `https://github.com/...` URL for engineering, a `http://localhost:<port>`
+   preview URL for a prototype.
 3. Otherwise reply with the current status (in_progress / blocked / etc.).
+
+"What prototypes do I have?" is answered from the project list (the same
+`GET /api/companies/<companyId>/projects` call), not from memory.
 
 ## Workflow: "assign <existing PR/issue> to paperclip"
 
@@ -127,3 +180,8 @@ no Buzz-side assignment. Create a ticket exactly like "develop <X>":
   you may answer directly.
 - The Paperclip API key authenticates as the frontdoor agent; created issues
   are attributed to it.
+- **Never delete a prototype, and never file a ticket that deletes one.**
+  A prototype is the user's, on the same footing as a real project. If they
+  ask you to remove one, tell them the command (`prototype destroy <name>`,
+  which lists what it will erase and asks them to type the name) rather than
+  arranging it yourself.

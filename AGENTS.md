@@ -7,6 +7,7 @@ Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-
 - **`upstream/`** = 4 個 git submodule, pin 在 upstream tag commit (乾淨 checkout, 永不直接編輯): buzz `desktop-v0.5.14` / hermes `v2026.8.16` / paperclip `canary/v2026.722.1-canary.0` / tencentdb `v2.0.0`。
 - **`patches/`** = 全部本地客製 (opc/Dockerfile、entrypoints、one-shot scripts)。build 前 `scripts/prepare.sh` 把 `patches/<proj>/` rsync 進 `upstream/<proj>/opc/` (冪等)。**改 image 一律改 `patches/`, 不改 upstream 主 Dockerfile。**
 - **`patches/nix-seed/`** = 第一個不屬 submodule 的 build context (compose service `nix-seed`, one-shot)。pin nix 2.35.2 + nixpkgs `8be7bd0c83f1`, 建 `/nix-seed` (cp -al hardlink) 含 8 工具 (ripgrep jq fd htop bat just mise gh)。各 build service `depends_on nix-seed` + `FROM ${NIX_SEED_IMAGE} AS nix-seed` / `COPY --from=nix-seed` 取用 (BuildKit 不支援 `--from` 變數展開, 故用 stage alias)。改 seed 工具清單 = 改這個 Dockerfile, seed 只重裝 1 次。
+- **prototype lane** (`prototype` CLI, paperclip image): 一個 prototype = 一個 Paperclip project + `/prototypes/<name>` (自己的 git) + 一個 devenv 租約 + 一個掛在 **project workspace** 上的 runtime service。服務掛 project 層而非 execution workspace,所以沒有 issue 在跑時宣告仍在,**preview URL 跨 session 不變**。`prototype create` 冪等,同時是「建立」與「用名字接續」的路徑。設計見 `docs/superpowers/specs/2026-08-18-devenv-http-preview-design.md`。
 - **devenv** (`docker-compose.yml` 的 `devenv-pg` / `devenv-valkey`): paperclip agent 的開發資源租約。agent 跑 `devenv provision <key>` 拿到獨立的 postgres DB (pgvector) + valkey ACL user, 寫進 workspace `.env` 的 `DATABASE_URL`/`VALKEY_URL`。刻意不給 agent docker (不變量 6); 設計見 `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md`。
 - 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
 - LLM: OpenCode Go (`https://opencode.ai/zen/go/v1`)。`.env` 填 `OPENCODE_API_KEY` 一個 key 全棧通用; hermes 以 `provider: custom` + `OPENAI_BASE_URL/KEY` 接。
@@ -67,6 +68,8 @@ docker compose down           # 停 (volume 保留); down -v 全清
 scripts/sync-gh-creds.sh      # host GitHub cred 變更後手動重同步 (自動同步已涵蓋 down -v 場景)
 scripts/sync-claude-creds.sh  # host Claude OAuth cred 重同步 (token 輪替後容器端失效時跑)
 docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL client 連 127.0.0.1:5433)
+docker compose exec paperclip prototype list          # 目前有哪些 prototype (名字 / port / URL)
+docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除路徑, 會先列出再要你打名字
 ```
 
 - 改 `patches/<proj>/` 後: `scripts/prepare.sh` → `docker compose up -d --build <svc>`。
@@ -81,6 +84,12 @@ docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL 
 4. **mise toolchain 持久化**: buzz/frontdoor/hermes/paperclip 各有 `*-mise:/opt/mise` volume; 空狀態首次開機 `opc-mise-seed.sh` 自動裝 node@lts + rust@stable + omp prebuilt (`github:can1357/oh-my-pi@17.3.5`, ~170MB)。PATH 尾掛 mise shims (baked node 優先, mise 補缺口)。日常加 toolchain = `docker exec <c> mise install <tool>`; 升 omp = `mise install github:can1357/oh-my-pi@latest` (零 rebuild)。
 5. `docker compose down -v` 後: relay/agent keys、community、tencentdb admin、paperclip bootstrap 全部重建 (bootstrap 皆 one-shot 自動化, 應一次到位); `opc-gh-creds` 由 `host-sync` one-shot 在每次 `up` 從 host `~/.ssh`/`~/.config/gh`/`~/.gitconfig` 自動鏡像, 不會再空 volume; `opc-prototyper-home` 同理由 `host-sync-claude` 從 host `~/.claude/.credentials.json` 重建 (無 host login 只是 claude_local 不可用, 不擋 `up`)。
 6. 容器內 root 隨便折騰, 但**沒有 host mount / privileged** — 隔離不可破壞。
+6b. **prototype 與正式 project 同級, 只有人明確要求才刪。** 沒有任何自動回收 —
+   devenv 租約、prototype 目錄、Paperclip project 都不會被排程清掉 (已確認 paperclip
+   server 的 5 個週期性 timer 沒有一個碰 workspace/project)。唯一的刪除路徑是
+   `prototype destroy <name>`, 它會先列出將刪的東西並要求打名字確認, 且**刻意不提供
+   `--yes`** — 那個旗標會讓這條規則變成一行 script 就能繞過。閒置 7 天只停 process,
+   不動資料。
 7. **`upstream/` 是 submodule** — 直接改它 = 改壞版控。改動一律放 `patches/`。升版後 (新 tag checkout) patches 可能不兼容, 升版前 review upstream changelog。
 
 ## 已知坑 (踩過)
@@ -88,6 +97,11 @@ docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL 
 - `buzz-admin` 讀 `RELAY_URL` env (不是 BUZZ_RELAY_URL); add-member 需 DATABASE_URL/REDIS_URL + relay key + S3 env。
 - Paperclip `pi_local` adapter 不兼容 omp v17 (flag 差異); 整合 omp 用 `claude_local` + `engine:"acp"` + `agentCommand:"omp acp --yolo"` (handshake 已驗證, 見 SETUP.md)。
 - **派工路由住在 `paperclip-api` skill, 不在 system_prompt**: hermes 是決定 assignee 的那一層 (Paperclip 在本 stack 沒有自動路由 — 無 CEO、org 全扁平、`role=general`, 未指派的 ticket 沒人會醒)。lane 表 (`engineering`→`OMP Engineer` / `prototype`→`Prototyper`) 放 skill 的理由: skill 由 image 在每次開機同步進 **兩個** hermes home (frontdoor 與 gateway), 而 `config.yaml` 的 system_prompt 是 per-home 且 dashboard 可編輯 — 規則放 prompt 會分歧。**改 skill 要同時改 `patches/buzz/skills/` 與 `patches/hermes/skills/` 兩份** (內容必須相同)。channel 層的 `platforms.<name>.channel_overrides[channel_id]` 可覆寫 system_prompt/model, 但那是 per-platform × per-channel-id, 只適合當加速器, 不要拿來當路由機制。
+- **prototype/preview 的三個坑**: (1) `expose.urlTemplate` 的變數語法是 `{{port}}` 不是 `${port}` (upstream `doc/plans/` 的範例過期); (2) **dev server 一定要綁 `0.0.0.0`** — 綁 loopback 時 paperclip 的 readiness 從容器內打 `127.0.0.1` 會過, 但 host 連不上, 於是 board 顯示綠色 live 卻打不開 (devenv 因此把 `HOST=0.0.0.0` 寫進 `.env`); (3) preview port pool 的 base 必須 **低於 32768** (kernel ephemeral range), 否則 `bind(0)` 可能搶走已租但當下沒 listen 的 port。`DEVENV_HTTP_PORT_RANGE_END` 與 `BASE+COUNT-1` 是兩個必須一致的來源 (compose 不會算術), 開機檢查會 warn。
+- **`PAPERCLIP_WORKSPACE_ID` 是 project workspace id, 不是 execution workspace id** (`heartbeat.ts` 塞 `executionWorkspace.workspaceId`, 而 `workspace-runtime.ts` 用它當 `projectWorkspaceId`)。要 execution workspace 得走 `GET /issues/<id>/heartbeat-context` → `.currentExecutionWorkspace.id`。
+- **paperclip 不會建 `local_path` workspace 的 cwd** (`mkdir` 只出現在 worktree 路徑), 而 **`setupCommand` 從來不會被執行** (upstream 只有 CRUD 讀寫它)。目錄與 `git init` 由 `prototype create` 在容器內做。
+- **指派會叫醒 agent, 不需要排程 heartbeat** (`issue-assignment-wakeup.ts`), 唯一的前置條件是 `issue.status !== "backlog"`。另外 `heartbeatEnabled` **不是欄位** — 相關的只有 agent 的 `status` (`idle` vs `paused`)。回完沒給 disposition 的 issue 會**反覆喚醒** agent。
+- **`opc-paperclip-bootstrap.sh` 的 skill/agent 安裝必須 reconcile 而非 create-only**: 改 `patches/` 裡的 skill 或 `desiredSkills` 之後, 若安裝器只在缺席時建立, 變更永遠到不了跑著的 stack — 檔案說一套、agent 讀另一套, 而且沒有任何地方會顯示這個落差。目前 SKILL.md 內容與 Prototyper 的 `desiredSkills` 都會逐次比對更新。
 - **Paperclip 的 GitHub skill import 只抓 `SKILL.md`** — 會 pin commit SHA 也會做 trust level 檢查, 但 sibling 檔案 (mattpocock prototype 的 `LOGIC.md`/`UI.md`) 不會跟著進來, 匯進去的 skill 兩條分支都是斷的。所以第三方 skill 一律 **vendor 到 `patches/paperclip/skills/<slug>/`** (附 `SOURCE` 記 repo+SHA), 由 `opc-paperclip-bootstrap.sh` 建成 local skill; 更新跑 `scripts/refresh-vendored-skills.sh`。注意 `GET /skills/:id/files` 的 inventory 會落後 (新增檔案後仍只列 SKILL.md), 以磁碟 `/paperclip/instances/default/skills/<companyId>/<slug>/` 與 run 時物化的 bundle 為準。
 - **devenv 回收是手動的** (`devenv release <key>`), 沒有任何自動 gc/排程。累積靠 `devenv_usage` view 看 (按 postgres 磁碟大小遞減 — valkey 槽位用罄會自己以 exit 3 喊, 磁碟不會)。valkey 租戶隔離靠 9.1+ 的 `db=<dbid>` ACL op, **9.0.x 沒有這個功能**, 升降版本前先確認。per-tenant 密碼是從 `DEVENV_SECRET_SALT` 推導而非儲存 (這是 provision 冪等的原因), **改 salt 會讓所有已發出的 `.env` 失效**。agent 身分優先序 `DEVENV_OWNER` → `agent:$PAPERCLIP_AGENT_ID` → `user@hostname`; adapterConfig 的 `env` 值在 ACP lane 存成 `{"type":"plain",...}` 而 env 迴圈跳過非字串, 所以別依賴 `env.DEVENV_OWNER`, `PAPERCLIP_AGENT_ID` 才是每次 run 一定有的。
 - **devenv-pg 是 pg18, volume 要掛 `/var/lib/postgresql` 而非其下的 `data`** — 沿用 pg17 的掛法 image 會拒絕啟動。
@@ -112,6 +126,8 @@ docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL 
 - `patches/<proj>/opc-mise-seed.sh` — 每 project 一份, entrypoint source 的 mise bootstrap (空 volume 自動裝 node/rust/omp)
 - `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
 - `patches/paperclip/skills/<slug>/` — vendor 的第三方 skill (SKILL.md + sibling 檔 + `SOURCE` 記 repo/SHA); image 內落在 `/opt/opc-skills/`, bootstrap 裝進 company library
+- `patches/paperclip/prototype/` — `prototype` CLI (paperclip-aware 的工作流層: project + git + 租約)。**刻意不放進 devenv** — devenv 是通用資源租約, 不該認識 paperclip; 它只多一個 `mark-exposed` 供 `devenv list` 標記
+- `patches/paperclip/skills/{devenv,prototype-workspace}/` — first-party skill (租約用法 / prototype 工作流 + 覆寫 vendored `prototype` skill 的第 1、3、6 條規則)
 - `patches/paperclip/devenv/` — `devenv` CLI + `providers/{postgres,valkey}.sh` + `bootstrap.sql`;
   image 內落在 `/usr/local/lib/devenv/`, symlink 到 `/usr/local/bin/devenv`。schema 由 `opc-devenv-seed.sh` 每次開機套用 (冪等, 後端不通只警告不擋 `up`)
 - `scripts/` — setup / prepare / upgrade / test-connectivity; `host-sync.sh` (通用 host→volume 鏡像 CLI) + `host-sync-worker.sh` (容器側 engine, 唯一邏輯) + `hooks/` (per-source 轉換, ssh/gitconfig/claude-cred) + `sync-gh-creds.sh` / `sync-claude-creds.sh` (場景薄 wrapper); compose `host-sync` (gh) 與 `host-sync-claude` (Claude cred) 兩個 one-shot 每次 up 自動跑
