@@ -11,6 +11,49 @@ Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-
 - 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
 - LLM: OpenCode Go (`https://opencode.ai/zen/go/v1`)。`.env` 填 `OPENCODE_API_KEY` 一個 key 全棧通用; hermes 以 `provider: custom` + `OPENAI_BASE_URL/KEY` 接。
 
+## 運作模型 (為什麼派工長這樣)
+
+PRD (`docs/nodalis-prd-v10.1.md`) 的核心規則: **一個概念只能有一個 durable writer authority。**
+
+| Truth | Owner |
+|---|---|
+| 對話 | Buzz |
+| 意圖判斷 / triage | Front-door Hermes |
+| durable work (issue / assignment / status) | **Paperclip** |
+| 執行 | Hermes / omp / 其他 runtime |
+| 學到的知識 | TencentDB Agent Memory |
+| 事實來源 (code / docs) | Git repo |
+
+日常實際流向:
+
+```text
+Human
+  │ 定義價值 / 做重要判斷
+  ▼
+Buzz  (或 hermes-dashboard chat / 未來 Telegram — 同一個 agent, 不同 platform adapter)
+  │
+  ├─ 沒價值 ────────→ 消失
+  ├─ 值得記住 ──────→ TencentDB chat memory        (已接: memory_tencentdb)
+  ├─ 成為公司共識 ──→ TencentDB Wiki / CodeGraph   (服務在跑, 尚未接)
+  └─ 承諾要完成 ────→ Paperclip issue
+                          │ hermes 在此決定 lane (見「已知坑」的路由條目)
+                          ├─ engineering → OMP Engineer
+                          └─ prototype   → Prototyper
+```
+
+這張圖是好幾條規則的由來:
+
+- **Hermes Kanban 關掉** (不變量 2) — Paperclip 才是 work truth, 不能有第二套。同理禁止任何 runtime 的
+  internal todo/plan 跨 invocation 存活: 要被別人接手或被人追蹤, 就得 materialize 成 Paperclip issue。
+- **派工路由放 skill 而非 system_prompt** — hermes 是上圖的 triage 層, 而三個入口是同一個 agent。
+- **memory 只影響 reasoning** — recall 到「上次說 production 可以自動 deploy」只是 context, **不得**
+  當成 capability / credential / production / 付款 / 對外授權的依據。PRD 硬邊界, 破壞它算 architecture
+  regression 不算 integration 便利。
+- **知識不會自動升格** — capture 可以隨意, 升成 team 資產要顯式 review。「跑成功一次」≠ OPC SOP。
+
+Lean Mode (拿掉 Paperclip、Hermes Kanban 轉正) 是 PRD 允許的另一種模式, 但**不可與現況混用** —
+兩個 canonical work plane 同時存在是明確禁止的。
+
 ## 常用指令
 
 ```bash
@@ -46,7 +89,7 @@ docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL 
 - Paperclip `pi_local` adapter 不兼容 omp v17 (flag 差異); 整合 omp 用 `claude_local` + `engine:"acp"` + `agentCommand:"omp acp --yolo"` (handshake 已驗證, 見 SETUP.md)。
 - **派工路由住在 `paperclip-api` skill, 不在 system_prompt**: hermes 是決定 assignee 的那一層 (Paperclip 在本 stack 沒有自動路由 — 無 CEO、org 全扁平、`role=general`, 未指派的 ticket 沒人會醒)。lane 表 (`engineering`→`OMP Engineer` / `prototype`→`Prototyper`) 放 skill 的理由: skill 由 image 在每次開機同步進 **兩個** hermes home (frontdoor 與 gateway), 而 `config.yaml` 的 system_prompt 是 per-home 且 dashboard 可編輯 — 規則放 prompt 會分歧。**改 skill 要同時改 `patches/buzz/skills/` 與 `patches/hermes/skills/` 兩份** (內容必須相同)。channel 層的 `platforms.<name>.channel_overrides[channel_id]` 可覆寫 system_prompt/model, 但那是 per-platform × per-channel-id, 只適合當加速器, 不要拿來當路由機制。
 - **Paperclip 的 GitHub skill import 只抓 `SKILL.md`** — 會 pin commit SHA 也會做 trust level 檢查, 但 sibling 檔案 (mattpocock prototype 的 `LOGIC.md`/`UI.md`) 不會跟著進來, 匯進去的 skill 兩條分支都是斷的。所以第三方 skill 一律 **vendor 到 `patches/paperclip/skills/<slug>/`** (附 `SOURCE` 記 repo+SHA), 由 `opc-paperclip-bootstrap.sh` 建成 local skill; 更新跑 `scripts/refresh-vendored-skills.sh`。注意 `GET /skills/:id/files` 的 inventory 會落後 (新增檔案後仍只列 SKILL.md), 以磁碟 `/paperclip/instances/default/skills/<companyId>/<slug>/` 與 run 時物化的 bundle 為準。
-- **devenv 回收是手動的** (`devenv release <key>`), 沒有任何自動 gc/排程。累積靠 `devenv_usage` view 看 (按 postgres 磁碟大小遞減 — valkey 槽位用罄會自己以 exit 3 喊, 磁碟不會)。valkey 租戶隔離靠 9.1+ 的 `db=<dbid>` ACL op, **9.0.x 沒有這個功能**, 升降版本前先確認。per-tenant 密碼是從 `DEVENV_SECRET_SALT` 推導而非儲存 (這是 provision 冪等的原因), **改 salt 會讓所有已發出的 `.env` 失效**。agent 身分靠 adapterConfig 的 `env.DEVENV_OWNER` 標記, 沒設就記成 `user@hostname`。
+- **devenv 回收是手動的** (`devenv release <key>`), 沒有任何自動 gc/排程。累積靠 `devenv_usage` view 看 (按 postgres 磁碟大小遞減 — valkey 槽位用罄會自己以 exit 3 喊, 磁碟不會)。valkey 租戶隔離靠 9.1+ 的 `db=<dbid>` ACL op, **9.0.x 沒有這個功能**, 升降版本前先確認。per-tenant 密碼是從 `DEVENV_SECRET_SALT` 推導而非儲存 (這是 provision 冪等的原因), **改 salt 會讓所有已發出的 `.env` 失效**。agent 身分優先序 `DEVENV_OWNER` → `agent:$PAPERCLIP_AGENT_ID` → `user@hostname`; adapterConfig 的 `env` 值在 ACP lane 存成 `{"type":"plain",...}` 而 env 迴圈跳過非字串, 所以別依賴 `env.DEVENV_OWNER`, `PAPERCLIP_AGENT_ID` 才是每次 run 一定有的。
 - **devenv-pg 是 pg18, volume 要掛 `/var/lib/postgresql` 而非其下的 `data`** — 沿用 pg17 的掛法 image 會拒絕啟動。
 - **Claude cred 只鏡像 `.credentials.json` 一個檔** (`host-sync-claude` one-shot → `opc-prototyper-home` volume, 掛 paperclip `/agent-homes/prototyper` = prototyper agent 的 `adapterConfig.env.HOME`)。host 的 `settings.json`(含 hook)、`plugins/`、`skills/`、`projects/`、`history.jsonl` 一律不進容器 — 容器內的 claude 是乾淨的。**OAuth refresh token 是單次使用**: 容器端刷新會讓 host 那份失效 (反之亦然), 壞了跑 `scripts/sync-claude-creds.sh` 重同步。`.env` 的 `ANTHROPIC_API_KEY` 若有值會蓋掉 OAuth (改用 API 計費), 想吃訂閱就留空。
 - PyPI 的 hermes-agent 停在 0.19.0 → 0.20.1 用 editable install from git tag (`pip install -e "…[acp]"`)。
