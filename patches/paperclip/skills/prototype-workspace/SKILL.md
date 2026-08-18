@@ -48,7 +48,12 @@ overwrites existing work.
 ```sh
 prototype layers                 # what is available
 prototype layer add <name> ui    # Tailwind 4 + shadcn/ui
+prototype layer add <name> auth  # better-auth (email + password)
 ```
+
+Each layer's `README.md` (under its directory) shows how to use what it
+installed. Read it — `auth` in particular gives you working HTTP endpoints and
+no UI, which is deliberate.
 
 Layers are additive and can be applied at any point, including after you have
 started building — so **do not apply one speculatively**. A ticket that says

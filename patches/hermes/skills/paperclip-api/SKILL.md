@@ -117,6 +117,7 @@ the brief as `Stack:`, so the user can change it in one word.
 |---|---|
 | `nextjs` | Default for anything with a web interface. Next.js + Postgres (raw SQL + migrations) + Valkey, already wired. |
 | `+ui` | Add Tailwind 4 + shadcn/ui — only when the point of the prototype involves how it *looks* or a real interface to click through. |
+| `+auth` | Add better-auth (email + password, sessions in Postgres) — only when accounts are part of the question. "Who is logged in" is rarely what a prototype is actually testing; a hardcoded user answers most of them. |
 | *(none)* | A question that a single script or HTML file answers. Do not reach for a framework to answer "does this algorithm work". |
 
 **Default to the smallest thing that answers the question.** Layers are

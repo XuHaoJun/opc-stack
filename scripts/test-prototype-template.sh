@@ -57,10 +57,21 @@ for layer in "${LAYERS[@]:-}"; do
   [ -n "$layer" ] || continue
   step "apply layer '$layer'"
   $PC prototype layer add "$NAME" "$layer" 2>&1 | tail -3 | sed 's/^/  /'
-  # Applied as root on purpose: that is how a human runs it, and it must still
-  # leave a tree the runtime user can build in.
-  $PCN sh -c "cd /prototypes/$NAME && test -f components.json" \
-    && ok "layer '$layer' applied" || bad "layer '$layer' did not apply"
+  # Each layer declares the file that proves it ran — the same marker its
+  # apply.sh uses for its own idempotency guard, so the two cannot disagree.
+  case "$layer" in
+    ui)   marker=components.json ;;
+    auth) marker=lib/auth.js ;;
+    *)    marker="" ;;
+  esac
+  if [ -n "$marker" ]; then
+    # Applied as root on purpose: that is how a human runs it, and it must
+    # still leave a tree the runtime user can build in.
+    $PCN sh -c "cd /prototypes/$NAME && test -f '$marker'" \
+      && ok "layer '$layer' applied ($marker)" || bad "layer '$layer' did not apply"
+  else
+    echo "  (no marker known for '$layer' — add one to this script)"
+  fi
 done
 
 step "migrate"
@@ -84,6 +95,23 @@ if [ -n "$chunk" ]; then
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Origin: $URL" "$URL$chunk")
   [ "$code" = 200 ] && ok "static chunk 200 with Origin" || bad "chunk returned $code"
 fi
+
+for layer in "${LAYERS[@]:-}"; do
+  [ "$layer" = auth ] || continue
+  step "auth layer: real sign-up over HTTP"
+  # The whole point is that the endpoints work before any UI exists.
+  body=$(curl -s -w '\n%{http_code}' --max-time 25 -X POST \
+    -H "Content-Type: application/json" -H "Origin: $URL" \
+    -d '{"email":"smoke@test.invalid","password":"hunter2hunter2","name":"Smoke"}' \
+    "$URL/api/auth/sign-up/email")
+  code=$(echo "$body" | tail -1)
+  [ "$code" = 200 ] && ok "sign-up 200" || { bad "sign-up returned $code"; echo "$body" | head -2 | sed 's/^/    /'; }
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 -X POST \
+    -H "Content-Type: application/json" -H "Origin: $URL" \
+    -d '{"email":"smoke@test.invalid","password":"hunter2hunter2"}' \
+    "$URL/api/auth/sign-in/email")
+  [ "$code" = 200 ] && ok "sign-in 200" || bad "sign-in returned $code"
+done
 
 for layer in "${LAYERS[@]:-}"; do
   [ "$layer" = ui ] || continue
