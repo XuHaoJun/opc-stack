@@ -56,6 +56,22 @@ without it reads as "done, but nothing to look at". Do not paste the source
 code into the ticket or the chat instead: the point of the preview is that the
 user can open it, not read it.
 
+### The preview is NOT on localhost — configure the dev server for it
+
+`.env` gives you `DEV_HOST` (bare host, no scheme or port). Modern dev servers
+refuse requests whose host is not localhost, and the failure looks like a
+broken app rather than a config problem: the page loads, then every JS chunk
+403s and nothing on it works.
+
+- **Next.js**: `allowedDevOrigins: [process.env.DEV_HOST]` in `next.config`.
+  Next 16 rejects any request carrying an `Origin` header from a non-localhost
+  host — including a **same-origin** one, so it hits normal use, not just CORS.
+- **Vite**: `server.allowedHosts: [process.env.DEV_HOST]`.
+
+Check your framework for an equivalent before declaring the prototype done,
+and open the preview URL once yourself. A `curl` of the page is not enough —
+it sends no `Origin` header, so it passes while a browser fails.
+
 The service idle-stops after 7 days. That stops a process; it deletes nothing.
 `prototype expose <name> --start` brings the same URL back.
 

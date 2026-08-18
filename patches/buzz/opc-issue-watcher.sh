@@ -59,16 +59,38 @@ api_get() {
     curl -fsS --max-time 15 -H "$AUTH" "$API$1" 2>/dev/null || true
 }
 
-# find_preview_url <issue-id> — the prototype lane's deliverable.
+# find_service_url <issue-id> — the prototype lane's deliverable, taken from
+# the WORK PLANE rather than from prose.
 #
-# A prototype never gets a GitHub link: its git repo is local by design and
-# what the user actually wants is the live preview. Only loopback URLs count —
-# the preview range is published on 127.0.0.1 — which also keeps the many
-# incidental http links in analysis comments from being mistaken for one.
+# Scraping comments for a link is guesswork, and it guessed wrong: a ticket
+# that mentioned a GitHub repo in passing (the skill it was told to install)
+# got that repo announced as the result. The preview URL is recorded on the
+# project's primary workspace when `prototype expose` registers the service, so
+# ask for it instead of reading the conversation.
+find_service_url() {
+    local pid ws
+    pid="$(api_get "/issues/$1" | jq -r '.projectId // empty' 2>/dev/null)"
+    [ -n "$pid" ] || return 0
+    api_get "/projects/$pid" | jq -r '
+        [ (.workspaces // [])[]
+          | (.runtimeConfig.workspaceRuntime.services // [])[]
+          | (.expose.urlTemplate // "") as $u
+          | select($u != "")
+          | if ($u | test("{{ *port *}}")) and (.port != null)
+            then ($u | sub("{{ *port *}}"; (.port|tostring)))
+            else $u end
+        ] | first // empty' 2>/dev/null
+}
+
+# find_preview_url <issue-id> — fallback when the work plane has nothing (an
+# agent that served something without registering it). Any explicit host:port
+# URL that is not a forge link; the host is whatever devenv advertises, so it
+# cannot be pinned to loopback (this deployment publishes on a tailnet IP).
 find_preview_url() {
     api_get "/issues/$1/comments" | \
-        jq -r '.. | strings? | select(test("https?://(localhost|127\\.0\\.0\\.1):[0-9]+"))' 2>/dev/null | \
-        grep -oE 'https?://(localhost|127\.0\.0\.1):[0-9]+(/[^ )"`'"'"']*)?' | \
+        jq -r '.. | strings? | select(test("https?://[^ ]+:[0-9]+"))' 2>/dev/null | \
+        grep -oE 'https?://[A-Za-z0-9._-]+:[0-9]{2,5}(/[^ )"`'"'"']*)?' | \
+        grep -vE '://(github|gitlab|bitbucket)\.' | \
         head -1
 }
 
@@ -99,17 +121,20 @@ poll_once() {
 
     case "$status" in
         done)
-            # Two lanes, two kinds of deliverable. Checking only for a GitHub
-            # link made every prototype report as "完成 (無 link)" even when it
-            # had posted a working preview URL — the work was fine, the
-            # notification threw it away.
-            url="$(find_github_url "$id")"
+            # Order matters, and it is the opposite of the obvious one. A
+            # registered preview wins over any GitHub link in the text:
+            # tickets legitimately mention repos (a skill to install, a
+            # library to copy from) and matching those announced the wrong
+            # thing entirely. Only a ticket with no preview at all falls
+            # through to a forge link, which is the engineering lane.
+            url="$(find_service_url "$id")"
+            if [ -z "$url" ]; then url="$(find_preview_url "$id")"; fi
             if [ -n "$url" ]; then
-                post "✅ ${title} 完成: ${url}"
+                post "✅ ${title} 完成, demo: ${url}"
             else
-                url="$(find_preview_url "$id")"
+                url="$(find_github_url "$id")"
                 if [ -n "$url" ]; then
-                    post "✅ ${title} 完成, demo: ${url}"
+                    post "✅ ${title} 完成: ${url}"
                 else
                     post "✅ ${title} 完成 (ticket 內沒有連結, 見 paperclip)"
                 fi

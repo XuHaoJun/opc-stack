@@ -102,6 +102,13 @@ http_provision() {
         _hp_i=$((_hp_i + 1))
     done
     printf 'DEV_URL=http://%s:%s\n' "$DEVENV_HTTP_PUBLIC_HOST" "$_hp_start"
+    # Bare host, no scheme or port. Dev servers increasingly refuse requests
+    # whose Host/Origin is not localhost and need it listed explicitly —
+    # Next.js 16 `allowedDevOrigins` (403s even a SAME-origin request when the
+    # host is an IP), Vite `server.allowedHosts`. Handing over the host as its
+    # own variable means those configs can be written once and stay correct
+    # wherever the preview is published.
+    printf 'DEV_HOST=%s\n' "$DEVENV_HTTP_PUBLIC_HOST"
 
     # The single most important line this provider emits.
     #
