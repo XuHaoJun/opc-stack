@@ -71,7 +71,7 @@ docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL 
 docker compose exec paperclip prototype list          # 目前有哪些 prototype (名字 / port / URL)
 docker compose exec paperclip prototype restore       # 手動把該跑的 preview 叫回來 (開機時會自動跑)
 docker compose exec paperclip prototype templates     # 可用的 scaffold
-scripts/test-prototype-template.sh [nextjs]           # template smoke test (建→裝→migrate→serve→驗兩個後端→刪)
+scripts/test-prototype-template.sh nextjs [ui]        # template/layer smoke test (建→裝→migrate→serve→驗兩個後端→刪)
 docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除路徑, 會先列出再要你打名字
 ```
 
@@ -141,6 +141,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - `patches/<proj>/opc-mise-seed.sh` — 每 project 一份, entrypoint source 的 mise bootstrap (空 volume 自動裝 node/rust/omp)
 - `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
 - `patches/paperclip/skills/<slug>/` — vendor 的第三方 skill (SKILL.md + sibling 檔 + `SOURCE` 記 repo/SHA); image 內落在 `/opt/opc-skills/`, bootstrap 裝進 company library
+- `patches/paperclip/templates/_layers/<name>/apply.sh` — 選配的 layer (`prototype layer add`)。**layer 之間必須獨立** — 需要知道另一個 layer 存在的 layer 是設計失敗, 它會讓測試從線性變成組合爆炸。用 script 而非複製檔案, 是因為 tailwind/shadcn 有自己的 installer, 複製快照等於凍結我們控制不了的版本
 - `patches/paperclip/templates/<name>/` — `prototype create --template` 的 scaffold。**是程式碼不是文件**: env 覆蓋順序、`NODE_ENV`、`allowedDevOrigins`、valkey ready check 每一條都是一次除錯換來的, 讓 agent 照文件重打必然出錯 (已發生過)。改了跑 `scripts/test-prototype-template.sh`
 - `patches/paperclip/prototype/` — `prototype` CLI (paperclip-aware 的工作流層: project + git + 租約)。**刻意不放進 devenv** — devenv 是通用資源租約, 不該認識 paperclip; 它只多一個 `mark-exposed` 供 `devenv list` 標記
 - `patches/paperclip/skills/{devenv,prototype-workspace}/` — first-party skill (租約用法 / prototype 工作流 + 覆寫 vendored `prototype` skill 的第 1、3、6 條規則)

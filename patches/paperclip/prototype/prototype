@@ -2,7 +2,8 @@
 # prototype — the workflow object: a named, long-lived experiment.
 #
 #   prototype create    <name> [--template T] [--command CMD] [--idle 7d|never] [--ports N]
-#   prototype templates
+#   prototype templates | prototype layers
+#   prototype layer add <name> <layer>
 #   prototype expose    <name> --command CMD [--idle 7d|never] [--start|--stop]
 #   prototype skill add <name> --from <git-url> [--path DIR] [--ref REF] [--only a,b]
 #   prototype publish   <name> [--public] [--repo NAME] [--yes]
@@ -39,6 +40,7 @@ set -eu
 
 PROTOTYPE_ROOT="${PROTOTYPE_ROOT:-/prototypes}"
 PROTOTYPE_TEMPLATES="${PROTOTYPE_TEMPLATES:-/usr/local/lib/prototype/templates}"
+PROTOTYPE_LAYERS="${PROTOTYPE_LAYERS:-$PROTOTYPE_TEMPLATES/_layers}"
 # 7 days. Prototypes idle-stop to free the process; the engineering lane never
 # does. Stopping is not deleting: lease, database and files all stay.
 PROTOTYPE_DEFAULT_IDLE="${PROTOTYPE_DEFAULT_IDLE:-7d}"
@@ -117,6 +119,21 @@ idle_seconds() {
         *[!0-9]*) die "bad --idle '$1' (use 7d / 12h / 30m / seconds / never)" 2 ;;
         *) echo "$1" ;;
     esac
+}
+
+# Run a command as the runtime user when we are root.
+#
+# Anything that writes into the prototype tree OR into the runtime user's home
+# must run as that user. pnpm keeps its store index under $HOME, and a single
+# root-run `pnpm add` leaves it root-owned — after which every later install by
+# the agent dies with "attempt to write a readonly database", nowhere near the
+# thing that caused it.
+as_runtime() { # as_runtime <dir> <sh -c string>
+    if [ "$(id -u)" = 0 ] && id "$RUNTIME_USER" >/dev/null 2>&1; then
+        su "$RUNTIME_USER" -s /bin/sh -c "cd '$1' && $2"
+    else
+        ( cd "$1" && sh -c "$2" )
+    fi
 }
 
 # Hand a path to the runtime user.
@@ -519,11 +536,44 @@ $dirty"
     fi
 }
 
+cmd_layers() {
+    [ -d "$PROTOTYPE_LAYERS" ] || { note "no layers installed"; return 0; }
+    for l in "$PROTOTYPE_LAYERS"/*/; do
+        [ -d "$l" ] || continue
+        n="$(basename "$l")"
+        printf '%-10s %s\n' "$n" "$(sed -n '1p' "$l/README.md" 2>/dev/null | sed 's/^# *//')"
+    done
+}
+
+# Layers are additive and independent BY CONTRACT. A layer that needs to know
+# another layer has been applied is a design failure, not a feature to support:
+# it turns testing from linear (base, base+each) into combinatorial, and this
+# stack has no capacity to test a matrix.
+cmd_layer_add() {
+    name="${1:?usage: prototype layer add <name> <layer>}"
+    layer="${2:?usage: prototype layer add <name> <layer>}"
+    check_name "$name"
+    dir="$PROTOTYPE_ROOT/$name"
+    [ -d "$dir" ] || die "no prototype named '$name'" 2
+    ldir="$PROTOTYPE_LAYERS/$layer"
+    [ -x "$ldir/apply.sh" ] || die "unknown layer '$layer' (see: prototype layers)" 2
+
+    own "$dir"
+    as_runtime "$dir" "sh '$ldir/apply.sh'" || die "layer '$layer' failed" 1
+    own "$dir"
+
+    pgit "$dir" add -A >/dev/null 2>&1 || true
+    pgit "$dir" -c user.email=prototype@opc -c user.name=prototype \
+        commit -q -m "chore: apply '$layer' layer" >/dev/null 2>&1 || true
+    note "prototype: layer '$layer' applied to '$name'"
+}
+
 cmd_templates() {
     [ -d "$PROTOTYPE_TEMPLATES" ] || { note "no templates installed"; return 0; }
     for t in "$PROTOTYPE_TEMPLATES"/*/; do
         [ -d "$t" ] || continue
         n="$(basename "$t")"
+        case "$n" in _*) continue ;; esac
         printf '%-16s %s\n' "$n" "$(sed -n '3p' "$t/README.md" 2>/dev/null)"
     done
 }
@@ -591,6 +641,13 @@ case "${1:-}" in
     expose)  shift; cmd_expose  "$@" ;;
     list)      shift; cmd_list      "$@" ;;
     templates) shift; cmd_templates "$@" ;;
+    layers)    shift; cmd_layers    "$@" ;;
+    layer)
+        shift
+        case "${1:-}" in
+            add) shift; cmd_layer_add "$@" ;;
+            *) die "usage: prototype layer add <name> <layer>" 2 ;;
+        esac ;;
     restore) shift; cmd_restore "$@" ;;
     publish) shift; cmd_publish "$@" ;;
     destroy) shift; cmd_destroy "$@" ;;
@@ -600,6 +657,6 @@ case "${1:-}" in
             add) shift; cmd_skill_add "$@" ;;
             *) die "usage: prototype skill add <name> --from <git-url>" 2 ;;
         esac ;;
-    -h|--help|help|"") sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command '$1' (create|expose|skill|templates|list|restore|publish|destroy)" 2 ;;
+    -h|--help|help|"") sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (create|expose|skill|layer|templates|layers|list|restore|publish|destroy)" 2 ;;
 esac

@@ -64,6 +64,7 @@ Include the lane as a field, so switching lanes costs them one word:
 ```
 Lane: prototype
 Prototype: recipe-bot      <- prototype lane only; see below
+Stack: nextjs +ui          <- prototype lane only; see below
 Title: ...
 Scope: ...
 Acceptance: ...
@@ -106,6 +107,23 @@ old one.
 
 If the user is vague ("改一下那個食譜的"), list the prototypes and ask which —
 do not guess. Guessing wrong means editing the wrong prototype.
+
+### Choosing the stack
+
+The prototype lane has a base template and optional layers. Put the choice in
+the brief as `Stack:`, so the user can change it in one word.
+
+| | When |
+|---|---|
+| `nextjs` | Default for anything with a web interface. Next.js + Postgres (raw SQL + migrations) + Valkey, already wired. |
+| `+ui` | Add Tailwind 4 + shadcn/ui — only when the point of the prototype involves how it *looks* or a real interface to click through. |
+| *(none)* | A question that a single script or HTML file answers. Do not reach for a framework to answer "does this algorithm work". |
+
+**Default to the smallest thing that answers the question.** Layers are
+additive and can be applied later, so starting without one costs nothing;
+starting with one the prototype never needed costs an install, a slower
+feedback loop, and a pile of code nobody reads. When in doubt, leave it out
+and let the agent add it when the need is real.
 
 ### Prototype tickets differ from engineering tickets
 

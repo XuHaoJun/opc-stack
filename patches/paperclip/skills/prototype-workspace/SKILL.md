@@ -43,6 +43,20 @@ keep it.
 `--template` only applies to an empty prototype; re-running create never
 overwrites existing work.
 
+### Layers: add capability only when the ticket asks for it
+
+```sh
+prototype layers                 # what is available
+prototype layer add <name> ui    # Tailwind 4 + shadcn/ui
+```
+
+Layers are additive and can be applied at any point, including after you have
+started building — so **do not apply one speculatively**. A ticket that says
+nothing about the interface does not want a component library; the base
+template already renders HTML.
+
+The ticket decides. If the brief carries a `Stack:` line, follow it exactly.
+
 Run it even when you are continuing — it is the resume path, not just the
 create path. It reports whether it created the project or found it.
 
