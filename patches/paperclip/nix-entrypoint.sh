@@ -17,6 +17,13 @@ opc_gh_seed
 . /usr/local/bin/opc-claude-seed.sh
 opc_claude_seed
 
+# Prototype working trees. Paperclip does not create a local_path workspace's
+# cwd, and the volume arrives root-owned, so make the root writable by the
+# runtime user before anything tries to use it.
+if [ -d /prototypes ]; then
+    chown node:node /prototypes 2>/dev/null || true
+fi
+
 # devenv control DB + schema (optional lane; never fatal).
 . /usr/local/bin/opc-devenv-seed.sh
 opc_devenv_seed

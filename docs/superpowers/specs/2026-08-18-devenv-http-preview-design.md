@@ -438,7 +438,7 @@ t.http_port_count,
 5. **prototype 名字同時是 project 名、devenv key、目錄名。** 三者必須一致,否則
    `devenv list` 與 project 清單會對不上。名字規則沿用既有 key 驗證
    (`^[a-z][a-z0-9-]{1,40}$`),建 project 時一併套用。
-6. **冷啟動可能因為環境過期而失敗**(node_modules 不在、lockfile 對不上)。
+7. **冷啟動可能因為環境過期而失敗**(node_modules 不在、lockfile 對不上)。
    `setupCommand` 是緩解而非保證 —— 放了半年的 prototype 叫不回來是可能的,
    屆時是修而不是重建(資料與程式碼都還在)。
 
@@ -491,6 +491,33 @@ t.http_port_count,
 11. AGENTS.md: 架構條目 + 已知坑(`{{port}}` 非 `${port}`、
     `PAPERCLIP_WORKSPACE_ID` 是 project workspace id、`RANGE_END` 一致性、
     prototype 永不自動刪除)
+
+## 實作偏差 — v2 (步驟 6-8)
+
+6. **`devenv expose` / `devenv destroy` 改成獨立的 `prototype` CLI。**
+   不是風格選擇,是被步驟 6 逼出來的: 建立一個 prototype 需要**目錄 + git repo +
+   Paperclip project**,這三樣沒有一樣是「開發資源租約」該知道的。
+   叫它 `devenv` 會直接違反使用者已經核可的原則(「拆開比較乾淨…抽象一旦破了很難補回來」)。
+   分層變成: **devenv = 通用租約, 完全不認識 paperclip;prototype = 工作流物件,
+   認識 paperclip + 呼叫 devenv**。devenv 只多了一個 `mark-exposed`
+   (由 prototype 呼叫,純粹記錄「有人 expose 過」供 `devenv list` 標記),不含任何 paperclip 知識。
+
+7. **`setupCommand` 從來不會被執行。** upstream 只有 CRUD 讀寫它,沒有任何執行路徑。
+   原本打算靠它做 `git init`,行不通。改由 `prototype create` 在容器內直接做。
+   同理 **paperclip 不會建 `local_path` workspace 的 cwd**(`mkdir` 只出現在 worktree 路徑),
+   所以目錄必須由 `prototype create` 先建好。
+
+8. **board key 鏡像到 `/paperclip/.opc/board-api.key`。**
+   agent run 會被注入 per-run 的 `PAPERCLIP_API_KEY`,但人用 `docker exec` 跑
+   `prototype destroy` 時沒有。沒有選擇把 `opc-keys` 掛進 paperclip ——
+   那個 volume 還放著 buzz 的 relay/agent nsec,paperclip 沒有理由讀得到它們。
+   散播一個憑證好過散播四個。
+
+9. **hermes 不建 project。** 原本 spec 讓 hermes 走「列→比對→找不到就建」。
+   但建立需要容器內的檔案系統動作,hermes 只有 API。改成 hermes 照舊只開 issue,
+   由 Prototyper 在第一次 run 跑 `prototype create <name>`(冪等)。
+   已驗證**沒有 project 的 run 仍然可以執行**(跑在 agent home),所以不存在雞生蛋問題,
+   而且 hermes 的路由層維持零改動。
 
 ## 實作偏差 (spec 寫定後在實作中修正)
 

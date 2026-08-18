@@ -545,6 +545,10 @@ services:
       # re-syncs. Named by role, not engine — swapping claude→omp later
       # keeps the same home.
       - opc-prototyper-home:/agent-homes/prototyper
+      # Prototype working trees. One directory per prototype, each its own git
+      # repo. Paperclip does NOT create a local_path workspace's cwd (mkdir
+      # only happens for worktrees), so the `prototype` CLI makes it.
+      - opc-prototypes:/prototypes
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -570,6 +574,10 @@ services:
       PAPERCLIP_EXECUTOR_AGENT_NAME: ${PAPERCLIP_EXECUTOR_AGENT_NAME:-OMP Engineer}
     volumes:
       - opc-keys:/keys
+      # Write-side of the board-key mirror the `prototype` CLI reads when a
+      # human runs it via docker exec (agent runs get PAPERCLIP_API_KEY
+      # injected; interactive shells do not).
+      - paperclip-data:/paperclip
 
   # ══════════════════════════ devenv (agent 開發資源) ══════════════════════════
   # Shared backends that Paperclip agents lease per-tenant via the `devenv` CLI
@@ -743,6 +751,7 @@ services:
 volumes:
   opc-keys:
   opc-gh-creds:
+  opc-prototypes:
   opc-prototyper-home:
   devenv-pg-data:
   devenv-valkey-data:

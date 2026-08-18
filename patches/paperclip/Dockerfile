@@ -140,6 +140,10 @@ COPY opc/opc-claude-seed.sh /usr/local/bin/opc-claude-seed.sh
 COPY opc/opc-devenv-seed.sh /usr/local/bin/opc-devenv-seed.sh
 # devenv CLI + providers + control schema (see the devenv spec).
 COPY opc/devenv/ /usr/local/lib/devenv/
+# `prototype` CLI: the paperclip-aware workflow layer (project + git + lease).
+# Kept out of devenv on purpose — devenv must stay a generic resource lease
+# with no knowledge of Paperclip. See the header of opc/prototype/prototype.
+COPY opc/prototype/ /usr/local/lib/prototype/
 # Vendored third-party skills, installed into the company library by
 # opc-paperclip-bootstrap.sh (Paperclip's GitHub importer drops sibling files).
 COPY opc/skills/ /opt/opc-skills/
@@ -150,7 +154,9 @@ RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-devenv-seed.sh \
              /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh \
     && chmod +x /usr/local/lib/devenv/devenv /usr/local/lib/devenv/providers/*.sh \
-    && ln -sf /usr/local/lib/devenv/devenv /usr/local/bin/devenv
+    && chmod +x /usr/local/lib/prototype/prototype \
+    && ln -sf /usr/local/lib/devenv/devenv /usr/local/bin/devenv \
+    && ln -sf /usr/local/lib/prototype/prototype /usr/local/bin/prototype
 
 # Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
 # above); a tool-list change rebuilds only the nix-seed image.

@@ -143,6 +143,21 @@ else
     echo "[pc-bootstrap] key file exists; keeping it"
 fi
 
+# Second copy inside the paperclip data volume, for container-side tooling
+# (`prototype destroy` run by a human via docker exec) that has no
+# PAPERCLIP_API_KEY in its environment — only agent runs get one injected.
+#
+# A copy rather than mounting opc-keys on the paperclip service: that volume
+# also holds the buzz relay and agent nsec keys, which paperclip has no
+# business being able to read. Spreading one credential beats spreading four.
+if [ -d /paperclip ]; then
+    mkdir -p /paperclip/.opc
+    cp -f /keys/paperclip-api.key /paperclip/.opc/board-api.key
+    chmod 700 /paperclip/.opc; chmod 600 /paperclip/.opc/board-api.key
+    chown -R node:node /paperclip/.opc 2>/dev/null || true
+    echo "[pc-bootstrap] mirrored board key to /paperclip/.opc/board-api.key"
+fi
+
 # ── 5. Vendored skills → company library ──
 # These are vendored (patches/paperclip/skills/) rather than imported from
 # GitHub because Paperclip's importer fetches only SKILL.md, and a skill whose

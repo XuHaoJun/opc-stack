@@ -286,6 +286,18 @@ cmd_release() {
     note "devenv: '$key' released"
 }
 
+# Set by the `prototype` CLI after it registers a service with Paperclip.
+# devenv itself never talks to paperclip; it just records that someone did, so
+# `devenv list` can flag a port that was leased and then forgotten.
+cmd_mark_exposed() {
+    key="${1:?usage: devenv mark-exposed <key>}"
+    postgres_probe || die "devenv-pg unreachable at $DEVENV_PG_HOST:$DEVENV_PG_PORT" 4
+    [ -n "$(devenv_registry_get "$key" key)" ] || die "no lease named '$key'" 2
+    devenv_psql_control -v ON_ERROR_STOP=1 -c \
+        "UPDATE devenv_tenant SET http_exposed_at = now(), last_seen_at = now()
+          WHERE key = '$key'" >/dev/null
+}
+
 cmd_list() {
     postgres_probe || die "devenv-pg unreachable at $DEVENV_PG_HOST:$DEVENV_PG_PORT" 4
     # Same view the humans query from a SQL client — one definition, no drift.
@@ -303,10 +315,11 @@ cmd_list() {
 }
 
 case "${1:-}" in
-    provision) shift; cmd_provision "$@" ;;
-    release)   shift; cmd_release   "$@" ;;
-    list)      shift; cmd_list      "$@" ;;
+    provision)    shift; cmd_provision    "$@" ;;
+    release)      shift; cmd_release      "$@" ;;
+    list)         shift; cmd_list         "$@" ;;
+    mark-exposed) shift; cmd_mark_exposed "$@" ;;
     -h|--help|help|"")
         sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command '$1' (provision|release|list)" 2 ;;
+    *) die "unknown command '$1' (provision|release|list|mark-exposed)" 2 ;;
 esac

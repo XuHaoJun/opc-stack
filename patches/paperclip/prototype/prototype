@@ -1,0 +1,311 @@
+#!/bin/sh
+# prototype — the workflow object: a named, long-lived experiment.
+#
+#   prototype create  <name> [--command CMD] [--idle 7d|never] [--ports N]
+#   prototype expose  <name> --command CMD [--idle 7d|never] [--start|--stop]
+#   prototype list
+#   prototype destroy <name>
+#
+# WHY THIS IS NOT A `devenv` SUBCOMMAND
+#
+# devenv is a GENERIC development-resource lease: postgres, valkey, an http
+# port. It knows nothing about Paperclip and must stay that way, or it stops
+# being usable outside this one workflow. Creating a prototype needs three
+# things devenv has no business knowing: a directory on disk, a git repo, and a
+# Paperclip project. So the paperclip-aware layer lives here and calls devenv
+# for leases, rather than devenv growing a paperclip dependency.
+#
+# WHAT A PROTOTYPE IS (see the http-preview spec, 決策二)
+#
+#   prototype "recipe-bot"
+#     = Paperclip project    name=recipe-bot            <- named, listable
+#     + project workspace    cwd=/prototypes/recipe-bot <- its own git
+#     + devenv key           recipe-bot                 <- DB + port, stable
+#     + runtime service      on the PROJECT workspace   <- URL never changes
+#     + issues over time     each one a change request
+#
+# The service is attached to the PROJECT workspace, not to an execution
+# workspace, so it survives with no issue in flight. That is what makes
+# "bring it back up so I can look at it" a single call months later.
+#
+# LIFECYCLE RULE: nothing here ever deletes on its own. `destroy` is the only
+# destructive command, it is never called by anything automatic, and it has no
+# --yes flag on purpose.
+set -eu
+
+PROTOTYPE_ROOT="${PROTOTYPE_ROOT:-/prototypes}"
+# 7 days. Prototypes idle-stop to free the process; the engineering lane never
+# does. Stopping is not deleting: lease, database and files all stay.
+PROTOTYPE_DEFAULT_IDLE="${PROTOTYPE_DEFAULT_IDLE:-7d}"
+BOARD_KEY_FILE="${BOARD_KEY_FILE:-/paperclip/.opc/board-api.key}"
+
+die()  { echo "prototype: $1" >&2; exit "${2:-1}"; }
+note() { echo "$1" >&2; }
+
+# ── paperclip api ────────────────────────────────────────────────────────
+
+# PAPERCLIP_API_URL may or may not already end in /api; upstream's own agent
+# prompt normalizes the same way, so do it identically.
+api_base() {
+    _b="${PAPERCLIP_API_URL:-http://paperclip:3100}"
+    _b="${_b%/}"; _b="${_b%/api}"
+    echo "$_b"
+}
+
+api_key() {
+    # Agent runs get PAPERCLIP_API_KEY injected as a per-run token. A human on
+    # `docker exec` gets nothing, so fall back to the board key the bootstrap
+    # mirrors into the data volume.
+    if [ -n "${PAPERCLIP_API_KEY:-}" ]; then
+        echo "$PAPERCLIP_API_KEY"
+    elif [ -s "$BOARD_KEY_FILE" ]; then
+        cat "$BOARD_KEY_FILE"
+    else
+        die "no Paperclip credential (PAPERCLIP_API_KEY unset and $BOARD_KEY_FILE missing)" 4
+    fi
+}
+
+api() { # api <METHOD> <PATH> [json-body-on-stdin]
+    _m="$1"; _p="$2"
+    if [ "$_m" = GET ] || [ "$_m" = DELETE ]; then
+        curl -fsS -X "$_m" -H "Authorization: Bearer $(api_key)" "$(api_base)/api$_p"
+    else
+        curl -fsS -X "$_m" -H "Authorization: Bearer $(api_key)" \
+             -H "Content-Type: application/json" --data-binary @- "$(api_base)/api$_p"
+    fi
+}
+
+company_id() {
+    if [ -n "${PAPERCLIP_COMPANY_ID:-}" ]; then echo "$PAPERCLIP_COMPANY_ID"; return; fi
+    api GET "/companies" | jq -r '.[0].id // empty'
+}
+
+# name -> project. The whole "say the name and keep working on it" mechanism is
+# this one lookup; create and resume take the same path, which is why resume
+# cannot drift from create.
+find_project() {
+    api GET "/companies/$(company_id)/projects" \
+        | jq -r --arg n "$1" '.[] | select(.name == $n) | .id' | head -1
+}
+
+primary_workspace_id() {
+    api GET "/projects/$1" \
+        | jq -r '(.workspaces // [])[] | select(.isPrimary == true) | .id' | head -1
+}
+
+# ── helpers ──────────────────────────────────────────────────────────────
+
+check_name() {
+    # Same rule as devenv keys: the name is simultaneously the project name,
+    # the devenv key and a directory name, so it has to satisfy the strictest.
+    echo "$1" | grep -Eq '^[a-z][a-z0-9-]{1,40}$' \
+        || die "invalid name '$1' — must match ^[a-z][a-z0-9-]{1,40}\$" 2
+}
+
+# 7d / 30m / 3600 / never  ->  seconds, or empty for never
+idle_seconds() {
+    case "$1" in
+        never|none|off) echo "" ;;
+        *d) echo $(( ${1%d} * 86400 )) ;;
+        *h) echo $(( ${1%h} * 3600 )) ;;
+        *m) echo $(( ${1%m} * 60 )) ;;
+        *[!0-9]*) die "bad --idle '$1' (use 7d / 12h / 30m / seconds / never)" 2 ;;
+        *) echo "$1" ;;
+    esac
+}
+
+env_get() { # read a key out of the prototype's .env
+    _f="$PROTOTYPE_ROOT/$1/.env"
+    [ -f "$_f" ] || return 1
+    sed -n "s/^$2=//p" "$_f" | head -1
+}
+
+# ── commands ─────────────────────────────────────────────────────────────
+
+cmd_create() {
+    name=""; command_=""; idle="$PROTOTYPE_DEFAULT_IDLE"; ports=1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --command) command_="${2:?--command needs a value}"; shift 2 ;;
+            --idle)    idle="${2:?--idle needs a value}"; shift 2 ;;
+            --ports)   ports="${2:?--ports needs a value}"; shift 2 ;;
+            -*) die "unknown flag: $1" 2 ;;
+            *)  [ -z "$name" ] || die "unexpected argument: $1" 2; name="$1"; shift ;;
+        esac
+    done
+    [ -n "$name" ] || die "usage: prototype create <name> [--command CMD] [--idle 7d|never]" 2
+    check_name "$name"
+
+    dir="$PROTOTYPE_ROOT/$name"
+
+    # Every step below is idempotent, so a half-finished create is repaired by
+    # running it again rather than by cleaning up by hand.
+    mkdir -p "$dir"
+    if [ ! -d "$dir/.git" ]; then
+        git -C "$dir" init -q
+        # An empty first commit gives the agent a base to diff against; without
+        # it `git log`/`git diff` fail on a fresh repo and confuse the model.
+        git -C "$dir" -c user.email=prototype@opc -c user.name=prototype \
+            commit -q --allow-empty -m "prototype: $name" 2>/dev/null || true
+        note "prototype: git repo initialised at $dir"
+    fi
+
+    devenv provision "$name" --with "postgres,http=$ports" --env-file "$dir/.env" >/dev/null
+    port="$(env_get "$name" DEV_PORT)" || die "devenv did not write DEV_PORT" 1
+    url="$(env_get "$name" DEV_URL)"
+
+    company="$(company_id)"
+    project="$(find_project "$name")"
+    if [ -z "$project" ]; then
+        project="$(printf '%s' "$(jq -nc \
+            --arg n "$name" --arg d "Prototype. Working tree $dir; devenv key $name; preview $url." \
+            --arg cwd "$dir" \
+            '{name:$n, description:$d, status:"in_progress",
+              workspace:{name:"primary", sourceType:"local_path", cwd:$cwd, isPrimary:true}}')" \
+            | api POST "/companies/$company/projects" | jq -r '.id')"
+        [ -n "$project" ] && [ "$project" != null ] || die "failed to create Paperclip project" 1
+        note "prototype: created Paperclip project $project"
+    else
+        note "prototype: Paperclip project exists ($project)"
+    fi
+
+    if [ -n "$command_" ]; then
+        cmd_expose "$name" --command "$command_" --idle "$idle" --start
+    else
+        note "prototype: '$name' ready — $dir (preview port $port, not yet exposed)"
+        note "prototype:   next: prototype expose $name --command '<dev server cmd>' --start"
+    fi
+}
+
+cmd_expose() {
+    name=""; command_=""; idle="$PROTOTYPE_DEFAULT_IDLE"; action=""; svc=web
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --command) command_="${2:?--command needs a value}"; shift 2 ;;
+            --idle)    idle="${2:?--idle needs a value}"; shift 2 ;;
+            --service) svc="${2:?--service needs a value}"; shift 2 ;;
+            --start)   action=start; shift ;;
+            --stop)    action=stop; shift ;;
+            -*) die "unknown flag: $1" 2 ;;
+            *)  [ -z "$name" ] || die "unexpected argument: $1" 2; name="$1"; shift ;;
+        esac
+    done
+    [ -n "$name" ] || die "usage: prototype expose <name> --command CMD [--idle 7d|never] [--start]" 2
+    check_name "$name"
+
+    project="$(find_project "$name")"
+    [ -n "$project" ] || die "no prototype named '$name' — run 'prototype create $name' first" 2
+    ws="$(primary_workspace_id "$project")"
+    [ -n "$ws" ] || die "prototype '$name' has no primary workspace" 1
+
+    if [ "$action" = stop ]; then
+        printf '{}' | api POST "/projects/$project/workspaces/$ws/runtime-services/stop" >/dev/null
+        note "prototype: '$name' service stopped (nothing was deleted)"
+        return 0
+    fi
+
+    [ -n "$command_" ] || die "--command is required (it is what gets run to serve the preview)" 2
+    port="$(env_get "$name" DEV_PORT)" || die "'$name' has no DEV_PORT — run 'prototype create $name'" 2
+    secs="$(idle_seconds "$idle")"
+
+    # port is an EXPLICIT number, never {"type":"auto"}: auto allocates from the
+    # kernel's ephemeral range, which docker has not published, so the URL would
+    # render fine and connect to nothing.
+    #
+    # readiness probes 127.0.0.1 (inside the container) while expose advertises
+    # the host address — two separate fields for two separate viewpoints.
+    svc_json="$(jq -nc --arg n "$svc" --arg c "$command_" --argjson p "$port" \
+        --arg url "$(env_get "$name" DEV_URL)" --arg secs "$secs" '
+        {name:$n, command:$c, cwd:".", port:$p, lifecycle:"shared",
+         readiness:{type:"http", urlTemplate:"http://127.0.0.1:{{port}}"},
+         expose:{type:"url", urlTemplate:$url}}
+        + (if $secs == "" then {} else
+             {stopPolicy:{type:"idle_timeout", idleSeconds:($secs|tonumber)}} end)')"
+
+    # Upsert by name so re-running with a changed command updates the entry
+    # instead of appending a second service on the same port.
+    existing="$(api GET "/projects/$project" \
+        | jq -c --arg id "$ws" '((.workspaces // [])[] | select(.id == $id)
+            | .runtimeConfig.workspaceRuntime.services) // []')"
+    merged="$(printf '%s' "$existing" | jq -c --argjson s "$svc_json" \
+        '(map(select(.name != $s.name)) + [$s])')"
+
+    jq -nc --argjson svcs "$merged" \
+        '{runtimeConfig:{workspaceRuntime:{services:$svcs}, desiredState:"running"}}' \
+        | api PATCH "/projects/$project/workspaces/$ws" >/dev/null
+
+    devenv mark-exposed "$name" >/dev/null 2>&1 || true
+    note "prototype: '$name' service '$svc' registered on port $port (idle=${idle})"
+
+    if [ "$action" = start ]; then
+        printf '{}' | api POST "/projects/$project/workspaces/$ws/runtime-services/start" >/dev/null
+        note "prototype: started → $(env_get "$name" DEV_URL)"
+    fi
+}
+
+cmd_list() {
+    company="$(company_id)"
+    printf '%-24s %-8s %-26s %s\n' NAME PORT URL DIR
+    api GET "/companies/$company/projects" | jq -r '.[] | .name' | while read -r n; do
+        [ -d "$PROTOTYPE_ROOT/$n" ] || continue
+        printf '%-24s %-8s %-26s %s\n' \
+            "$n" "$(env_get "$n" DEV_PORT || echo -)" \
+            "$(env_get "$n" DEV_URL || echo -)" "$PROTOTYPE_ROOT/$n"
+    done
+    note ""
+    note "resource usage (databases, leases): devenv list"
+}
+
+cmd_destroy() {
+    name="${1:-}"
+    [ -n "$name" ] || die "usage: prototype destroy <name>" 2
+    check_name "$name"
+
+    dir="$PROTOTYPE_ROOT/$name"
+    project="$(find_project "$name")"
+    [ -n "$project" ] || [ -d "$dir" ] || die "no prototype named '$name'" 2
+
+    # Show everything that is about to be lost BEFORE asking. Deletion here is
+    # rare and irreversible; the confirmation is worth more than the keystrokes.
+    echo "About to permanently destroy prototype '$name':"
+    echo
+    [ -d "$dir" ] && echo "  working tree   $dir  ($(du -sh "$dir" 2>/dev/null | cut -f1))"
+    if [ -n "$project" ]; then
+        _n_issues="$(api GET "/companies/$(company_id)/issues" \
+            | jq -r --arg p "$project" '[.[] | select(.projectId == $p)] | length' 2>/dev/null || echo '?')"
+        echo "  Paperclip proj $project  ($_n_issues issues)"
+    fi
+    docker_devenv="$(devenv list 2>/dev/null | grep -E "^ *$name " || true)"
+    [ -n "$docker_devenv" ] && echo "  devenv lease   $docker_devenv"
+    echo "  database       devenv_$(echo "$name" | tr '-' '_')  (dropped)"
+    echo "  preview port   $(env_get "$name" DEV_PORT 2>/dev/null || echo -)  (returned to the pool)"
+    echo
+    # Typing the name, not y/N: this is the one action in the stack that cannot
+    # be undone, and y/N is one stray keystroke away from yes. There is
+    # deliberately no --yes flag — it would reduce "never delete without my
+    # approval" to a single line of script.
+    printf "Type the prototype name to confirm: "
+    read -r confirm || confirm=""
+    [ "$confirm" = "$name" ] || die "confirmation did not match — nothing was deleted" 2
+
+    if [ -n "$project" ]; then
+        ws="$(primary_workspace_id "$project")"
+        if [ -n "$ws" ]; then
+            printf '{}' | api POST "/projects/$project/workspaces/$ws/runtime-services/stop" >/dev/null 2>&1 || true
+        fi
+        api DELETE "/projects/$project" >/dev/null 2>&1 \
+            || note "prototype: WARNING could not delete Paperclip project $project — remove it from the board"
+    fi
+    devenv release "$name" >/dev/null 2>&1 || note "prototype: WARNING devenv release failed for '$name'"
+    rm -rf "$dir"
+    note "prototype: '$name' destroyed"
+}
+
+case "${1:-}" in
+    create)  shift; cmd_create  "$@" ;;
+    expose)  shift; cmd_expose  "$@" ;;
+    list)    shift; cmd_list    "$@" ;;
+    destroy) shift; cmd_destroy "$@" ;;
+    -h|--help|help|"") sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (create|expose|list|destroy)" 2 ;;
+esac
