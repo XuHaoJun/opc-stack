@@ -70,6 +70,8 @@ scripts/sync-claude-creds.sh  # host Claude OAuth cred 重同步 (token 輪替�
 docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL client 連 127.0.0.1:5433)
 docker compose exec paperclip prototype list          # 目前有哪些 prototype (名字 / port / URL)
 docker compose exec paperclip prototype restore       # 手動把該跑的 preview 叫回來 (開機時會自動跑)
+docker compose exec paperclip prototype templates     # 可用的 scaffold
+scripts/test-prototype-template.sh [nextjs]           # template smoke test (建→裝→migrate→serve→驗兩個後端→刪)
 docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除路徑, 會先列出再要你打名字
 ```
 
@@ -105,6 +107,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - **`config.yaml` 不是放「必須成立的規則」的地方**: seed 是「不存在才寫」, 而且 **hermes 會自己遷移它** — frontdoor 的 volume 被遷到 `_config_version 37` 的過程中 **`system_prompt` 整個不見了**, 於是它有很長一段時間在**沒有 system prompt** 的狀態下跑, 而沒有任何地方會顯示這件事。config.yaml 現在只放對話語氣與 Buzz 發文機制, 且每次開機 reconcile。
 - **派工路由住在 `paperclip-api` skill, 不在 system_prompt**: hermes 是決定 assignee 的那一層 (Paperclip 在本 stack 沒有自動路由 — 無 CEO、org 全扁平、`role=general`, 未指派的 ticket 沒人會醒)。lane 表 (`engineering`→`OMP Engineer` / `prototype`→`Prototyper`) 放 skill 的理由: skill 由 image 在每次開機同步進 **兩個** hermes home (frontdoor 與 gateway), 而 `config.yaml` 的 system_prompt 是 per-home 且 dashboard 可編輯 — 規則放 prompt 會分歧。**改 skill 要同時改 `patches/buzz/skills/` 與 `patches/hermes/skills/` 兩份** (內容必須相同)。channel 層的 `platforms.<name>.channel_overrides[channel_id]` 可覆寫 system_prompt/model, 但那是 per-platform × per-channel-id, 只適合當加速器, 不要拿來當路由機制。
 - **preview 的對外位址由 `PAPERCLIP_PUBLIC_URL` 決定, 不要另外設一份**: `DEVENV_HTTP_PUBLIC_HOST` 留空時從它的 host 推導 (`providers/http.sh`)。理由是 preview 連結**長在 board 上**, 兩者必然從同一個地方被存取 —— 寫成兩個變數只會製造「board 開得起來、連結打不開」這種只有症狀沒有訊息的分歧。發佈位址 `DEVENV_HTTP_BIND` 預設 `0.0.0.0`(與 paperclip/buzz/hermes 一致); 要收窄就設 `127.0.0.1` 或 tailnet IP。**改了要 recreate paperclip 容器**(docker 的 port 發佈在建立容器時固定)。
+- **prototype 目錄的擁有者必須是 runtime user (`node`)**: paperclip server 與它 spawn 的 dev server 都是 node, 但人用 `docker compose exec` 是 root。root 建出來的樹會讓 `expose --start` 回 **500**, 而真正的原因 (`EACCES: mkdir .next/dev`) 只出現在 paperclip 的 log 裡, 看起來完全不像權限問題。`prototype` CLI 在以 root 執行時會自動 chown; 同一類問題也影響 git (`dubious ownership` → `|| true` 包住的 commit 靜靜失敗)。
 - **project-only skill = 放進專案目錄, 不是 Paperclip 的 scope**: Paperclip 的 `sharingScope` 只有 `private|company|public_link`, **沒有 project 這個層級**。omp 從工作目錄探索 skill (binary 裡有 `.claude/skills` / `.agents/skills` / `.omp/skills` 三種), 所以 `prototype skill add <name> --from <repo>` 把它 vendor 進 `<project>/.claude/skills/` 並 pin SHA —— 只有這個 prototype 的 session 看得到。用 `.claude/skills` 是因為 Claude Code 也讀它, 換 engine 不會壞。
 - **preview server 是 paperclip 的子行程, 容器一重建就全死**, 而 paperclip **沒有** desiredState 的開機 reconciler (server 的 5 個週期性 timer 沒有一個碰 workspace)。症狀最惡劣的地方在於**完全無聲**: board 上一切正常, 只有 URL 是死的。`opc-prototype-restore.sh` 由 entrypoint 背景啟動 (背景是必要的 —— 它要等的 API 正是即將 exec 的那個行程), 等 health 後跑 `prototype restore`。存活判斷是**在容器內 probe `127.0.0.1:<port>`** 而不是信 DB: 重建後 row 還寫著 running 但行程早就不在。
 - **preview 不在 localhost, dev server 要明確放行**: `.env` 給 `DEV_HOST`。Next.js 16 對**任何**帶 `Origin` header 且 host 非 localhost 的請求回 **403** —— 連 same-origin 也擋, 所以是日常使用就會中, 不是只有 CORS。症狀是頁面載入後每個 JS chunk 403、畫面看起來壞掉。解法 `allowedDevOrigins: [process.env.DEV_HOST]`; Vite 對應 `server.allowedHosts`。**用 curl 驗不出來**(curl 不送 `Origin`), 一定要用瀏覽器開一次。
@@ -138,6 +141,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - `patches/<proj>/opc-mise-seed.sh` — 每 project 一份, entrypoint source 的 mise bootstrap (空 volume 自動裝 node/rust/omp)
 - `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
 - `patches/paperclip/skills/<slug>/` — vendor 的第三方 skill (SKILL.md + sibling 檔 + `SOURCE` 記 repo/SHA); image 內落在 `/opt/opc-skills/`, bootstrap 裝進 company library
+- `patches/paperclip/templates/<name>/` — `prototype create --template` 的 scaffold。**是程式碼不是文件**: env 覆蓋順序、`NODE_ENV`、`allowedDevOrigins`、valkey ready check 每一條都是一次除錯換來的, 讓 agent 照文件重打必然出錯 (已發生過)。改了跑 `scripts/test-prototype-template.sh`
 - `patches/paperclip/prototype/` — `prototype` CLI (paperclip-aware 的工作流層: project + git + 租約)。**刻意不放進 devenv** — devenv 是通用資源租約, 不該認識 paperclip; 它只多一個 `mark-exposed` 供 `devenv list` 標記
 - `patches/paperclip/skills/{devenv,prototype-workspace}/` — first-party skill (租約用法 / prototype 工作流 + 覆寫 vendored `prototype` skill 的第 1、3、6 條規則)
 - `patches/paperclip/devenv/` — `devenv` CLI + `providers/{postgres,valkey}.sh` + `bootstrap.sql`;

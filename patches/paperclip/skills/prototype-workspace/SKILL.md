@@ -26,6 +26,23 @@ prototype create <name>          # idempotent: creates OR picks up the existing 
 cd /prototypes/<name>
 ```
 
+For a NEW prototype, scaffold from a template instead of starting empty:
+
+```sh
+prototype templates              # what is available
+prototype create <name> --template nextjs
+```
+
+The template is not a suggestion to read — it is working, tested wiring for
+Postgres (raw SQL + migrations), Valkey, and a preview server that survives
+this environment's quirks. Read its `README.md` before changing any of it;
+each line called out there cost a debugging session to find. Its `/api/health`
+route tells you in one request whether the plumbing or your code is at fault —
+keep it.
+
+`--template` only applies to an empty prototype; re-running create never
+overwrites existing work.
+
 Run it even when you are continuing — it is the resume path, not just the
 create path. It reports whether it created the project or found it.
 

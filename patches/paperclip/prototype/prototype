@@ -1,7 +1,8 @@
 #!/bin/sh
 # prototype — the workflow object: a named, long-lived experiment.
 #
-#   prototype create    <name> [--command CMD] [--idle 7d|never] [--ports N]
+#   prototype create    <name> [--template T] [--command CMD] [--idle 7d|never] [--ports N]
+#   prototype templates
 #   prototype expose    <name> --command CMD [--idle 7d|never] [--start|--stop]
 #   prototype skill add <name> --from <git-url> [--path DIR] [--ref REF] [--only a,b]
 #   prototype publish   <name> [--public] [--repo NAME] [--yes]
@@ -37,6 +38,7 @@
 set -eu
 
 PROTOTYPE_ROOT="${PROTOTYPE_ROOT:-/prototypes}"
+PROTOTYPE_TEMPLATES="${PROTOTYPE_TEMPLATES:-/usr/local/lib/prototype/templates}"
 # 7 days. Prototypes idle-stop to free the process; the engineering lane never
 # does. Stopping is not deleting: lease, database and files all stay.
 PROTOTYPE_DEFAULT_IDLE="${PROTOTYPE_DEFAULT_IDLE:-7d}"
@@ -117,6 +119,22 @@ idle_seconds() {
     esac
 }
 
+# Hand a path to the runtime user.
+#
+# The paperclip server (and therefore every dev server it spawns) runs as
+# `node`. An agent's `prototype create` already runs as node, but a human on
+# `docker compose exec` is root, and root-owned files break the runtime in a
+# way that looks nothing like a permissions problem: `prototype expose --start`
+# fails with a 500 whose cause is `EACCES: mkdir .next/dev` buried in the
+# paperclip log. Same root cause as the git ownership issue below — one tree,
+# two users.
+RUNTIME_USER="${PROTOTYPE_RUNTIME_USER:-node}"
+own() {
+    [ "$(id -u)" = 0 ] || return 0
+    id "$RUNTIME_USER" >/dev/null 2>&1 || return 0
+    chown -R "$RUNTIME_USER:$RUNTIME_USER" "$1" 2>/dev/null || true
+}
+
 # git, scoped to a prototype tree.
 #
 # The tree belongs to `node` (the runtime user), but a human running
@@ -139,9 +157,10 @@ env_get() { # read a key out of the prototype's .env
 # ── commands ─────────────────────────────────────────────────────────────
 
 cmd_create() {
-    name=""; command_=""; idle="$PROTOTYPE_DEFAULT_IDLE"; ports=1
+    name=""; command_=""; idle="$PROTOTYPE_DEFAULT_IDLE"; ports=1; template=""
     while [ $# -gt 0 ]; do
         case "$1" in
+            --template) template="${2:?--template needs a value}"; shift 2 ;;
             --command) command_="${2:?--command needs a value}"; shift 2 ;;
             --idle)    idle="${2:?--idle needs a value}"; shift 2 ;;
             --ports)   ports="${2:?--ports needs a value}"; shift 2 ;;
@@ -157,6 +176,7 @@ cmd_create() {
     # Every step below is idempotent, so a half-finished create is repaired by
     # running it again rather than by cleaning up by hand.
     mkdir -p "$dir"
+    own "$dir"
     if [ ! -d "$dir/.git" ]; then
         pgit "$dir" init -q
         # An empty first commit gives the agent a base to diff against; without
@@ -166,7 +186,25 @@ cmd_create() {
         note "prototype: git repo initialised at $dir"
     fi
 
-    devenv provision "$name" --with "postgres,http=$ports" --env-file "$dir/.env" >/dev/null
+    # Template BEFORE provision: the template ships a .gitignore that keeps .env
+    # out of git, and devenv writes that .env. Copying afterwards would either
+    # clobber the lease or land the ignore rule too late.
+    if [ -n "$template" ]; then
+        tdir="$PROTOTYPE_TEMPLATES/$template"
+        [ -d "$tdir" ] || die "unknown template '$template' (see: prototype templates)" 2
+        # Never overwrite existing work — create is idempotent and a re-run on a
+        # started prototype must not reset it to the scaffold.
+        if [ -n "$(ls -A "$dir" 2>/dev/null | grep -v '^\.git$' | grep -v '^\.env$' || true)" ]; then
+            note "prototype: '$name' already has files — skipping template '$template'"
+        else
+            cp -r "$tdir"/. "$dir"/
+            note "prototype: scaffolded from template '$template'"
+        fi
+    fi
+    own "$dir"
+
+    devenv provision "$name" --with "postgres,valkey,http=$ports" --env-file "$dir/.env" >/dev/null
+    own "$dir"   # devenv wrote .env as whoever ran us
     port="$(env_get "$name" DEV_PORT)" || die "devenv did not write DEV_PORT" 1
     url="$(env_get "$name" DEV_URL)"
 
@@ -347,6 +385,7 @@ SRC
     pgit "$dir" add .claude/skills >/dev/null 2>&1 || true
     pgit "$dir" -c user.email=prototype@opc -c user.name=prototype \
         commit -q -m "chore: vendor $count skill(s) from $from @ ${sha}" >/dev/null 2>&1 || true
+    own "$dir"
     note "prototype: $count skill(s) in $dir/.claude/skills (pinned $sha)"
 }
 
@@ -480,6 +519,15 @@ $dirty"
     fi
 }
 
+cmd_templates() {
+    [ -d "$PROTOTYPE_TEMPLATES" ] || { note "no templates installed"; return 0; }
+    for t in "$PROTOTYPE_TEMPLATES"/*/; do
+        [ -d "$t" ] || continue
+        n="$(basename "$t")"
+        printf '%-16s %s\n' "$n" "$(sed -n '3p' "$t/README.md" 2>/dev/null)"
+    done
+}
+
 cmd_list() {
     company="$(company_id)"
     printf '%-24s %-8s %-26s %s\n' NAME PORT URL DIR
@@ -541,7 +589,8 @@ cmd_destroy() {
 case "${1:-}" in
     create)  shift; cmd_create  "$@" ;;
     expose)  shift; cmd_expose  "$@" ;;
-    list)    shift; cmd_list    "$@" ;;
+    list)      shift; cmd_list      "$@" ;;
+    templates) shift; cmd_templates "$@" ;;
     restore) shift; cmd_restore "$@" ;;
     publish) shift; cmd_publish "$@" ;;
     destroy) shift; cmd_destroy "$@" ;;
@@ -551,6 +600,6 @@ case "${1:-}" in
             add) shift; cmd_skill_add "$@" ;;
             *) die "usage: prototype skill add <name> --from <git-url>" 2 ;;
         esac ;;
-    -h|--help|help|"") sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command '$1' (create|expose|skill|list|restore|publish|destroy)" 2 ;;
+    -h|--help|help|"") sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (create|expose|skill|templates|list|restore|publish|destroy)" 2 ;;
 esac

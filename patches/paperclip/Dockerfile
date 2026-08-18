@@ -145,6 +145,11 @@ COPY opc/devenv/ /usr/local/lib/devenv/
 # Kept out of devenv on purpose — devenv must stay a generic resource lease
 # with no knowledge of Paperclip. See the header of opc/prototype/prototype.
 COPY opc/prototype/ /usr/local/lib/prototype/
+# Scaffolds for `prototype create --template`. Code, not documentation: the
+# non-obvious parts (env precedence, NODE_ENV, allowedDevOrigins, the valkey
+# ready check) were each a debugging session, and an agent retyping them from
+# prose gets them wrong — which is how they were found.
+COPY opc/templates/ /usr/local/lib/prototype/templates/
 # Vendored third-party skills, installed into the company library by
 # opc-paperclip-bootstrap.sh (Paperclip's GitHub importer drops sibling files).
 COPY opc/skills/ /opt/opc-skills/
