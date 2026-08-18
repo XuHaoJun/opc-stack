@@ -8,6 +8,8 @@
 #      verified handshake config).
 #   4. Board API key → /keys/paperclip-api.key (frontdoor/hermes entrypoints
 #      export PAPERCLIP_API_KEY from it — no manual .env step).
+#   5. Vendored skills (/opt/opc-skills/*) → company skill library.
+#   6. Prototyper agent (omp, scoped to the prototype + devenv skills).
 #
 # Re-run reconciles missing pieces only. The key file is the source of truth:
 # if it exists, the key is not re-created (the token is only returned once)
@@ -21,6 +23,8 @@ ADMIN_PASSWORD="${PAPERCLIP_ADMIN_PASSWORD:-}"
 ADMIN_NAME="${PAPERCLIP_ADMIN_NAME:-Admin}"
 COMPANY_NAME="${PAPERCLIP_COMPANY_NAME:-OPC}"
 AGENT_NAME="${PAPERCLIP_EXECUTOR_AGENT_NAME:-OMP Engineer}"
+PROTOTYPER_NAME="${PAPERCLIP_PROTOTYPER_AGENT_NAME:-Prototyper}"
+SKILLS_SRC="${OPC_SKILLS_DIR:-/opt/opc-skills}"
 KEY_NAME="${PAPERCLIP_KEY_NAME:-frontdoor}"
 JAR=/tmp/pc-cookies.txt
 
@@ -48,6 +52,28 @@ api_get() { # path
         curl -fsS -H "Authorization: Bearer $KEY" "$API$1" 2>/dev/null || true
     else
         curl -fsS -b "$JAR" "$API$1" 2>/dev/null || true
+    fi
+}
+
+# Body-on-stdin variants: skill payloads embed whole markdown files, which are
+# too large and too quote-heavy to pass as a shell argument.
+api_post_raw() { # path  (body on stdin)
+    if [ "$AUTH_MODE" = key ]; then
+        curl -fsS -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+            -H "Origin: $ORIGIN" -X POST "$API$1" --data-binary @- 2>/dev/null || true
+    else
+        curl -fsS -b "$JAR" -H 'Content-Type: application/json' \
+            -H "Origin: $ORIGIN" -X POST "$API$1" --data-binary @- 2>/dev/null || true
+    fi
+}
+
+api_patch_raw() { # path  (body on stdin)
+    if [ "$AUTH_MODE" = key ]; then
+        curl -fsS -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+            -H "Origin: $ORIGIN" -X PATCH "$API$1" --data-binary @- 2>/dev/null || true
+    else
+        curl -fsS -b "$JAR" -H 'Content-Type: application/json' \
+            -H "Origin: $ORIGIN" -X PATCH "$API$1" --data-binary @- 2>/dev/null || true
     fi
 }
 
@@ -115,6 +141,64 @@ if [ ! -s /keys/paperclip-api.key ]; then
     echo "[pc-bootstrap] wrote /keys/paperclip-api.key"
 else
     echo "[pc-bootstrap] key file exists; keeping it"
+fi
+
+# ── 5. Vendored skills → company library ──
+# These are vendored (patches/paperclip/skills/) rather than imported from
+# GitHub because Paperclip's importer fetches only SKILL.md, and a skill whose
+# SKILL.md dispatches to sibling files (prototype → LOGIC.md / UI.md) arrives
+# broken. Created as local skills so every file comes along.
+install_skill() {
+    _sk_dir="$1"
+    _sk_slug="$(basename "$_sk_dir")"
+    [ -f "$_sk_dir/SKILL.md" ] || return 0
+
+    _sk_id="$(api_get "/companies/$company_id/skills" | \
+        jq -r --arg s "$_sk_slug" '.[]? | select(.slug == $s) | .id' 2>/dev/null | head -1)"
+    if [ -n "$_sk_id" ]; then
+        echo "[pc-bootstrap] skill exists: $_sk_slug"
+        return 0
+    fi
+
+    _sk_desc="$(sed -n 's/^description: *//p' "$_sk_dir/SKILL.md" | head -1)"
+    _sk_id="$(jq -n --arg n "$_sk_slug" --arg s "$_sk_slug" --arg d "$_sk_desc" \
+                    --rawfile m "$_sk_dir/SKILL.md" \
+              '{name:$n, slug:$s, description:$d, markdown:$m, sharingScope:"company"}' \
+              | api_post_raw "/companies/$company_id/skills" | jq -r '.id // empty')"
+    [ -n "$_sk_id" ] || { echo "[pc-bootstrap] skill create failed: $_sk_slug" >&2; return 0; }
+
+    # Sibling files SKILL.md links to. Without these the prototype skill's two
+    # branches both dead-end.
+    for _sk_f in "$_sk_dir"/*.md; do
+        _sk_base="$(basename "$_sk_f")"
+        [ "$_sk_base" = "SKILL.md" ] && continue
+        jq -n --arg p "$_sk_base" --rawfile c "$_sk_f" '{path:$p, content:$c}' \
+          | api_patch_raw "/companies/$company_id/skills/$_sk_id/files" >/dev/null || true
+    done
+    echo "[pc-bootstrap] installed skill: $_sk_slug ($_sk_id)"
+}
+
+if [ -d "$SKILLS_SRC" ]; then
+    for d in "$SKILLS_SRC"/*/; do
+        [ -d "$d" ] && install_skill "${d%/}"
+    done
+fi
+
+# ── 6. Prototyper agent (omp; scoped skills) ──
+# HOME is deliberately NOT overridden: omp reads its model config from
+# $HOME/.omp, so pointing HOME at the Claude credential home would break it.
+# Skills are per-agent — the executor agent declares no paperclipSkillSync and
+# therefore sees none of this.
+proto_id="$(api_get "/companies/$company_id/agents" | \
+    jq -r --arg n "$PROTOTYPER_NAME" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)"
+if [ -z "$proto_id" ]; then
+    proto_id="$(api_post "/companies/$company_id/agents" \
+        "{\"name\":\"$PROTOTYPER_NAME\",\"adapterType\":\"claude_local\",\"adapterConfig\":{\"engine\":\"acp\",\"agentCommand\":\"omp acp --yolo\",\"paperclipSkillSync\":{\"desiredSkills\":[\"prototype\",\"devenv\"]}}}" \
+        | jq -r '.id // empty')"
+    [ -n "$proto_id" ] && echo "[pc-bootstrap] created agent: $PROTOTYPER_NAME ($proto_id)" \
+                       || echo "[pc-bootstrap] prototyper creation failed" >&2
+else
+    echo "[pc-bootstrap] agent exists: $PROTOTYPER_NAME"
 fi
 
 echo "[pc-bootstrap] done. admin=$ADMIN_EMAIL company=$company_id agent=$AGENT_NAME"

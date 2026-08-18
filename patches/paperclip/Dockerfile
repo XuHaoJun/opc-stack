@@ -119,6 +119,9 @@ COPY opc/opc-claude-seed.sh /usr/local/bin/opc-claude-seed.sh
 COPY opc/opc-devenv-seed.sh /usr/local/bin/opc-devenv-seed.sh
 # devenv CLI + providers + control schema (see the devenv spec).
 COPY opc/devenv/ /usr/local/lib/devenv/
+# Vendored third-party skills, installed into the company library by
+# opc-paperclip-bootstrap.sh (Paperclip's GitHub importer drops sibling files).
+COPY opc/skills/ /opt/opc-skills/
 COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \

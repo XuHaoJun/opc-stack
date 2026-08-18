@@ -44,6 +44,7 @@ docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL 
 
 - `buzz-admin` 讀 `RELAY_URL` env (不是 BUZZ_RELAY_URL); add-member 需 DATABASE_URL/REDIS_URL + relay key + S3 env。
 - Paperclip `pi_local` adapter 不兼容 omp v17 (flag 差異); 整合 omp 用 `claude_local` + `engine:"acp"` + `agentCommand:"omp acp --yolo"` (handshake 已驗證, 見 SETUP.md)。
+- **Paperclip 的 GitHub skill import 只抓 `SKILL.md`** — 會 pin commit SHA 也會做 trust level 檢查, 但 sibling 檔案 (mattpocock prototype 的 `LOGIC.md`/`UI.md`) 不會跟著進來, 匯進去的 skill 兩條分支都是斷的。所以第三方 skill 一律 **vendor 到 `patches/paperclip/skills/<slug>/`** (附 `SOURCE` 記 repo+SHA), 由 `opc-paperclip-bootstrap.sh` 建成 local skill; 更新跑 `scripts/refresh-vendored-skills.sh`。注意 `GET /skills/:id/files` 的 inventory 會落後 (新增檔案後仍只列 SKILL.md), 以磁碟 `/paperclip/instances/default/skills/<companyId>/<slug>/` 與 run 時物化的 bundle 為準。
 - **devenv 回收是手動的** (`devenv release <key>`), 沒有任何自動 gc/排程。累積靠 `devenv_usage` view 看 (按 postgres 磁碟大小遞減 — valkey 槽位用罄會自己以 exit 3 喊, 磁碟不會)。valkey 租戶隔離靠 9.1+ 的 `db=<dbid>` ACL op, **9.0.x 沒有這個功能**, 升降版本前先確認。per-tenant 密碼是從 `DEVENV_SECRET_SALT` 推導而非儲存 (這是 provision 冪等的原因), **改 salt 會讓所有已發出的 `.env` 失效**。agent 身分靠 adapterConfig 的 `env.DEVENV_OWNER` 標記, 沒設就記成 `user@hostname`。
 - **devenv-pg 是 pg18, volume 要掛 `/var/lib/postgresql` 而非其下的 `data`** — 沿用 pg17 的掛法 image 會拒絕啟動。
 - **Claude cred 只鏡像 `.credentials.json` 一個檔** (`host-sync-claude` one-shot → `opc-prototyper-home` volume, 掛 paperclip `/agent-homes/prototyper` = prototyper agent 的 `adapterConfig.env.HOME`)。host 的 `settings.json`(含 hook)、`plugins/`、`skills/`、`projects/`、`history.jsonl` 一律不進容器 — 容器內的 claude 是乾淨的。**OAuth refresh token 是單次使用**: 容器端刷新會讓 host 那份失效 (反之亦然), 壞了跑 `scripts/sync-claude-creds.sh` 重同步。`.env` 的 `ANTHROPIC_API_KEY` 若有值會蓋掉 OAuth (改用 API 計費), 想吃訂閱就留空。
@@ -66,6 +67,7 @@ docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL 
 - `patches/nix-seed/` — nix seed build context (nix 2.35.2 + 8 工具, `cp -al` 成 `/nix-seed`); compose `nix-seed` 是 one-shot, 消費者 = 各 service Dockerfile 的 `COPY --from=nix-seed`
 - `patches/<proj>/opc-mise-seed.sh` — 每 project 一份, entrypoint source 的 mise bootstrap (空 volume 自動裝 node/rust/omp)
 - `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
+- `patches/paperclip/skills/<slug>/` — vendor 的第三方 skill (SKILL.md + sibling 檔 + `SOURCE` 記 repo/SHA); image 內落在 `/opt/opc-skills/`, bootstrap 裝進 company library
 - `patches/paperclip/devenv/` — `devenv` CLI + `providers/{postgres,valkey}.sh` + `bootstrap.sql`;
   image 內落在 `/usr/local/lib/devenv/`, symlink 到 `/usr/local/bin/devenv`。schema 由 `opc-devenv-seed.sh` 每次開機套用 (冪等, 後端不通只警告不擋 `up`)
 - `scripts/` — setup / prepare / upgrade / test-connectivity; `host-sync.sh` (通用 host→volume 鏡像 CLI) + `host-sync-worker.sh` (容器側 engine, 唯一邏輯) + `hooks/` (per-source 轉換, ssh/gitconfig/claude-cred) + `sync-gh-creds.sh` / `sync-claude-creds.sh` (場景薄 wrapper); compose `host-sync` (gh) 與 `host-sync-claude` (Claude cred) 兩個 one-shot 每次 up 自動跑

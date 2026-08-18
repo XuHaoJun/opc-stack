@@ -1,0 +1,13 @@
+# Vendored third-party skill — do not edit the .md files here.
+#
+# Paperclip's GitHub importer only fetches SKILL.md, but this skill's two
+# branches both dispatch to sibling files (LOGIC.md / UI.md), so an imported
+# copy dead-ends. Vendoring keeps it complete; the trade is that Paperclip's
+# update-status drift detection does not apply — run
+# scripts/refresh-vendored-skills.sh to pull a newer revision and review the diff.
+repo=https://github.com/mattpocock/skills
+path=skills/engineering/prototype
+ref=9c9f36ccd3995266cd675468af71639c8dde1ec5
+tracking=main
+fetched=2026-08-18
+files=SKILL.md LOGIC.md UI.md
