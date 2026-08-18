@@ -28,6 +28,53 @@ apply_patch() {
   echo "SYNC  $proj → $dst"
 }
 
+# ── drift guard ─────────────────────────────────────────────────────────
+# Some things exist in two copies BY DESIGN, because they must reach two
+# different hermes homes (the Buzz front door and the gateway) and each home
+# is served by a different image. "Keep these two files identical" is a rule
+# that has silently broken three times in this repo, and the failure is
+# invisible at runtime: work routes correctly from one surface and not the
+# other, depending on where the user happened to type. Cheaper to fail here.
+check_identical() {
+  local label="$1" a="$2" b="$3"
+  if [ ! -f "$a" ] || [ ! -f "$b" ]; then
+    echo "FAIL  $label: expected two copies, missing $( [ -f "$a" ] || echo "$a" ) $( [ -f "$b" ] || echo "$b" )"
+    exit 1
+  fi
+  if ! diff -q "$a" "$b" >/dev/null; then
+    echo "FAIL  $label: the two copies have drifted — they must be byte-identical"
+    diff -u "$a" "$b" | head -40
+    exit 1
+  fi
+  echo "SAME  $label"
+}
+
+check_identical "paperclip-api skill" \
+  patches/buzz/skills/paperclip-api/SKILL.md \
+  patches/hermes/skills/paperclip-api/SKILL.md
+
+# The delegation clause is embedded in each entrypoint's seeded system_prompt
+# (it has to hold before any skill loads — see the comment at the seed site),
+# so it cannot be a shared file. Compare the extracted sentence instead.
+# Anchored on a phrase with no apostrophe: the clause itself contains one
+# ("OPC's"), which would terminate a single-quoted sed script.
+delegation_clause() {
+  grep -o 'chief of staff, not an implementer[^"]*' "$1" | head -1
+}
+fd_clause="$(delegation_clause patches/buzz/frontdoor-entrypoint.sh)"
+gw_clause="$(delegation_clause patches/hermes/hermes-entrypoint.sh)"
+if [ -z "$fd_clause" ] || [ -z "$gw_clause" ]; then
+  echo "FAIL  delegation clause: not found in both entrypoints"
+  exit 1
+fi
+if [ "$fd_clause" != "$gw_clause" ]; then
+  echo "FAIL  delegation clause: front door and gateway have drifted"
+  echo "  frontdoor: $fd_clause"
+  echo "  gateway:   $gw_clause"
+  exit 1
+fi
+echo "SAME  delegation clause"
+
 apply_patch buzz
 apply_patch hermes
 apply_patch paperclip
