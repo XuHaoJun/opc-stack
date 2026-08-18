@@ -1,10 +1,11 @@
 #!/bin/sh
 # prototype — the workflow object: a named, long-lived experiment.
 #
-#   prototype create  <name> [--command CMD] [--idle 7d|never] [--ports N]
-#   prototype expose  <name> --command CMD [--idle 7d|never] [--start|--stop]
+#   prototype create    <name> [--command CMD] [--idle 7d|never] [--ports N]
+#   prototype expose    <name> --command CMD [--idle 7d|never] [--start|--stop]
+#   prototype skill add <name> --from <git-url> [--path DIR] [--ref REF] [--only a,b]
 #   prototype list
-#   prototype destroy <name>
+#   prototype destroy   <name>
 #
 # WHY THIS IS NOT A `devenv` SUBCOMMAND
 #
@@ -261,6 +262,79 @@ cmd_expose() {
     fi
 }
 
+# Vendor a skill INTO the prototype's own tree, which is what "project-only
+# skill" means in practice: omp discovers skills from the working directory
+# (.claude/skills, .agents/skills, .omp/skills — all three are in the binary),
+# so a skill that lives in the project is visible to that project's sessions
+# and to nothing else. No company-library entry, no other prototype affected.
+#
+# .claude/skills is the target because it is also what Claude Code reads —
+# swapping the engine later keeps the skill working.
+#
+# Pinned to a resolved SHA with a SOURCE manifest, the same discipline as the
+# image-level vendored skills: an unpinned copy silently becomes a different
+# skill the next time anyone re-runs this.
+cmd_skill_add() {
+    name=""; from=""; path="skills"; ref=""; only=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from) from="${2:?--from needs a git URL}"; shift 2 ;;
+            --path) path="${2:?--path needs a value}"; shift 2 ;;
+            --ref)  ref="${2:?--ref needs a value}"; shift 2 ;;
+            --only) only="${2:?--only needs a comma list}"; shift 2 ;;
+            -*) die "unknown flag: $1" 2 ;;
+            *)  [ -z "$name" ] || die "unexpected argument: $1" 2; name="$1"; shift ;;
+        esac
+    done
+    [ -n "$name" ] || die "usage: prototype skill add <name> --from <git-url> [--path DIR] [--ref REF] [--only a,b]" 2
+    [ -n "$from" ] || die "--from is required" 2
+    check_name "$name"
+    dir="$PROTOTYPE_ROOT/$name"
+    [ -d "$dir" ] || die "no prototype named '$name' — run 'prototype create $name' first" 2
+
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+    if [ -n "$ref" ]; then
+        git clone -q --depth 1 --branch "$ref" "$from" "$tmp/src" || die "clone failed: $from@$ref" 1
+    else
+        git clone -q --depth 1 "$from" "$tmp/src" || die "clone failed: $from" 1
+    fi
+    sha="$(git -C "$tmp/src" rev-parse HEAD)"
+    src="$tmp/src/$path"
+    [ -d "$src" ] || die "path '$path' not found in $from" 2
+
+    mkdir -p "$dir/.claude/skills"
+    count=0
+    for sk in "$src"/*/; do
+        [ -f "$sk/SKILL.md" ] || continue
+        slug="$(basename "$sk")"
+        if [ -n "$only" ]; then
+            case ",$only," in *",$slug,"*) ;; *) continue ;; esac
+        fi
+        rm -rf "$dir/.claude/skills/$slug"
+        cp -r "$sk" "$dir/.claude/skills/$slug"
+        cat > "$dir/.claude/skills/$slug/SOURCE" <<SRC
+# Vendored skill — do not edit these files here; re-run the command below.
+#   prototype skill add $name --from $from --path $path --ref $sha --only $slug
+repo=$from
+path=$path/$slug
+sha=$sha
+ref=${ref:-HEAD}
+fetched=$(date -u +%Y-%m-%d)
+SRC
+        count=$((count + 1))
+        note "prototype: vendored skill '$slug'"
+    done
+    [ "$count" -gt 0 ] || die "no SKILL.md found under '$path' in $from" 2
+
+    # Commit into the prototype's own repo: the skill is part of the project
+    # now, and a later `git diff` should not be full of unexplained files.
+    git -C "$dir" add .claude/skills >/dev/null 2>&1 || true
+    git -C "$dir" -c user.email=prototype@opc -c user.name=prototype \
+        commit -q -m "chore: vendor $count skill(s) from $from @ ${sha}" >/dev/null 2>&1 || true
+    note "prototype: $count skill(s) in $dir/.claude/skills (pinned $sha)"
+}
+
 cmd_list() {
     company="$(company_id)"
     printf '%-24s %-8s %-26s %s\n' NAME PORT URL DIR
@@ -324,6 +398,12 @@ case "${1:-}" in
     expose)  shift; cmd_expose  "$@" ;;
     list)    shift; cmd_list    "$@" ;;
     destroy) shift; cmd_destroy "$@" ;;
-    -h|--help|help|"") sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command '$1' (create|expose|list|destroy)" 2 ;;
+    skill)
+        shift
+        case "${1:-}" in
+            add) shift; cmd_skill_add "$@" ;;
+            *) die "usage: prototype skill add <name> --from <git-url>" 2 ;;
+        esac ;;
+    -h|--help|help|"") sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (create|expose|skill|list|destroy)" 2 ;;
 esac

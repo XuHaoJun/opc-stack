@@ -59,6 +59,24 @@ user can open it, not read it.
 The service idle-stops after 7 days. That stops a process; it deletes nothing.
 `prototype expose <name> --start` brings the same URL back.
 
+## Project-only skills
+
+A ticket may require a specific skill for this prototype and no other:
+
+```sh
+prototype skill add <name> --from https://github.com/owner/repo
+#   --path DIR   where the skills live in that repo (default: skills)
+#   --only a,b   take only these
+```
+
+It vendors them into `<project>/.claude/skills/`, pins the commit in a `SOURCE`
+file, and commits. omp discovers skills from the working directory, so they
+apply to this prototype and nothing else — that is what makes them
+project-only. Run it once at setup; re-run only to update.
+
+Read the skills it installs before you start. If the ticket asked for one, it
+is part of the brief, not decoration.
+
 ## What this overrides in the `prototype` skill
 
 The vendored `prototype` skill assumes you are prototyping *inside an existing
