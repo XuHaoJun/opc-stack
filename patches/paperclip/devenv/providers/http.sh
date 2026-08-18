@@ -24,9 +24,19 @@
 
 DEVENV_HTTP_PORT_BASE="${DEVENV_HTTP_PORT_BASE:-21000}"
 DEVENV_HTTP_PORT_COUNT="${DEVENV_HTTP_PORT_COUNT:-16}"
-# Host part of DEV_URL. Must match how the range is published in compose:
-# the default binds 127.0.0.1, so only this machine's browser can reach it.
-DEVENV_HTTP_PUBLIC_HOST="${DEVENV_HTTP_PUBLIC_HOST:-localhost}"
+# Host part of DEV_URL — the address a BROWSER will use, which is not
+# necessarily how the container sees itself.
+#
+# Default: the host from PAPERCLIP_PUBLIC_URL. The preview link is opened from
+# the Paperclip board, so the two are reachable from the same place by
+# definition; deriving it means the stack's address is configured once instead
+# of being repeated in a second variable that can silently disagree (a
+# disagreement whose only symptom is a link that does not open).
+if [ -z "${DEVENV_HTTP_PUBLIC_HOST:-}" ]; then
+    DEVENV_HTTP_PUBLIC_HOST="$(printf '%s' "${PAPERCLIP_PUBLIC_URL:-}" \
+        | sed -n 's|^[a-zA-Z][a-zA-Z0-9+.-]*://\([^/:]*\).*|\1|p')"
+    DEVENV_HTTP_PUBLIC_HOST="${DEVENV_HTTP_PUBLIC_HOST:-localhost}"
+fi
 
 # The registry IS the backend — there is no separate service to reach.
 http_probe() {

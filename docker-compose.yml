@@ -519,7 +519,11 @@ services:
       DEVENV_HTTP_PORT_BASE: ${DEVENV_HTTP_PORT_BASE:-21000}
       DEVENV_HTTP_PORT_COUNT: ${DEVENV_HTTP_PORT_COUNT:-16}
       DEVENV_HTTP_PORT_RANGE_END: ${DEVENV_HTTP_PORT_RANGE_END:-21015}
-      DEVENV_HTTP_PUBLIC_HOST: ${DEVENV_HTTP_PUBLIC_HOST:-localhost}
+      # Empty = derive from PAPERCLIP_PUBLIC_URL's host (see providers/http.sh),
+      # so one setting governs both the board's address and the preview links
+      # instead of the same hostname being written in two places that can
+      # disagree. Set explicitly only to override that.
+      DEVENV_HTTP_PUBLIC_HOST: ${DEVENV_HTTP_PUBLIC_HOST:-}
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
       # Preview ports for prototype dev servers, leased by `devenv provision
@@ -530,17 +534,19 @@ services:
       # arithmetic. opc-devenv-seed.sh verifies they agree at boot — this is
       # the easiest thing in the whole feature to change and get wrong.
       #
-      # Bind address is 127.0.0.1 by default because prototype dev servers have
-      # NO authentication — anything that can reach the port can use the app and
-      # its database. Widening it is an explicit operator decision, which is why
-      # it is a variable and not a bare 0.0.0.0.
+      # Published on every interface by default, like paperclip (3100), buzz
+      # (3000), hermes (8642/9119) and tencentdb already are. A loopback-only
+      # default was tried and is wrong here: the preview link lives ON the
+      # board, so a preview unreachable from wherever the board is reachable is
+      # broken by construction — and it would be the only thing narrower than
+      # the board itself, which holds every ticket and config in the stack.
       #
-      # For a machine driven remotely, set DEVENV_HTTP_BIND to the tailnet
-      # address (e.g. a Tailscale 100.x IP) rather than 0.0.0.0: that reaches
-      # your other devices while still not listening on the LAN or the public
-      # interface. DEVENV_HTTP_PUBLIC_HOST must match, or DEV_URL will advertise
-      # an address the browser cannot reach.
-      - "${DEVENV_HTTP_BIND:-127.0.0.1}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}"
+      # Tighten it per deployment if you want: DEVENV_HTTP_BIND=127.0.0.1 for
+      # local-only, or a tailnet address (Tailscale 100.x) to reach your own
+      # devices without listening on the LAN. Whatever you choose,
+      # DEVENV_HTTP_PUBLIC_HOST must resolve to it or DEV_URL advertises an
+      # address the browser cannot reach.
+      - "${DEVENV_HTTP_BIND:-0.0.0.0}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}"
     volumes:
       - paperclip-data:/paperclip
       - paperclip-nix:/nix
