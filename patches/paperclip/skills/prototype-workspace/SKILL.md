@@ -111,11 +111,25 @@ production codebase*. Here you usually are not, so:
 Its other rules still hold, and the branch choice (LOGIC.md vs UI.md) is
 unchanged.
 
+## Publishing to GitHub
+
+**Do not.** `prototype publish` exists, it uses the operator's own GitHub
+credential, and it is theirs to run. "The prototype turned out well, put it on
+GitHub" is a decision they make after looking at it — not a step in finishing a
+ticket, and not something to offer to do for them mid-run.
+
+The one exception is a ticket that explicitly asks for it. Even then, say in a
+comment that you are about to push and where.
+
+A prototype's git repo is local by design. Commit your work there — the history
+is what makes it publishable later.
+
 ## Never
 
 - **Never delete a prototype**, or any part of one — not the directory, not the
   database, not the lease. Not to clean up, not to start fresh, not because it
   looks abandoned. Deletion is `prototype destroy`, run by the user.
 - **Never hardcode the port.** Read `$PORT` / `$DEV_PORT`.
-- **Never `gh repo create` / push to GitHub.** A prototype's git is local by
-  design. That is the engineering lane's workflow, not this one.
+- **Never `gh repo create` / push to GitHub on your own initiative** (see
+  above). A prototype's git is local by design; pushing is the engineering
+  lane's workflow, or an explicit request.

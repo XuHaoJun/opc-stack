@@ -4,6 +4,7 @@
 #   prototype create    <name> [--command CMD] [--idle 7d|never] [--ports N]
 #   prototype expose    <name> --command CMD [--idle 7d|never] [--start|--stop]
 #   prototype skill add <name> --from <git-url> [--path DIR] [--ref REF] [--only a,b]
+#   prototype publish   <name> [--public] [--repo NAME] [--yes]
 #   prototype list
 #   prototype restore   [--dry-run]
 #   prototype destroy   <name>
@@ -116,6 +117,19 @@ idle_seconds() {
     esac
 }
 
+# git, scoped to a prototype tree.
+#
+# The tree belongs to `node` (the runtime user), but a human running
+# `docker compose exec paperclip prototype ...` is root, and git then refuses
+# with "detected dubious ownership". Worse than the error: the calls guarded by
+# `|| true` (the commits in create / skill add) just quietly do nothing, so a
+# root-run command appears to succeed and commits nothing. safe.directory is
+# set per invocation rather than globally so the exemption stays scoped.
+pgit() {
+    _g_dir="$1"; shift
+    git -c "safe.directory=$_g_dir" -C "$_g_dir" "$@"
+}
+
 env_get() { # read a key out of the prototype's .env
     _f="$PROTOTYPE_ROOT/$1/.env"
     [ -f "$_f" ] || return 1
@@ -144,10 +158,10 @@ cmd_create() {
     # running it again rather than by cleaning up by hand.
     mkdir -p "$dir"
     if [ ! -d "$dir/.git" ]; then
-        git -C "$dir" init -q
+        pgit "$dir" init -q
         # An empty first commit gives the agent a base to diff against; without
         # it `git log`/`git diff` fail on a fresh repo and confuse the model.
-        git -C "$dir" -c user.email=prototype@opc -c user.name=prototype \
+        pgit "$dir" -c user.email=prototype@opc -c user.name=prototype \
             commit -q --allow-empty -m "prototype: $name" 2>/dev/null || true
         note "prototype: git repo initialised at $dir"
     fi
@@ -330,8 +344,8 @@ SRC
 
     # Commit into the prototype's own repo: the skill is part of the project
     # now, and a later `git diff` should not be full of unexplained files.
-    git -C "$dir" add .claude/skills >/dev/null 2>&1 || true
-    git -C "$dir" -c user.email=prototype@opc -c user.name=prototype \
+    pgit "$dir" add .claude/skills >/dev/null 2>&1 || true
+    pgit "$dir" -c user.email=prototype@opc -c user.name=prototype \
         commit -q -m "chore: vendor $count skill(s) from $from @ ${sha}" >/dev/null 2>&1 || true
     note "prototype: $count skill(s) in $dir/.claude/skills (pinned $sha)"
 }
@@ -385,6 +399,85 @@ cmd_restore() {
         fi
     done
     note "prototype: restore done — $started started, $skipped already up"
+}
+
+# Push a prototype to the operator'"'"'s GitHub. Deliberately manual.
+#
+# This is the one command here that reaches outside the machine, using the
+# operator'"'"'s own gh credential. It is never part of a ticket'"'"'s definition of
+# done and agents must not call it on their own initiative — "the prototype
+# turned out well, publish it" is a decision, not a cleanup step.
+cmd_publish() {
+    name=""; vis="--private"; repo=""; yes=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --public)  vis="--public"; shift ;;
+            --private) vis="--private"; shift ;;
+            --repo)    repo="${2:?--repo needs a value}"; shift 2 ;;
+            --yes)     yes=1; shift ;;
+            -*) die "unknown flag: $1" 2 ;;
+            *)  [ -z "$name" ] || die "unexpected argument: $1" 2; name="$1"; shift ;;
+        esac
+    done
+    [ -n "$name" ] || die "usage: prototype publish <name> [--public] [--repo NAME] [--yes]" 2
+    check_name "$name"
+    dir="$PROTOTYPE_ROOT/$name"
+    [ -d "$dir/.git" ] || die "'$name' is not a git repository" 2
+    repo="${repo:-$name}"
+
+    command -v gh >/dev/null 2>&1 || die "gh is not installed" 4
+    # `docker compose exec` does not inherit what the entrypoint exported, so
+    # GH_CONFIG_DIR / GIT_SSH_COMMAND are missing in exactly the session a human
+    # uses to run this. Source the same seed the entrypoint does rather than
+    # making the operator remember it.
+    if [ -z "${GH_CONFIG_DIR:-}" ] && [ -r /usr/local/bin/opc-gh-seed.sh ]; then
+        . /usr/local/bin/opc-gh-seed.sh
+        opc_gh_seed >/dev/null 2>&1 || true
+    fi
+    gh auth status >/dev/null 2>&1 || die "gh is not authenticated (GH_CONFIG_DIR=${GH_CONFIG_DIR:-unset})" 4
+
+    # Refuse to push tracked secrets. .env holds DATABASE_URL with a real
+    # password; the generated .gitignore covers it, but a prototype is
+    # hand-edited code and one `git add -f` would put credentials on GitHub
+    # permanently. Cheap to check, impossible to undo.
+    leaked="$(pgit "$dir" ls-files | grep -E '(^|/)\.env($|\.)' || true)"
+    if [ -n "$leaked" ]; then
+        note "refusing to publish: these tracked files look like secrets —"
+        printf '  %s\n' $leaked >&2
+        die "remove them from git history first (git rm --cached, then rewrite if already committed)" 2
+    fi
+
+    dirty="$(pgit "$dir" status --porcelain | head -5)"
+    [ -z "$dirty" ] || note "note: uncommitted changes will NOT be pushed:
+$dirty"
+
+    if pgit "$dir" remote get-url origin >/dev/null 2>&1; then
+        target="$(pgit "$dir" remote get-url origin)"
+        action="push to the existing remote"
+    else
+        target="$(gh api user --jq .login 2>/dev/null)/$repo"
+        action="create a NEW ${vis#--} repo and push"
+    fi
+
+    echo "About to $action:"
+    echo "  prototype  $name  ($dir)"
+    echo "  remote     $target"
+    echo "  commits    $(pgit "$dir" rev-list --count HEAD 2>/dev/null || echo '?')"
+    if [ "$yes" != 1 ]; then
+        printf "Proceed? [y/N] "
+        read -r ans || ans=""
+        case "$ans" in y|Y|yes|YES) ;; *) die "cancelled — nothing was pushed" 2 ;; esac
+    fi
+
+    branch="$(pgit "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    if pgit "$dir" remote get-url origin >/dev/null 2>&1; then
+        pgit "$dir" push -u origin "$branch" || die "push failed" 1
+        note "prototype: pushed to $target"
+    else
+        ( cd "$dir" && gh repo create "$repo" "$vis" --source . --remote origin --push ) \
+            || die "gh repo create failed" 1
+        note "prototype: published → https://github.com/$target"
+    fi
 }
 
 cmd_list() {
@@ -450,6 +543,7 @@ case "${1:-}" in
     expose)  shift; cmd_expose  "$@" ;;
     list)    shift; cmd_list    "$@" ;;
     restore) shift; cmd_restore "$@" ;;
+    publish) shift; cmd_publish "$@" ;;
     destroy) shift; cmd_destroy "$@" ;;
     skill)
         shift
@@ -457,6 +551,6 @@ case "${1:-}" in
             add) shift; cmd_skill_add "$@" ;;
             *) die "usage: prototype skill add <name> --from <git-url>" 2 ;;
         esac ;;
-    -h|--help|help|"") sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown command '$1' (create|expose|skill|list|restore|destroy)" 2 ;;
+    -h|--help|help|"") sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (create|expose|skill|list|restore|publish|destroy)" 2 ;;
 esac
