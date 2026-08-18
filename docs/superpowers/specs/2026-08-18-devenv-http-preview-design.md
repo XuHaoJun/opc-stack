@@ -365,6 +365,36 @@ t.http_port_count,
 7. prototype skill: provision → scaffold → expose 三步,明講讀 `DEV_PORT`、不要 hardcode
 8. AGENTS.md: 架構條目 + 已知坑(`{{port}}` 非 `${port}`、`WORKSPACE_ID` 是 project 不是 execution、`RANGE_END` 一致性)
 
+## 實作偏差 (spec 寫定後在實作中修正)
+
+1. **分配鎖不是 `SELECT … FOR UPDATE`,是 `LOCK TABLE … IN EXCLUSIVE MODE`。**
+   spec 原文寫 FOR UPDATE,那是錯的: row lock 擋不住**並行 INSERT 一筆新的重疊租約**(phantom),
+   而那正是這裡的 race。provision 罕見、表極小,粗鎖成本可忽略。
+
+2. **`opc_devenv_check_port_pool` 不能用 `read a b < /proc/...`。**
+   procfs 檔案 `st_size` 回報 0,dash 的 `read` builtin 處理不了 ——
+   它吃掉一個 byte 就回傳 1(`32768\t60999` 讀成 `a="3"`)。entrypoint 跑在 `set -e` 下,
+   結果是 **paperclip 無限 crash-loop**。改用 `set -- $(cat …)`。
+   (bash 的 read 沒事,但 image 的 `/bin/sh` 是 dash。)
+   連帶: 呼叫點加 `|| true` —— 這個檔案的契約是「never fatal」,
+   一個**警告用途**的診斷絕不該有能力弄垮容器。
+
+3. **`devenv_usage` view 對沒有 postgres 的租約會整個炸掉。**
+   原本 `pg_database_size(t.slug)` 直接呼叫並刻意讓它 raise(「租約一定有 DB」)。
+   `--with http` 讓這個前提不成立 —— 而且真正的問題是**一筆怪 row 會讓整個 view raise**,
+   於是 `devenv list`(正是出事時你會用的工具)完全不能用。
+   改成 `LEFT JOIN pg_database`,單一 cell 顯示 `MISSING` 而非整份清單掛掉。
+   這是既有的潛在 bug,http provider 只是讓它變得容易踩到。
+
+4. **provision 失敗會留下空殼 registry row。** register-before-create 是刻意的
+   (row 才是 port block 的仲裁者),但 pool 用罄這種**正常失敗**會讓 row 永久留著,
+   在 `devenv list` 顯示成一筆沒人解釋得了的租約。加了 EXIT trap 回滾,
+   且**只回滾本次 invocation 建立的 row** —— 重跑既有租約時絕不能因為某個 provider 出錯
+   就拆掉活著的資料庫。回滾走與 `release` 同一個 `devenv_teardown`,兩者不會漂移。
+
+5. **`WorkspaceRuntimeService.status` 在 v2026.817.0 多了 `"provisioning"`。**
+   `expose --start` 之後的等待邏輯不能只判斷 `!== "running"`。(尚未實作,記錄於此。)
+
 ## 參考
 
 - `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md`

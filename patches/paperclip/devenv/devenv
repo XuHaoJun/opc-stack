@@ -1,7 +1,7 @@
 #!/bin/sh
 # devenv — development environment resource leases for Paperclip agents.
 #
-#   devenv provision <key> [--with postgres,valkey] [--lifecycle keep] [--env-file PATH]
+#   devenv provision <key> [--with postgres,valkey,http[=N]] [--lifecycle keep] [--env-file PATH]
 #   devenv release   <key>
 #   devenv list
 #
@@ -32,6 +32,13 @@ DEVENV_VALKEY_PASSWORD="${DEVENV_VALKEY_PASSWORD:-}"
 DEVENV_VALKEY_DATABASES="${DEVENV_VALKEY_DATABASES:-64}"
 
 DEVENV_SECRET_SALT="${DEVENV_SECRET_SALT:-}"
+
+# Preview-port pool. Static by necessity: docker fixes published ports when the
+# container is created, so the range is declared in docker-compose.yml and only
+# the allocation inside it is dynamic. See providers/http.sh for why the base
+# must stay below the kernel's ephemeral range.
+DEVENV_HTTP_PORT_BASE="${DEVENV_HTTP_PORT_BASE:-21000}"
+DEVENV_HTTP_PORT_COUNT="${DEVENV_HTTP_PORT_COUNT:-16}"
 
 die()   { echo "devenv: $1" >&2; exit "${2:-1}"; }
 note()  { echo "$1" >&2; }
@@ -129,6 +136,28 @@ done
 
 # ── commands ─────────────────────────────────────────────────────────────
 
+# EXIT trap for provision. Must re-raise the original status: a trap that
+# returns normally would turn a failed provision into exit 0.
+devenv_provision_cleanup() {
+    _pc_rc=$?
+    rm -f "${out_file:-}" 2>/dev/null || true
+    if [ "$_pc_rc" -ne 0 ] && [ "${created_now:-0}" = 1 ]; then
+        devenv_teardown "$key" "$slug" 2>/dev/null || true
+        note "devenv: rolled back '$key' (provision failed, nothing was left registered)"
+    fi
+    exit "$_pc_rc"
+}
+
+# Idempotent teardown of every provider plus the registry row. Shared by
+# `release` and by provision's rollback so the two can never drift.
+devenv_teardown() {
+    _td_key="$1"; _td_slug="$2"
+    valkey_release   "$_td_key" "$_td_slug"
+    http_release     "$_td_key" "$_td_slug"
+    postgres_release "$_td_key" "$_td_slug"
+    devenv_psql_control -c "DELETE FROM devenv_tenant WHERE key = '$_td_key'" >/dev/null
+}
+
 cmd_provision() {
     key=""; with="postgres,valkey"; lifecycle="keep"; env_file="$PWD/.env"
     while [ $# -gt 0 ]; do
@@ -147,13 +176,35 @@ cmd_provision() {
         || die "lifecycle '$lifecycle' is not implemented (only 'keep')" 2
 
     slug="$(devenv_slug "$key")"
-    providers="$(echo "$with" | tr ',' ' ')"
-    for prov in $providers; do
+
+    # A provider entry is `name` or `name=arg`. Only http takes an arg (how
+    # many contiguous ports); anything else carrying one is an error rather
+    # than a silently ignored argument.
+    providers=""
+    for spec in $(echo "$with" | tr ',' ' '); do
+        prov="${spec%%=*}"
+        arg=""
+        [ "$spec" = "$prov" ] || arg="${spec#*=}"
         case "$prov" in
-            postgres|valkey) ;;
-            *) die "unknown provider '$prov' (known: postgres, valkey)" 2 ;;
+            postgres|valkey)
+                [ -z "$arg" ] || die "provider '$prov' takes no '=' argument" 2 ;;
+            http)
+                if [ -n "$arg" ]; then
+                    echo "$arg" | grep -Eq '^[1-9][0-9]*$' \
+                        || die "http port count must be a positive integer, got '$arg'" 2
+                    [ "$arg" -le "$DEVENV_HTTP_PORT_COUNT" ] \
+                        || die "http=$arg exceeds the pool size $DEVENV_HTTP_PORT_COUNT (DEVENV_HTTP_PORT_COUNT)" 3
+                    DEVENV_HTTP_COUNT="$arg"
+                else
+                    DEVENV_HTTP_COUNT=1
+                fi
+                export DEVENV_HTTP_COUNT ;;
+            *) die "unknown provider '$prov' (known: postgres, valkey, http)" 2 ;;
         esac
+        providers="$providers $prov"
     done
+    providers="$(echo "$providers" | tr -s ' ' | sed 's/^ //;s/ $//')"
+    [ -n "$providers" ] || die "--with listed no providers" 2
 
     postgres_probe || die "devenv-pg unreachable at $DEVENV_PG_HOST:$DEVENV_PG_PORT" 4
     case " $providers " in *" valkey "*)
@@ -162,10 +213,19 @@ cmd_provision() {
 
     existing="$(devenv_registry_get "$key" key)"
 
-    # Register before creating: the row is what makes the valkey id exclusive,
-    # and every provider is idempotent, so a crash between the two is repaired
-    # by re-running rather than leaving an unclaimed id.
+    # Register before creating: the row is what makes the valkey id and the
+    # http port block exclusive, so it has to exist before anything can be
+    # allocated against it.
+    #
+    # The cost is that a provision which fails partway (an exhausted pool is
+    # the realistic case, not a crash) leaves a resource-less row behind, which
+    # then shows up in `devenv list` forever as a lease nobody can explain.
+    # The EXIT trap below rolls it back — but ONLY when this invocation created
+    # it. Re-provisioning an existing lease must never tear down live
+    # databases just because one provider had a bad day.
+    created_now=0
     if [ -z "$existing" ]; then
+        created_now=1
         devenv_psql_control -v ON_ERROR_STOP=1 -c "
             INSERT INTO devenv_tenant (key, slug, lifecycle, providers, created_by)
             VALUES ('$key', '$slug', '$lifecycle',
@@ -177,7 +237,7 @@ cmd_provision() {
     fi
 
     out_file="$(mktemp)"
-    trap 'rm -f "$out_file"' EXIT INT TERM
+    trap 'devenv_provision_cleanup' EXIT INT TERM
     echo "DEVENV_KEY=$key" > "$out_file"
     for prov in $providers; do
         out="$("${prov}_provision" "$key" "$slug")"
@@ -206,9 +266,23 @@ cmd_release() {
         note "devenv: '$key' (absent)"; return 0
     fi
     slug="$(devenv_slug "$key")"
-    valkey_release "$key" "$slug"
-    postgres_release "$key" "$slug"
-    devenv_psql_control -c "DELETE FROM devenv_tenant WHERE key = '$key'" >/dev/null
+
+    # Warn BEFORE the row goes away, while the registry can still tell us the
+    # lease had an exposed preview port. Releasing frees that port for the next
+    # tenant, and a process still listening on it would make that tenant's
+    # service fail to start — with a "port in use" error pointing at a lease
+    # that no longer exists, which is a miserable thing to debug.
+    _rel_port="$(devenv_registry_get "$key" http_port_start)"
+    _rel_exposed="$(devenv_registry_get "$key" http_exposed_at)"
+    if [ -n "$_rel_port" ] && [ -n "$_rel_exposed" ]; then
+        note "devenv: WARNING '$key' had an exposed service on port $_rel_port."
+        note "devenv:   The port is being returned to the pool, but any process still"
+        note "devenv:   listening on it will break the next tenant. Stop the service"
+        note "devenv:   from the Paperclip board (workspace → runtime services) if it"
+        note "devenv:   is still running."
+    fi
+
+    devenv_teardown "$key" "$slug"
     note "devenv: '$key' released"
 }
 
@@ -217,8 +291,15 @@ cmd_list() {
     # Same view the humans query from a SQL client — one definition, no drift.
     devenv_psql_control -c \
         "SELECT key, created_by, pg_size, valkey_db,
+                CASE WHEN http_port_start IS NULL THEN NULL
+                     WHEN http_port_count > 1
+                       THEN http_port_start || '-' || (http_port_start + http_port_count - 1)
+                     ELSE http_port_start::text END
+                  || CASE WHEN http_unexposed THEN ' !' ELSE '' END  AS ports,
                 date_trunc('second', idle) AS idle
          FROM devenv_usage"
+    # '!' = port leased but `devenv expose` never ran, so nothing is serving it.
+    note "  ports '!' = leased but not exposed (run: devenv expose <name> --command ...)"
 }
 
 case "${1:-}" in

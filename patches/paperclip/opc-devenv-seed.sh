@@ -24,7 +24,12 @@ opc_devenv_seed() {
     fi
 
     _dv_psql() {
-        PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" psql \
+        # client_min_messages=warning: the schema is re-applied every boot, so
+        # its IF NOT EXISTS / ADD COLUMN IF NOT EXISTS statements emit a NOTICE
+        # per object on every single start. Stdout is already discarded; these
+        # go to stderr and would otherwise bury real warnings.
+        PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" \
+        PGOPTIONS='-c client_min_messages=warning' psql \
             -h "$_dv_host" -p "$_dv_port" -U "$_dv_user" -q "$@"
     }
 
@@ -47,5 +52,55 @@ opc_devenv_seed() {
         echo "[devenv-seed] $_dv_db schema ready (devenv_tenant + devenv_usage)"
     else
         echo "[devenv-seed] schema apply failed — devenv will not work" >&2
+    fi
+
+    # `|| true` is load-bearing, not decoration: the entrypoint runs under
+    # `set -e` and this whole file's contract is "never fatal — devenv is an
+    # optional lane". A warning-only diagnostic must not be able to crash-loop
+    # paperclip, which is exactly what happened when the check below had a bug.
+    opc_devenv_check_port_pool || true
+}
+
+# Two ways the preview-port pool gets silently misconfigured. Both are warnings
+# only: a bad pool must not stop the stack from coming up, and neither symptom
+# appears until someone actually leases a port.
+opc_devenv_check_port_pool() {
+    _dv_base="${DEVENV_HTTP_PORT_BASE:-21000}"
+    _dv_count="${DEVENV_HTTP_PORT_COUNT:-16}"
+    _dv_end="${DEVENV_HTTP_PORT_RANGE_END:-}"
+    _dv_last=$((_dv_base + _dv_count - 1))
+
+    # (1) RANGE_END out of sync with BASE + COUNT. compose cannot do
+    # arithmetic, so the pool bounds are stated twice — once for the CLI to
+    # allocate from, once for compose to publish. Disagreement means devenv
+    # hands out ports docker never published: the URL simply does not connect,
+    # with nothing anywhere saying why.
+    if [ -n "$_dv_end" ] && [ "$_dv_end" -ne "$_dv_last" ]; then
+        echo "[devenv-seed] WARNING DEVENV_HTTP_PORT_RANGE_END=$_dv_end but BASE+COUNT-1=$_dv_last." >&2
+        echo "[devenv-seed]   devenv will lease ports docker has not published; those previews will not open." >&2
+        echo "[devenv-seed]   Fix .env so RANGE_END = BASE + COUNT - 1, then recreate the paperclip container." >&2
+    fi
+
+    # (2) Pool overlapping the kernel's ephemeral range. Read from INSIDE this
+    # container on purpose: the collision is with bind(port 0) calls made here
+    # (paperclip's allocatePort() for `port: {type: auto}` services), and a
+    # container has its own network namespace, so the host's value is not
+    # necessarily this one.
+    if [ -r /proc/sys/net/ipv4/ip_local_port_range ]; then
+        # NOT `read a b < /proc/...`: procfs files report st_size 0, and dash's
+        # read builtin mishandles that — it returns 1 having consumed a single
+        # byte ("32768\t60999" yields a="3"). Under `set -e` that killed the
+        # entrypoint. `cat` in a command substitution has no such problem.
+        # (bash's read happens to work here, but /bin/sh in this image is dash.)
+        set -- $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null)
+        _dv_eph_lo="${1:-}"; _dv_eph_hi="${2:-}"
+    fi
+    if [ -n "${_dv_eph_lo:-}" ] && [ -n "${_dv_eph_hi:-}" ]; then
+        if [ "$_dv_base" -le "$_dv_eph_hi" ] && [ "$_dv_last" -ge "$_dv_eph_lo" ]; then
+            echo "[devenv-seed] WARNING preview port pool ${_dv_base}-${_dv_last} overlaps the ephemeral range ${_dv_eph_lo}-${_dv_eph_hi}." >&2
+            echo "[devenv-seed]   The kernel hands those out at random to any bind(0), so a leased port can be" >&2
+            echo "[devenv-seed]   stolen while its server is stopped and the tenant then fails to start." >&2
+            echo "[devenv-seed]   Move DEVENV_HTTP_PORT_BASE below ${_dv_eph_lo}." >&2
+        fi
     fi
 }

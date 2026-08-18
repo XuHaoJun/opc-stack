@@ -511,8 +511,29 @@ services:
       # stays idempotent without keeping plaintext secrets in the registry.
       # Changing it invalidates every already-issued .env.
       DEVENV_SECRET_SALT: ${DEVENV_SECRET_SALT:-opc-devenv-default-salt}
+      # devenv http provider: the preview-port pool for prototype dev servers.
+      # BASE must stay below the kernel's ephemeral range (32768 by default) —
+      # inside it, a bind(port 0) anywhere (including paperclip's own
+      # allocatePort()) can be handed a leased port while its server is down.
+      # opc-devenv-seed.sh re-checks this against the CONTAINER's actual range.
+      DEVENV_HTTP_PORT_BASE: ${DEVENV_HTTP_PORT_BASE:-21000}
+      DEVENV_HTTP_PORT_COUNT: ${DEVENV_HTTP_PORT_COUNT:-16}
+      DEVENV_HTTP_PORT_RANGE_END: ${DEVENV_HTTP_PORT_RANGE_END:-21015}
+      DEVENV_HTTP_PUBLIC_HOST: ${DEVENV_HTTP_PUBLIC_HOST:-localhost}
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
+      # Preview ports for prototype dev servers, leased by `devenv provision
+      # --with http`. Docker fixes published ports at container-create time, so
+      # this range is static and resizing it requires recreating the container.
+      #
+      # RANGE_END duplicates BASE + COUNT - 1 because compose cannot do
+      # arithmetic. opc-devenv-seed.sh verifies they agree at boot — this is
+      # the easiest thing in the whole feature to change and get wrong.
+      #
+      # Bound to 127.0.0.1 deliberately: prototype dev servers have no
+      # authentication. Widening this to reach other devices is a decision the
+      # operator makes explicitly, not a default.
+      - "127.0.0.1:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}"
     volumes:
       - paperclip-data:/paperclip
       - paperclip-nix:/nix
