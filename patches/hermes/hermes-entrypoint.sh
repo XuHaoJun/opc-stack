@@ -82,6 +82,26 @@ if [ -d "$SK_SRC" ]; then
     echo "[hermes] synced skill: paperclip-api"
 fi
 
+
+# Agent identity: sync SOUL.md from the image on every boot.
+#
+# This is where the "you are not the implementer" rule lives, and it has to be
+# here rather than in config.yaml's agent.system_prompt: that key is resolved
+# by `class HermesCLI` in cli.py, so it applies to `hermes chat` and NOT to
+# `hermes acp` — the lane this front door actually runs. AIAgent builds SOUL.md
+# into its own prompt (agent/system_prompt.py -> load_soul_md, scoped to the
+# agent's own home), so SOUL.md holds in every lane.
+#
+# Overwritten every boot on purpose: the image is the source of truth, the same
+# way skills are. config.yaml is NOT a safe place for a rule that must hold —
+# hermes migrates that file and this volume arrived at _config_version 37 with
+# its seeded system_prompt silently gone.
+if [ -f /opt/hermes/SOUL.md ]; then
+    mkdir -p "$HH"
+    cp /opt/hermes/SOUL.md "$HH/SOUL.md"
+    echo "[hermes] synced SOUL.md (agent identity + delegation rule)"
+fi
+
 if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<YAML
@@ -89,13 +109,6 @@ _config_version: 34
 agent:
   disabled_toolsets:
     - kanban
-  # Same delegation clause as patches/buzz/frontdoor-entrypoint.sh, and it MUST
-  # stay identical (scripts/prepare.sh fails the build if they drift). The
-  # dashboard chat is the same agent as the Buzz front door on a different
-  # platform adapter, so a rule that holds in one surface and not the other is
-  # worse than no rule: work routes correctly or not depending on where the
-  # user happened to type. This home had no system_prompt at all before.
-  system_prompt: "You are OPC's chief of staff, not an implementer. When the user asks for something to be BUILT or CHANGED in code — an app, a script, a prototype, a bug fix, a feature — you do NOT write it yourself. You create a Paperclip ticket and route it to a lane; see the paperclip-api skill for how. Writing the code, creating project files, or uploading a build artifact into the chat is a ROUTING FAILURE, no matter how small the task looks or how quickly you could just do it. Deliverables reach the user as a Paperclip ticket plus the link the assigned agent posts back. Understanding, research, planning, summarising and answering questions ARE yours — implementation is not."
 kanban:
   dispatch_in_gateway: false
   review_dispatch: false
@@ -123,24 +136,6 @@ if [ -f "$HH/config.yaml" ]; then
     fi
 fi
 
-# Delegation clause migration for existing volumes (see the frontdoor
-# entrypoint for why this clause is in the prompt and not in the skill).
-# This home historically had NO system_prompt, so insert rather than append.
-if [ -f "$HH/config.yaml" ] && ! grep -q "chief of staff" "$HH/config.yaml"; then
-    python3 - "$HH/config.yaml" <<'PYEOF'
-import sys, re
-path = sys.argv[1]
-src = open(path).read()
-line = '  system_prompt: "You are OPC\'s chief of staff, not an implementer. When the user asks for something to be BUILT or CHANGED in code — an app, a script, a prototype, a bug fix, a feature — you do NOT write it yourself. You create a Paperclip ticket and route it to a lane; see the paperclip-api skill for how. Writing the code, creating project files, or uploading a build artifact into the chat is a ROUTING FAILURE, no matter how small the task looks or how quickly you could just do it. Deliverables reach the user as a Paperclip ticket plus the link the assigned agent posts back. Understanding, research, planning, summarising and answering questions ARE yours — implementation is not."' + "\n"
-if re.search(r'^  system_prompt:', src, re.M):
-    src = re.sub(r'(^  system_prompt: ".*?)"$',
-                 lambda m: m.group(1) + " " + "You are OPC's chief of staff, not an implementer. When the user asks for something to be BUILT or CHANGED in code — an app, a script, a prototype, a bug fix, a feature — you do NOT write it yourself. You create a Paperclip ticket and route it to a lane; see the paperclip-api skill for how. Writing the code, creating project files, or uploading a build artifact into the chat is a ROUTING FAILURE, no matter how small the task looks or how quickly you could just do it. Deliverables reach the user as a Paperclip ticket plus the link the assigned agent posts back. Understanding, research, planning, summarising and answering questions ARE yours — implementation is not." + '"', src, count=1, flags=re.M | re.S)
-else:
-    src = re.sub(r'^(agent:\n(?:  [^\n]*\n|    [^\n]*\n)*)', lambda m: m.group(1) + line, src, count=1, flags=re.M)
-open(path, "w").write(src)
-PYEOF
-    echo "[hermes] added delegation clause to $HH/config.yaml"
-fi
 
 # Key routing: for provider "custom", Hermes reads OPENAI_API_KEY +
 # OPENAI_BASE_URL from the environment (or $HERMES_HOME/.env).

@@ -96,8 +96,12 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 
 - `buzz-admin` 讀 `RELAY_URL` env (不是 BUZZ_RELAY_URL); add-member 需 DATABASE_URL/REDIS_URL + relay key + S3 env。
 - Paperclip `pi_local` adapter 不兼容 omp v17 (flag 差異); 整合 omp 用 `claude_local` + `engine:"acp"` + `agentCommand:"omp acp --yolo"` (handshake 已驗證, 見 SETUP.md)。
-- **「hermes 不自己實作」這條規則必須在 system_prompt, 不能只放 skill**: skill 只能影響「已經決定載入它」的 model, 而「不要自己做, 去派工」必須在那個決定**之前**就成立。實測過反例 — 請 frontdoor prototype 一個小工具, 它把整個 app 寫進自己的 home、上傳到 Buzz media, **一張 ticket 都沒開**。lane 表 = 細節, 放 skill; 「你不是實作者」= 常駐約束, 放 prompt。兩份 entrypoint 的 clause 必須逐字相同, `scripts/prepare.sh` 會擋。
-- **`config.yaml` 的 seed 是「不存在才寫」, 而且 hermes 會自己遷移它**: frontdoor 的 volume 被 hermes 從 `_config_version` 34 遷到 37 的過程中 **system_prompt 整個不見了**, 於是它有很長一段時間是**沒有 system prompt** 在跑。所以 prompt 這種必須成立的東西要**每次開機 reconcile**(缺就補、有就只補缺的子句), 不能只靠首次 seed。
+- **「hermes 不自己實作」這條規則住在 `SOUL.md`, 不是 skill 也不是 `config.yaml`**。三個位置都試過, 只有一個成立:
+  - **skill 不行** — skill 只能影響「已經決定載入它」的 model, 而「不要自己做」必須在那個決定**之前**就成立。實測反例: 請 frontdoor prototype 一個小工具, 它把整個 app 寫進自己的 home、上傳到 Buzz media, **一張 ticket 都沒開**。
+  - **`config.yaml` 的 `agent.system_prompt` 也不行** — 那個 key 由 `cli.py` 的 `class HermesCLI` 解析 (`resolve_ephemeral_system_prompt`), 只對 `hermes chat` 生效。**ACP lane 完全不讀** (`acp_adapter/session.py` 建 `AIAgent(**kwargs)` 時沒傳 `system_prompt`), 而 frontdoor 跑的正是 `hermes acp`。與 `completion_queue` 只被 cli.py / gateway 消耗是同一類的 lane 落差。
+  - **`SOUL.md` 才對** — `AIAgent` 自己組 prompt 時會讀 (`agent/system_prompt.py` → `load_soul_md`, 且 scope 在 agent 自己的 `HERMES_HOME`), 所以**每個 lane 都吃得到**。兩個 image 各 bake 一份 `/opt/hermes/SOUL.md`, entrypoint 每次開機覆蓋進 home (與 skill 同一套機制)。兩份必須逐字相同, `scripts/prepare.sh` 會擋。
+  lane 表繼續留在 skill (那是會變的細節), 「你不是實作者」是常駐約束。
+- **`config.yaml` 不是放「必須成立的規則」的地方**: seed 是「不存在才寫」, 而且 **hermes 會自己遷移它** — frontdoor 的 volume 被遷到 `_config_version 37` 的過程中 **`system_prompt` 整個不見了**, 於是它有很長一段時間在**沒有 system prompt** 的狀態下跑, 而沒有任何地方會顯示這件事。config.yaml 現在只放對話語氣與 Buzz 發文機制, 且每次開機 reconcile。
 - **派工路由住在 `paperclip-api` skill, 不在 system_prompt**: hermes 是決定 assignee 的那一層 (Paperclip 在本 stack 沒有自動路由 — 無 CEO、org 全扁平、`role=general`, 未指派的 ticket 沒人會醒)。lane 表 (`engineering`→`OMP Engineer` / `prototype`→`Prototyper`) 放 skill 的理由: skill 由 image 在每次開機同步進 **兩個** hermes home (frontdoor 與 gateway), 而 `config.yaml` 的 system_prompt 是 per-home 且 dashboard 可編輯 — 規則放 prompt 會分歧。**改 skill 要同時改 `patches/buzz/skills/` 與 `patches/hermes/skills/` 兩份** (內容必須相同)。channel 層的 `platforms.<name>.channel_overrides[channel_id]` 可覆寫 system_prompt/model, 但那是 per-platform × per-channel-id, 只適合當加速器, 不要拿來當路由機制。
 - **prototype/preview 的三個坑**: (1) `expose.urlTemplate` 的變數語法是 `{{port}}` 不是 `${port}` (upstream `doc/plans/` 的範例過期); (2) **dev server 一定要綁 `0.0.0.0`** — 綁 loopback 時 paperclip 的 readiness 從容器內打 `127.0.0.1` 會過, 但 host 連不上, 於是 board 顯示綠色 live 卻打不開 (devenv 因此把 `HOST=0.0.0.0` 寫進 `.env`); (3) preview port pool 的 base 必須 **低於 32768** (kernel ephemeral range), 否則 `bind(0)` 可能搶走已租但當下沒 listen 的 port。`DEVENV_HTTP_PORT_RANGE_END` 與 `BASE+COUNT-1` 是兩個必須一致的來源 (compose 不會算術), 開機檢查會 warn。
 - **`PAPERCLIP_WORKSPACE_ID` 是 project workspace id, 不是 execution workspace id** (`heartbeat.ts` 塞 `executionWorkspace.workspaceId`, 而 `workspace-runtime.ts` 用它當 `projectWorkspaceId`)。要 execution workspace 得走 `GET /issues/<id>/heartbeat-context` → `.currentExecutionWorkspace.id`。
@@ -125,6 +129,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - `docker-compose.yml` / `.env.example` / `SETUP.md` — 部署核心
 - `patches/<proj>/` — 改寫的 Dockerfiles + entrypoints (唯一客製來源; 內容 = 各 repo 的 opc/ 目錄)
 - `patches/nix-seed/` — nix seed build context (nix 2.35.2 + 8 工具, `cp -al` 成 `/nix-seed`); compose `nix-seed` 是 one-shot, 消費者 = 各 service Dockerfile 的 `COPY --from=nix-seed`
+- `patches/{buzz,hermes}/SOUL.md` — agent 身分 + 「不自己實作」規則 (兩份必須相同; 唯一對所有 lane 都生效的位置)
 - `patches/<proj>/opc-mise-seed.sh` — 每 project 一份, entrypoint source 的 mise bootstrap (空 volume 自動裝 node/rust/omp)
 - `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
 - `patches/paperclip/skills/<slug>/` — vendor 的第三方 skill (SKILL.md + sibling 檔 + `SOURCE` 記 repo/SHA); image 內落在 `/opt/opc-skills/`, bootstrap 裝進 company library
@@ -132,7 +137,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - `patches/paperclip/skills/{devenv,prototype-workspace}/` — first-party skill (租約用法 / prototype 工作流 + 覆寫 vendored `prototype` skill 的第 1、3、6 條規則)
 - `patches/paperclip/devenv/` — `devenv` CLI + `providers/{postgres,valkey}.sh` + `bootstrap.sql`;
   image 內落在 `/usr/local/lib/devenv/`, symlink 到 `/usr/local/bin/devenv`。schema 由 `opc-devenv-seed.sh` 每次開機套用 (冪等, 後端不通只警告不擋 `up`)
-- `scripts/prepare.sh` — 除了同步 patches, 還有**防漂移檢查**: 兩份 `paperclip-api` SKILL.md 與兩份 delegation clause 必須逐字相同, 不同就中止 build (這條規則在本 repo 已經默默壞過三次)
+- `scripts/prepare.sh` — 除了同步 patches, 還有**防漂移檢查**: 兩份 `paperclip-api` SKILL.md 與兩份 `SOUL.md` 必須逐字相同, 不同就中止 build (這條規則在本 repo 已經默默壞過三次)
 - `scripts/` — setup / prepare / upgrade / test-connectivity; `host-sync.sh` (通用 host→volume 鏡像 CLI) + `host-sync-worker.sh` (容器側 engine, 唯一邏輯) + `hooks/` (per-source 轉換, ssh/gitconfig/claude-cred) + `sync-gh-creds.sh` / `sync-claude-creds.sh` (場景薄 wrapper); compose `host-sync` (gh) 與 `host-sync-claude` (Claude cred) 兩個 one-shot 每次 up 自動跑
 - `upstream/<proj>/opc/` — prepare.sh 產物, 勿手改
 - `acp-smoke-test.mjs` — omp ACP handshake 驗證 script (在 paperclip 容器內跑)

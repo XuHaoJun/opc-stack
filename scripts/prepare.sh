@@ -53,27 +53,9 @@ check_identical "paperclip-api skill" \
   patches/buzz/skills/paperclip-api/SKILL.md \
   patches/hermes/skills/paperclip-api/SKILL.md
 
-# The delegation clause is embedded in each entrypoint's seeded system_prompt
-# (it has to hold before any skill loads — see the comment at the seed site),
-# so it cannot be a shared file. Compare the extracted sentence instead.
-# Anchored on a phrase with no apostrophe: the clause itself contains one
-# ("OPC's"), which would terminate a single-quoted sed script.
-delegation_clause() {
-  grep -o 'chief of staff, not an implementer[^"]*' "$1" | head -1
-}
-fd_clause="$(delegation_clause patches/buzz/frontdoor-entrypoint.sh)"
-gw_clause="$(delegation_clause patches/hermes/hermes-entrypoint.sh)"
-if [ -z "$fd_clause" ] || [ -z "$gw_clause" ]; then
-  echo "FAIL  delegation clause: not found in both entrypoints"
-  exit 1
-fi
-if [ "$fd_clause" != "$gw_clause" ]; then
-  echo "FAIL  delegation clause: front door and gateway have drifted"
-  echo "  frontdoor: $fd_clause"
-  echo "  gateway:   $gw_clause"
-  exit 1
-fi
-echo "SAME  delegation clause"
+check_identical "agent SOUL.md" \
+  patches/buzz/SOUL.md \
+  patches/hermes/SOUL.md
 
 apply_patch buzz
 apply_patch hermes

@@ -221,6 +221,12 @@ COPY opc/memory_tencentdb/ /opt/hermes/memory_tencentdb/
 
 # paperclip-api skill (GitHub integration) — seeded into $HERMES_HOME/skills/
 # at boot by hermes-entrypoint.sh.
+# Agent identity. SOUL.md is read by AIAgent itself (agent/system_prompt.py
+# -> load_soul_md, scoped to the agent's own HERMES_HOME), which is why the
+# delegation rule lives here and NOT in config.yaml's agent.system_prompt:
+# that key is resolved by class HermesCLI in cli.py, so the ACP lane — the
+# one the Buzz front door actually runs — never sees it.
+COPY opc/SOUL.md /opt/hermes/SOUL.md
 COPY opc/skills/paperclip-api/ /opt/hermes/skills/paperclip-api/
 
 # Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias

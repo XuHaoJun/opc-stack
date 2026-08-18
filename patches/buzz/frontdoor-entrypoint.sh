@@ -144,7 +144,7 @@ fi
 
 # Single definition of the front door prompt: the seed below and the
 # migration further down both read it, so they cannot disagree.
-OPC_FRONTDOOR_PROMPT="You are a conversational chat assistant in the Buzz workspace. Reply directly and concisely, in the user's language. IMPORTANT: post every reply to the channel with the Buzz CLI: buzz messages send --reply-to EVENT_ID --content 'TEXT' (the event_id to anchor to is given in the context; omit --reply-to only for channel-root/broadcast posts). Do NOT explore the environment, read files, or run other tools unless the user explicitly asks you to. You are OPC's chief of staff, not an implementer. When the user asks for something to be BUILT or CHANGED in code — an app, a script, a prototype, a bug fix, a feature — you do NOT write it yourself. You create a Paperclip ticket and route it to a lane; see the paperclip-api skill for how. Writing the code, creating project files, or uploading a build artifact into the chat is a ROUTING FAILURE, no matter how small the task looks or how quickly you could just do it. Deliverables reach the user as a Paperclip ticket plus the link the assigned agent posts back. Understanding, research, planning, summarising and answering questions ARE yours — implementation is not."
+OPC_FRONTDOOR_PROMPT="You are a conversational chat assistant in the Buzz workspace. Reply directly and concisely, in the user's language. IMPORTANT: post every reply to the channel with the Buzz CLI: buzz messages send --reply-to EVENT_ID --content 'TEXT' (the event_id to anchor to is given in the context; omit --reply-to only for channel-root/broadcast posts). Do NOT explore the environment, read files, or run other tools unless the user explicitly asks you to."
 if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<YAML
@@ -158,17 +158,11 @@ agent:
   # (buzz messages send --reply-to EVENT_ID; the harness supplies the
   # event_id to anchor to).
   #
-  # The delegation clause lives HERE and not in the paperclip-api skill, even
-  # though the lane table does live in the skill. A skill can only influence a
-  # model that decided to load it; "do not implement, delegate" has to hold
-  # BEFORE that decision, or the agent just builds the thing and never reaches
-  # for the skill at all. That is not hypothetical — it is exactly what
-  # happened: asked to prototype a small tool, the front door wrote the whole
-  # app into its own home and uploaded it to Buzz media, and no ticket was
-  # ever created. Lane routing = detail, belongs in the skill. "You are not
-  # the implementer" = standing constraint, belongs here.
-  # This string MUST stay identical to the one in patches/hermes/
-  # hermes-entrypoint.sh; scripts/prepare.sh fails the build if they drift.
+  # The "do not implement, delegate" rule is NOT here — it lives in SOUL.md
+  # (synced above). This key is resolved by `class HermesCLI` in cli.py, so it
+  # only applies to `hermes chat`; the ACP lane this front door runs never
+  # reads it. Keep this prompt to what it is for: conversational tone and the
+  # Buzz posting mechanic.
   system_prompt: "${OPC_FRONTDOOR_PROMPT}"
 kanban:
   dispatch_in_gateway: false
@@ -197,31 +191,26 @@ if [ -f "$HH/config.yaml" ]; then
     fi
 fi
 
-# system_prompt migration. Two things make "seed it once" insufficient:
+# system_prompt reconciliation. Two things make "seed it once" insufficient:
 # config.yaml is only written when ABSENT, and hermes runs its own config
 # migrations on it (this volume arrived at _config_version 37 with the
 # system_prompt gone entirely — the front door had been running with NO
 # prompt at all, which is exactly why it built a prototype itself instead of
 # filing a ticket). So reconcile on every boot: append the delegation clause
 # to an existing prompt, or write the whole prompt if there is none.
-if [ -f "$HH/config.yaml" ] && ! grep -q "chief of staff" "$HH/config.yaml"; then
+if [ -f "$HH/config.yaml" ] && ! grep -q "conversational chat assistant" "$HH/config.yaml"; then
     FD_PROMPT="$OPC_FRONTDOOR_PROMPT" python3 - "$HH/config.yaml" <<'PYEOF'
 import os, re, sys
 path = sys.argv[1]
 src = open(path, encoding="utf-8").read()
-full = os.environ["FD_PROMPT"]
-clause = full.split("Do NOT explore the environment, read files, or run other tools unless the user explicitly asks you to. ", 1)[1]
+line = '  system_prompt: "' + os.environ["FD_PROMPT"].replace('"', '\\"') + '"\n'
 if re.search(r'^  system_prompt:', src, re.M):
-    src = re.sub(r'(^  system_prompt: ".*?)"$',
-                 lambda m: m.group(1) + " " + clause + '"', src, count=1, flags=re.M | re.S)
-    note = "appended delegation clause to existing system_prompt"
+    src = re.sub(r'^  system_prompt: ".*?"$', line.rstrip("\n"), src, count=1, flags=re.M | re.S)
 else:
-    line = '  system_prompt: "' + full.replace('"', '\\"') + '"\n'
     src = re.sub(r'^(agent:\n(?:  [^\n]*\n|    [^\n]*\n)*)',
                  lambda m: m.group(1) + line, src, count=1, flags=re.M)
-    note = "config.yaml had no system_prompt — wrote the full one"
 open(path, "w", encoding="utf-8").write(src)
-print("[frontdoor] " + note)
+print("[frontdoor] restored the conversational system_prompt")
 PYEOF
 fi
 
@@ -232,6 +221,26 @@ export OPENAI_API_KEY OPENAI_BASE_URL
 # Self-healing agent registration (profile + channel membership) — runs
 # alongside buzz-acp so a fresh deploy needs no manual setup steps.
 opc-register-agent.sh &
+
+
+# Agent identity: sync SOUL.md from the image on every boot.
+#
+# This is where the "you are not the implementer" rule lives, and it has to be
+# here rather than in config.yaml's agent.system_prompt: that key is resolved
+# by `class HermesCLI` in cli.py, so it applies to `hermes chat` and NOT to
+# `hermes acp` — the lane this front door actually runs. AIAgent builds SOUL.md
+# into its own prompt (agent/system_prompt.py -> load_soul_md, scoped to the
+# agent's own home), so SOUL.md holds in every lane.
+#
+# Overwritten every boot on purpose: the image is the source of truth, the same
+# way skills are. config.yaml is NOT a safe place for a rule that must hold —
+# hermes migrates that file and this volume arrived at _config_version 37 with
+# its seeded system_prompt silently gone.
+if [ -f /opt/hermes/SOUL.md ]; then
+    mkdir -p "$HH"
+    cp /opt/hermes/SOUL.md "$HH/SOUL.md"
+    echo "[frontdoor] synced SOUL.md (agent identity + delegation rule)"
+fi
 
 # paperclip-api skill (GitHub integration): sync from image on every boot —
 # image updates propagate into existing volumes.
