@@ -6,7 +6,8 @@
 #   opc-issue-watcher.sh <issue-id> <channel-uuid>   # poll until terminal
 #   opc-issue-watcher.sh sweep                       # re-attach after restart
 #
-# Terminal states: done (post GitHub link from comments) / cancelled / blocked
+# Terminal states: done (post the deliverable link — GitHub repo for the
+# engineering lane, preview URL for prototypes) / cancelled / blocked
 # (post outcome). On a long-running issue (WATCHER_MAX_AGE, default 24h) a
 # status note is posted and polling stops. Spawned by the frontdoor agent
 # when it creates a ticket, and by the frontdoor entrypoint boot sweep.
@@ -58,6 +59,19 @@ api_get() {
     curl -fsS --max-time 15 -H "$AUTH" "$API$1" 2>/dev/null || true
 }
 
+# find_preview_url <issue-id> — the prototype lane's deliverable.
+#
+# A prototype never gets a GitHub link: its git repo is local by design and
+# what the user actually wants is the live preview. Only loopback URLs count —
+# the preview range is published on 127.0.0.1 — which also keeps the many
+# incidental http links in analysis comments from being mistaken for one.
+find_preview_url() {
+    api_get "/issues/$1/comments" | \
+        jq -r '.. | strings? | select(test("https?://(localhost|127\\.0\\.0\\.1):[0-9]+"))' 2>/dev/null | \
+        grep -oE 'https?://(localhost|127\.0\.0\.1):[0-9]+(/[^ )"`'"'"']*)?' | \
+        head -1
+}
+
 # find_github_url <issue-id> — first repo-root GitHub URL in comments
 # (skips PR/tree/commit/issue/blob links; the analysis comments contain lots
 # of github.com noise, so match a strict repo URL and filter).
@@ -85,11 +99,20 @@ poll_once() {
 
     case "$status" in
         done)
+            # Two lanes, two kinds of deliverable. Checking only for a GitHub
+            # link made every prototype report as "完成 (無 link)" even when it
+            # had posted a working preview URL — the work was fine, the
+            # notification threw it away.
             url="$(find_github_url "$id")"
             if [ -n "$url" ]; then
                 post "✅ ${title} 完成: ${url}"
             else
-                post "✅ ${title} 完成 (ticket 無 GitHub link, 見 paperclip)"
+                url="$(find_preview_url "$id")"
+                if [ -n "$url" ]; then
+                    post "✅ ${title} 完成, demo: ${url}"
+                else
+                    post "✅ ${title} 完成 (ticket 內沒有連結, 見 paperclip)"
+                fi
             fi
             touch "$STATE_DIR/$id.posted" 2>/dev/null || true
             return 0

@@ -530,10 +530,17 @@ services:
       # arithmetic. opc-devenv-seed.sh verifies they agree at boot — this is
       # the easiest thing in the whole feature to change and get wrong.
       #
-      # Bound to 127.0.0.1 deliberately: prototype dev servers have no
-      # authentication. Widening this to reach other devices is a decision the
-      # operator makes explicitly, not a default.
-      - "127.0.0.1:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}"
+      # Bind address is 127.0.0.1 by default because prototype dev servers have
+      # NO authentication — anything that can reach the port can use the app and
+      # its database. Widening it is an explicit operator decision, which is why
+      # it is a variable and not a bare 0.0.0.0.
+      #
+      # For a machine driven remotely, set DEVENV_HTTP_BIND to the tailnet
+      # address (e.g. a Tailscale 100.x IP) rather than 0.0.0.0: that reaches
+      # your other devices while still not listening on the LAN or the public
+      # interface. DEVENV_HTTP_PUBLIC_HOST must match, or DEV_URL will advertise
+      # an address the browser cannot reach.
+      - "${DEVENV_HTTP_BIND:-127.0.0.1}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}"
     volumes:
       - paperclip-data:/paperclip
       - paperclip-nix:/nix

@@ -169,6 +169,24 @@ cmd_create() {
         note "prototype: Paperclip project exists ($project)"
     fi
 
+    # Attach the current ticket to the project. Paperclip does not do this for
+    # us — an issue created before the project existed keeps projectId null, so
+    # the board shows the prototype and the ticket as unrelated things and the
+    # next run gets no workspace. Doing it here rather than asking the agent to
+    # remember: PAPERCLIP_TASK_ID is injected on every issue-driven run, so the
+    # information is already at hand exactly when it is needed.
+    if [ -n "${PAPERCLIP_TASK_ID:-}" ]; then
+        cur="$(api GET "/issues/$PAPERCLIP_TASK_ID" 2>/dev/null | jq -r '.projectId // empty')"
+        if [ -z "$cur" ]; then
+            jq -nc --arg p "$project" '{projectId:$p}' \
+                | api PATCH "/issues/$PAPERCLIP_TASK_ID" >/dev/null 2>&1 \
+                && note "prototype: linked ticket $PAPERCLIP_TASK_ID to project" \
+                || note "prototype: WARNING could not link ticket to project"
+        elif [ "$cur" != "$project" ]; then
+            note "prototype: WARNING ticket is on a different project ($cur) — not reassigning"
+        fi
+    fi
+
     if [ -n "$command_" ]; then
         cmd_expose "$name" --command "$command_" --idle "$idle" --start
     else

@@ -48,8 +48,13 @@ prototype expose recipe-bot --command "python3 -m http.server \$PORT --bind 0.0.
 ```
 
 Re-running `expose` with a different command updates the service; it does not
-add a second one. Post `DEV_URL` back to the ticket as a comment — that URL is
-the deliverable.
+add a second one.
+
+**Post `DEV_URL` back to the ticket as a comment — that URL is the
+deliverable.** It is what gets relayed to the user; a ticket that closes
+without it reads as "done, but nothing to look at". Do not paste the source
+code into the ticket or the chat instead: the point of the preview is that the
+user can open it, not read it.
 
 The service idle-stops after 7 days. That stops a process; it deletes nothing.
 `prototype expose <name> --start` brings the same URL back.
