@@ -19,7 +19,7 @@ if [ ! -f .env ]; then
   echo "  then re-run scripts/setup.sh (or continue below; .env is re-read every run)."
 fi
 # Show a hint for the relay URL (only when it still points at localhost).
-set -a; . ./.env; set +a
+. "$(dirname "$0")/load-env.sh"; opc_load_env ./.env
 if [[ "${BUZZ_RELAY_URL:-}" == "ws://localhost"* ]] && command -v hostname >/dev/null; then
   lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   [ -n "$lan_ip" ] && echo "hint: LAN IP is ${lan_ip} — set BUZZ_RELAY_URL=ws://${lan_ip}:3000 for device access"

@@ -9,7 +9,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 if [ ! -f .env ]; then echo "FAIL  no .env — run scripts/setup.sh first"; exit 1; fi
-set -a; . ./.env; set +a
+. "$(dirname "$0")/load-env.sh"; opc_load_env ./.env
 
 PASS=0; FAIL=0
 check() { # check <label> <cmd...>
