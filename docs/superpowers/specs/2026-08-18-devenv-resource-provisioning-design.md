@@ -34,6 +34,8 @@ Paperclip 的 agent 需要後端資源才能真的把東西跑起來 (dev server
 - 配額、排程、資源上限管理。
 - 跨 agent 的共享協商 (同 key = 共享, 記錄於文件, 不做協商機制)。
 - `ephemeral` lifecycle 的自動回收 (欄位保留, 本次不實作 — 見「Lifecycle」)。
+- **任何自動回收與排程通知** (`gc`、對帳、壓力警告、Buzz 摘要)。回收一律手動
+  `devenv release`; 本次只提供**可觀測性** (`devenv_usage` view) — 見「延後: 自動回收與通知」。
 - 容器化資源 (任意 image)。需要時走 podman sidecar, 屬另一個 spec。
 - 安全邊界。devenv 是**人體工學與防手滑**, 不是安全機制 (見「安全模型」)。
 
@@ -108,6 +110,7 @@ devenv list
 - `--with`: 預設 `postgres,valkey`。
 - `--lifecycle`: 預設 `keep`。傳 `ephemeral` 回傳明確錯誤 (未實作)。
 - `--env-file`: 預設 `$PWD/.env`。
+- `list`: 直接查 `devenv_usage` view (見「監控」), 不自己算。
 - **冪等**: 同 key 重跑回傳既有值, 不重建、不換密碼。
 - 退出碼: 0 成功 / 2 參數錯 / 3 資源用罄 / 4 後端不可達。
 
@@ -179,13 +182,53 @@ CREATE TABLE devenv_tenant (
   providers   text[] NOT NULL,
   valkey_db   int UNIQUE,          -- NULL = 未配 valkey
   created_by  text,                -- agent 識別, 供 list/稽核
-  created_at  timestamptz NOT NULL DEFAULT now()
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now()
 );
 ```
 
 - `UNIQUE(valkey_db)` 讓併發配號由 DB 擋, CLI 不需要鎖。
 - 配號 = 挑最小未使用編號 insert, 撞了就重試。
 - `lifecycle` 欄位本次只會寫入 `'keep'`; 欄位先留, 之後補 ephemeral 不需要 migration。
+- `last_seen_at` 在**每次 `provision`** 更新 (含冪等重跑)。skill 已要求 agent 開工先跑
+  `provision`, 所以這是零成本的「還有人在動這個」訊號, 不需額外埋點。它只是欄位, 沒有任何
+  行為掛在上面。
+
+### 監控 (`devenv_usage` view)
+
+回收是手動的, 所以**唯一需要的自動化是「看得見」**。做成 view 而不是 dashboard 或通知器:
+一份定義同時餵三種消費者, 不用各做各的。
+
+```sql
+CREATE OR REPLACE VIEW devenv_usage AS
+SELECT t.key,
+       t.created_by,
+       t.created_at,
+       t.last_seen_at,
+       now() - t.last_seen_at                    AS idle,
+       t.providers,
+       t.valkey_db,
+       pg_database_size(t.slug)                  AS pg_bytes,
+       pg_size_pretty(pg_database_size(t.slug))  AS pg_size
+FROM devenv_tenant t
+ORDER BY pg_database_size(t.slug) DESC;
+```
+
+消費者:
+
+| 誰 | 怎麼看 |
+|---|---|
+| 人 | SQL client (TablePlus / DBeaver / psql) 連 `127.0.0.1:${DEVENV_PG_PORT:-5433}` |
+| CLI | `devenv list` 查同一個 view |
+| 未來的自動化 | 同一個 view, 不需改結構 |
+
+**排序刻意用 `pg_bytes` 遞減**: 兩種資源的失敗模式不對稱 —— valkey 槽位有硬上限 63, 用罄時
+`provision` 以退出碼 3 自己喊出來, 且不破壞資料; postgres 磁碟則**無上限且不可見**, 一個裝了
+embeddings 的 pgvector DB 可以數 GB, 塞爆會拖垮整個 stack。所以 view 第一眼要先回答
+「誰在吃磁碟」。
+
+`pg_database_size()` 對已被 `release` 但登記表殘留的列會拋錯 — `release` 是同一個交易裡刪列,
+不會出現該狀態; 若人工介入造成漂移, view 會直接報錯而不是靜默給錯數字 (刻意 fail loud)。
 
 ### Lifecycle
 
@@ -194,8 +237,36 @@ CREATE TABLE devenv_tenant (
 | `keep` | 明確 `release` 前都在 | **實作** |
 | `ephemeral` | run/workspace 結束回收 | 欄位保留, CLI 拒絕, 不實作 |
 
-不實作 ephemeral 的原因: 自動回收要接 paperclip execution workspace 的生命週期 hook,
-那個掛載點尚未查證。名稱與資料模型一次到位, engineer agent 真的要用時只補回收邏輯。
+**回收一律手動** (`devenv release <key>`)。本次不做任何自動回收 —— 取而代之的是
+`devenv_usage` view: 累積是看得見的, 什麼時候清由人決定。
+
+不實作 ephemeral 的原因: 自動回收要接 paperclip execution workspace 的生命週期。名稱與資料
+模型一次到位, 真的要做時只補回收邏輯, 不需要 migration。
+
+### 延後: 自動回收與通知 (不實作, 記錄以免重新踩坑)
+
+評估過但本次刻意不做。以下是已查證的事實, 供未來決定時直接使用:
+
+**孤兒對帳不需要 hook。** 原本以為 `ephemeral` 卡在「找不到 workspace 生命週期 hook」, 但
+`GET /companies/:companyId/execution-workspaces` 存在 —— 用**拉的對帳**即可: 登記表的
+`created_by` / key 比對這份清單, workspace 不在了就是孤兒。push (hook) 換成 pull (對帳),
+拿到 ephemeral 大部分的價值。
+
+**「擁有者還在不在」比 TTL 正確。** 純 TTL 會刪掉下個月要回來看的原型; 時間只是代理指標。
+若要做, 條件應是「孤兒」而非「過期」, `last_seen_at` 只當輔助排序。
+
+**hermes 排程 + Buzz 通知的管線目前不通** (實測):
+
+| | buzz CLI | psql | cron |
+|---|---|---|---|
+| hermes gateway (8642) | ✗ | ✗ | ✓ (cron 只在 gateway 執行) |
+| frontdoor (參謀長, ACP) | ✓ | ✗ | ✗ |
+
+能排程的沒有嘴巴, 有嘴巴的不能排程。要做得先幫 gateway 補 psql + 一條發 Buzz 的路 (它不是
+已註冊的 buzz agent, frontdoor 才是)。
+
+**更省的替代方案**: 把壓力提醒搭在 `provision` 上 (它本來就會碰登記表), 槽位或磁碟過門檻就在
+輸出附上前幾名候選。零排程、零跨容器管線, 且時機天然正確 —— 只有 provision 才會累積資源。
 
 ### Compose 服務
 
@@ -226,7 +297,7 @@ devenv-valkey:
 ### Bootstrap
 
 `devenv-bootstrap` one-shot (或併入既有 paperclip bootstrap): 建 `devenv_control` DB +
-`devenv_tenant` 表, 冪等。`docker compose down -v` 後自動重建。
+`devenv_tenant` 表 + `devenv_usage` view (`CREATE OR REPLACE`, 故可安全重跑), 冪等。`docker compose down -v` 後自動重建。
 
 登記表與資料同在 `devenv-pg` — `down -v` 時一起消失, 不會出現「登記表說有、DB 卻沒了」的漂移。
 
@@ -294,24 +365,29 @@ ACL 與 per-tenant role 的價值在**防手滑** (tenant A 不會誤刪 tenant 
 1. `docker compose config --quiet`; 兩服務 healthy。
 2. `devenv provision t1` → `.env` 三個變數齊全; `psql "$DATABASE_URL" -c 'SELECT 1'` 通過;
    `CREATE EXTENSION vector` 已就緒。
-3. 冪等: 再跑一次 `devenv provision t1` → 值完全相同, 標註 `(existing)`。
+3. 冪等: 再跑一次 `devenv provision t1` → 值完全相同, 標註 `(existing)`; `last_seen_at` 有更新。
+3b. 監控: 從 host `psql -h 127.0.0.1 -p 5433` 查 `SELECT * FROM devenv_usage` → 看得到 t1,
+    `pg_size` 非空, `idle` 合理; 寫入約 100MB 資料後再查, `pg_bytes` 明顯上升。
+3c. `devenv list` 輸出與 view 一致 (同資料來源, 不得各自計算)。
 4. 隔離: `provision t2` 後, 以 t1 憑證連 t2 的 DB 應被拒; 以 t1 的 valkey user `SELECT` 到
    t2 的編號應被 ACL 拒。
 5. 編號用罄: 登記表灌到 63 筆後 `provision` 退出碼 3。
-6. `release t1` → DB/role/ACL user 皆消失, 編號回到可配; 重跑 `release t1` 仍成功。
+6. `release t1` → DB/role/ACL user 皆消失, 編號回到可配; 該列從 `devenv_usage` 消失;
+   重跑 `release t1` 仍成功。
 7. `.env` 保護: 預先放入自訂變數, `provision` 後該變數仍在。
 8. **per-agent 隔離 (關鍵)**: engineer agent 跑一次 heartbeat, 確認其 run log 沒有任何
    `Materialized … Paperclip skill` 記錄, 也沒有 skill root 的 prompt 前綴。
 9. **風險 1 驗證**: prototyper 只掛 `devenv` 一個 skill, 下一個需要 DB 的任務, 確認它真的讀到
    SKILL.md 並執行了 `devenv provision`。
-10. `docker compose down -v` → `up -d` → bootstrap 重建登記表, `devenv list` 為空且不報錯。
+10. `docker compose down -v` → `up -d` → bootstrap 重建登記表與 view, `devenv list` 為空
+    且不報錯; bootstrap 連跑兩次不報錯 (`CREATE OR REPLACE VIEW`)。
 
 ## 實作順序
 
 1. compose 兩服務 + volume + `.env.example` 條目
 2. `devenv` CLI + 兩支 provider → `patches/paperclip/`, Dockerfile COPY
-3. bootstrap 建 `devenv_control`
-4. 驗證 1~7、10
+3. bootstrap 建 `devenv_control` + `devenv_tenant` + `devenv_usage` view
+4. 驗證 1~7 (含 3b/3c)、10
 5. paperclip UI: 匯入 `prototype` skill、建立 `devenv` local skill
 6. 建 Prototyper agent, **先只掛 `devenv`** → 驗證 9 (風險 1)
 7. 通過後補掛 `prototype`, 驗證 8
@@ -325,3 +401,4 @@ ACL 與 per-tenant role 的價值在**防手滑** (tenant A 不會誤刪 tenant 
   (`readPaperclipSkillSyncPreference`)、`packages/adapter-utils/src/acpx-engine/execute.ts`
   (`prepareClaudeSkillRuntime`)、`docs/guides/agent-developer/skills-store.md` (trust levels)
 - valkey ACL: `src/acl.c` (`ACLSetSelector` 的 `db=` op、`ACLSelectorCanAccessDb`)
+- 孤兒對帳 (延後): paperclip `GET /companies/:companyId/execution-workspaces`
