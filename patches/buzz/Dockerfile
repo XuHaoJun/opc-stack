@@ -60,6 +60,12 @@ ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY --exclude=opc . .
+# NIP-OA owner attestation signer: stdin-only helper (patches/buzz/opc-nip-oa-sign.rs),
+# built as a buzz-sdk example so it links the SDK without a new crate. Its unit
+# tests run here, inside the image build, before the binary is produced.
+COPY opc/opc-nip-oa-sign.rs crates/buzz-sdk/examples/opc_nip_oa_sign.rs
+RUN cargo test --release --locked -p buzz-sdk --example opc_nip_oa_sign \
+    && cargo build --release --locked -p buzz-sdk --example opc_nip_oa_sign
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay \
@@ -71,7 +77,8 @@ RUN strip target/release/buzz-relay \
     && strip target/release/buzz-admin \
     && strip target/release/buzz-pair-relay \
     && strip target/release/buzz-acp \
-    && strip target/release/buzz
+    && strip target/release/buzz \
+    && strip target/release/examples/opc_nip_oa_sign
 
 # ─── Stage 4: web bundle (pnpm + vite) ──────────────────────────────────────
 FROM node:${NODE_VERSION}-${DEBIAN_VERSION}-slim AS web-builder
@@ -139,6 +146,8 @@ COPY --from=stripped-binaries /build/target/release/buzz-admin /usr/local/bin/bu
 COPY --from=stripped-binaries /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
 COPY --from=stripped-binaries /build/target/release/buzz-acp /usr/local/bin/buzz-acp
 COPY --from=stripped-binaries /build/target/release/buzz /usr/local/bin/buzz
+# NIP-OA owner attestation signer (network-isolated; secret only ever on stdin).
+COPY --from=stripped-binaries /build/target/release/examples/opc_nip_oa_sign /usr/local/bin/opc-nip-oa-sign
 # OPC tooling: nix seed helpers + entrypoints.
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
 COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
