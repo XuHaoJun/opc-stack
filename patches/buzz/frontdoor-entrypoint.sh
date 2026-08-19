@@ -112,11 +112,11 @@ if [ ! -f "$HH/.omp/agent/config.yml" ]; then
     mkdir -p "$HH/.omp/agent"
     cat > "$HH/.omp/agent/config.yml" <<YAML
 modelRoles:
-  default: opencode-go/${OPENCODE_GO_MODEL:-deepseek-v4-flash}
+  default: opencode-go/${OPENAI_MODEL:-deepseek-v4-flash}
 startup:
   quiet: true
 YAML
-    echo "[frontdoor] seeded $HH/.omp/agent/config.yml (omp model=${OPENCODE_GO_MODEL:-deepseek-v4-flash})"
+    echo "[frontdoor] seeded $HH/.omp/agent/config.yml (omp model=${OPENAI_MODEL:-deepseek-v4-flash})"
 fi
 
 # Runtime-uid key copy for the buzz wrapper: /keys is mounted read-only, so
@@ -185,17 +185,17 @@ memory:
   provider: memory_tencentdb
 model:
   provider: custom
-  base_url: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
-  default: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}
+  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
+  default: ${OPENAI_MODEL:-deepseek-v4-flash}
 YAML
-    echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENCODE_GO_MODEL:-deepseek-v4-flash})"
+    echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENAI_MODEL:-deepseek-v4-flash})"
 fi
 
 # Refresh seeded model lines on existing volumes that still carry the legacy
 # hardcoded default (config.yaml is dashboard-editable afterwards; only the
 # exact legacy values are rewritten, not user edits).
 if [ -f "$HH/config.yaml" ]; then
-    sed -i "s|^  default: deepseek-v4-pro$|  default: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}|; s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}|" "$HH/config.yaml"
+    sed -i "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4-flash}|; s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}|" "$HH/config.yaml"
     # Pre-s12 configs (no _config_version) trip hermes's "predates version
     # 12" migration refusal on every boot; stamp the current version once.
     if ! grep -q "^_config_version:" "$HH/config.yaml"; then
@@ -227,8 +227,8 @@ print("[frontdoor] restored the conversational system_prompt")
 PYEOF
 fi
 
-: "${OPENAI_API_KEY:=$OPENCODE_API_KEY}"
-: "${OPENAI_BASE_URL:=${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}"
+: "${OPENAI_API_KEY:=}"
+: "${OPENAI_BASE_URL:=https://opencode.ai/zen/go/v1}"
 export OPENAI_API_KEY OPENAI_BASE_URL
 
 # Self-healing agent registration (profile + channel membership) — runs
