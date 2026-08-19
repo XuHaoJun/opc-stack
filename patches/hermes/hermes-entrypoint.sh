@@ -117,6 +117,7 @@ memory:
   provider: memory_tencentdb
 model:
   provider: custom
+  api_key: \${OPENAI_API_KEY}
   base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
   default: ${OPENAI_MODEL:-deepseek-v4-flash}
 YAML
@@ -128,6 +129,34 @@ fi
 # exact legacy values are rewritten, not user edits).
 if [ -f "$HH/config.yaml" ]; then
     sed -i "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4-flash}|; s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}|" "$HH/config.yaml"
+    # Existing editable configs may predate the explicit custom-provider key
+    # route. Insert only when the model block has no api_key; operator-set
+    # credentials are left untouched.
+    python3 - "$HH/config.yaml" <<'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    lines = handle.readlines()
+start = next((i for i, line in enumerate(lines) if re.match(r"^model:\s*$", line)), None)
+if start is None:
+    raise SystemExit(0)
+end = next(
+    (i for i in range(start + 1, len(lines)) if lines[i].strip() and not lines[i].startswith((" ", "\t"))),
+    len(lines),
+)
+block = lines[start:end]
+if any(re.match(r"^  api_key\s*:", line) for line in block):
+    raise SystemExit(0)
+if not any(re.match(r"^  provider:\s*custom\s*$", line.rstrip("\n")) for line in block):
+    raise SystemExit(0)
+provider = next(i for i in range(start + 1, end) if re.match(r"^  provider:\s*custom\s*$", lines[i].rstrip("\n")))
+lines.insert(provider + 1, "  api_key: ${OPENAI_API_KEY}\n")
+with open(path, "w", encoding="utf-8") as handle:
+    handle.writelines(lines)
+print("[hermes] added model.api_key env reference to existing config")
+PYEOF
     # Pre-s12 configs (no _config_version) trip hermes's "predates version
     # 12" migration refusal on every boot; stamp the current version once.
     if ! grep -q "^_config_version:" "$HH/config.yaml"; then

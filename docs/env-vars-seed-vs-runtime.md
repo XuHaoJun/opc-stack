@@ -16,7 +16,7 @@
 
 | Env | 生效方式 |
 |---|---|
-| `OPENAI_API_KEY` | runtime。frontdoor/hermes/dashboard 每次 boot export，Hermes provider custom 讀 env; buzz/paperclip/tencentdb-core/hub 也直接讀 |
+| `OPENAI_API_KEY` | runtime。frontdoor/hermes/dashboard/Paperclip 每次 boot/runtime 讀取；TencentDB 由下方的 adapter mapping 接收。Buzz relay 本身不消費 LLM key；需要模型的是獨立的 frontdoor ACP。 |
 | `ANTHROPIC/GOOGLE/OPENROUTER/GROQ/DEEPSEEK/XAI_API_KEY` | runtime,compose 每次傳給 frontdoor/hermes/dashboard/paperclip |
 | `OPENAI_BASE_URL` | runtime。Hermes custom provider runtime 讀取；第一次 boot 也用來 seed gateway/frontdoor 的 `config.yaml`，既有 editable config 改 env 後可能仍需手動調整 |
 | `OPENAI_MODEL` | runtime。shared gateway/dashboard/Paperclip/TencentDB defaults 讀取；Hermes gateway 第一次 boot 用來 seed `config.yaml`，既有 editable config 的模型以該檔為 source of truth |
@@ -30,6 +30,23 @@
 | `TENCENTDB_GATEWAY_API_KEY` | runtime(core Bearer、hub `REMOTE_INSTANCE_KEY`、hermes/frontdoor memory plugin 每次 boot 讀 env);對 proxy 的影響除外,見 seed 表 |
 | `TENCENTDB_KNOWLEDGE_PUBLIC_URL`、`TENCENTDB_LLM_API_KEY/BASE_URL/MODEL` | runtime(core/hub 每次啟動讀 env) |
 | `IMAGE_PREFIX` | build-time:改 image tag,需 `up -d --build` 重建 image,非單純 recreate |
+### TencentDB Compose adapter mapping / precedence
+
+Compose maps the canonical `OPENAI_*` values into each TencentDB adapter; the
+fallback order is not identical across services. The `:-` nesting below is
+the actual precedence (left-hand value is selected when non-empty):
+
+| Service | Adapter variables | Compose precedence |
+|---|---|---|
+| `tencentdb-core` | `TDAI_LLM_API_KEY`, `TDAI_LLM_BASE_URL`, `TDAI_LLM_MODEL` | API key: `OPENAI_API_KEY` first, then `TENCENTDB_LLM_API_KEY`; base URL/model: `TENCENTDB_LLM_BASE_URL`/`TENCENTDB_LLM_MODEL` first, then `OPENAI_BASE_URL`/`OPENAI_MODEL`, then defaults |
+| `tencentdb-hub` | `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | API key: `OPENAI_API_KEY` first, then `TENCENTDB_LLM_API_KEY`; base URL/model: `TENCENTDB_LLM_BASE_URL`/`TENCENTDB_LLM_MODEL` first, then `OPENAI_BASE_URL`/`OPENAI_MODEL`, then defaults |
+| `tencentdb-proxy` | `PROXY_UPSTREAM_URL`, `PROXY_UPSTREAM_API_KEY` | service-specific `PROXY_UPSTREAM_URL`/`PROXY_UPSTREAM_API_KEY` first, then `OPENAI_BASE_URL`/`OPENAI_API_KEY`, then the endpoint default for URL |
+
+Therefore `TENCENTDB_LLM_*` is a service-specific override for base/model, but
+for the core/hub API key Compose intentionally checks `OPENAI_API_KEY` first
+and uses `TENCENTDB_LLM_API_KEY` only as fallback. The Buzz relay itself does
+not consume the LLM key; its separate frontdoor ACP uses the canonical
+provider settings.
 
 ## Seed — 第一次 boot 燒進 volume/DB,事後改要清 volume 或手動修
 
