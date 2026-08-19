@@ -74,9 +74,10 @@ fi
 if [ "$n" -gt 1 ]; then
   die "ambiguous selector '$selector' matches $n accounts: $(printf '%s\n' "$rows" | tr '\n' ';')"
 fi
+# psql -A -t rows are pipe-separated (e.g. "5cb0…|noah|human").
 row="$(printf '%s\n' "$rows" | sed '/^[[:space:]]*$/d' | head -n 1)"
-owner_pubkey="$(printf '%s\n' "$row" | cut -f1)"
-klass="$(printf '%s\n' "$row" | cut -f3)"
+owner_pubkey="$(printf '%s\n' "$row" | cut -d'|' -f1)"
+klass="$(printf '%s\n' "$row" | cut -d'|' -f3)"
 is_hex64 "$owner_pubkey" || die "resolved pubkey is not 64-hex: $owner_pubkey"
 [ "$klass" = human ] || die "selected account '$selector' is $klass, not a human; refusing to bind an agent as owner"
 echo "resolved: $selector -> $owner_pubkey"

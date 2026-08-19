@@ -95,11 +95,12 @@ case "$*" in
         sql="$(cat)"
         case "$sql" in
             *"agent_owner_pubkey IS NULL"*)
+                # psql -A -t rows are pipe-separated ("<pubkey>|<name>|human")
                 case "${FAKE_DOCKER_CASE:-happy}" in
                     zero) : ;;
-                    two) printf '%s\tNoah\thuman\n%s\tEve\thuman\n' "$FAKE_OWNER" "$FAKE_OTHER" ;;
-                    agent) printf '%s\tNoah\tagent\n' "$FAKE_OWNER" ;;
-                    *) printf '%s\tNoah\thuman\n' "$FAKE_OWNER" ;;
+                    two) printf '%s|Noah|human\n%s|Eve|human\n' "$FAKE_OWNER" "$FAKE_OTHER" ;;
+                    agent) printf '%s|Noah|agent\n' "$FAKE_OWNER" ;;
+                    *) printf '%s|Noah|human\n' "$FAKE_OWNER" ;;
                 esac ;;
             *"kind = 10100"*) printf '[%s]\n' "$FAKE_TAG" ;;
             *"kind = 0"*)     printf '[%s]\n' "$FAKE_TAG" ;;
