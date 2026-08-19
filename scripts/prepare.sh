@@ -9,6 +9,12 @@
 # clean submodule checkouts — never edit them directly; upgrade = checkout a
 # new tag (see scripts/upgrade.sh), then this re-applies.
 set -euo pipefail
+# Ignore SIGPIPE. `scripts/prepare.sh | head` or `| grep -q` closes stdout
+# early, which under `set -e` kills the script PART WAY THROUGH THE SYNC — and
+# the output printed so far looks like a normal, successful run. A half-synced
+# tree then builds an image missing exactly the change you just made. (Cost:
+# one confused debugging session over a skill that would not update.)
+trap '' PIPE
 cd "$(dirname "$0")/.."
 
 apply_patch() {

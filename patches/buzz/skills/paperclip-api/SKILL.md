@@ -17,6 +17,12 @@ Base: `$PAPERCLIP_API_URL` (in this stack: `http://paperclip:3100`), auth
 header `Authorization: Bearer $PAPERCLIP_API_KEY` (both env vars are already
 set in this container).
 
+Every ticket you mention to a user must carry its link:
+`$PAPERCLIP_PUBLIC_URL/issues/<identifier>` (e.g. `.../issues/OPC-7`). The
+identifier alone makes them go hunting for a board they cannot click to.
+`PAPERCLIP_PUBLIC_URL` is the browser-reachable address; `PAPERCLIP_API_URL` is
+an internal container name and is useless in a chat message.
+
 | Action | Command |
 |---|---|
 | Find your company id | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies"` → `[0].id` (board key; agent keys: `/api/agents/me` → `.companyId`) |
@@ -131,6 +137,15 @@ and let the agent add it when the need is real.
 - **No `gh repo create`, no GitHub push.** A prototype's git repo is local and
   that is deliberate. Ask instead for: the preview URL posted back as a comment
   and the issue set to `done`.
+- **Say it explicitly: set the issue to `done` in the SAME run that finishes
+  the work.** Not as tidiness — Paperclip classifies a run that ends with the
+  issue still open by pattern-matching the agent's own prose for blocker
+  language ("need … access/credentials/login/account/input"). A prototype about
+  accounts trips that on ordinary vocabulary, is classified as blocked, and
+  gets woken for a whole second run that re-reads everything to finish up.
+  Measured on two tickets here: it roughly doubled wall-clock (16min + 15min,
+  and 17min + 21min). Setting `done` is checked first and short-circuits the
+  whole heuristic.
 - Always put `Prototype: <name>` on its own line at the top of the
   `description` — it is how the agent knows which prototype to create or
   resume, and it survives even if `projectId` was omitted.
@@ -148,13 +163,19 @@ and let the agent add it when the need is real.
    - `description`: requirements + acceptance criteria, verbatim including:
      - `完成後: gh repo create <name> --private --source . --remote origin --push, 把 repo URL 貼回本 ticket comment, 然後將 issue status 改為 done`
      - repo visibility, tech stack, and any user preferences.
-4. **Add a channel marker comment** immediately (Buzz only — skip this and
-   the watcher step on surfaces that are not Buzz):
-   `{"body":"BUZZ_CHANNEL: <channel-uuid>"}` — the uuid of the Buzz channel
-   the user asked in (look at the conversation context / nostr channel).
-5. **Spawn the watcher** (background, Buzz only): `/usr/local/bin/opc-issue-watcher.sh <issueId> <channel-uuid> &`
-6. **Reply to the user** in whatever surface they asked from:
-   「已建立 ticket #<id> (lane: <lane>), 開發中, 完成後我會貼 GitHub link。」
+4. **Add the marker comments** immediately (Buzz only — skip these and the
+   watcher step on surfaces that are not Buzz). Two of them, one call each:
+   - `{"body":"BUZZ_CHANNEL: <channel-uuid>"}` — the Buzz channel the user
+     asked in.
+   - `{"body":"BUZZ_EVENT: <event-id>"}` — the id of the message that asked
+     for this (the same EVENT_ID you reply to). The watcher posts the result
+     as a reply to it, so the answer lands in the thread that asked rather
+     than starting a new one. Omit it and the user gets a detached notice with
+     nothing tying it to their request.
+5. **Spawn the watcher** (background, Buzz only): `/usr/local/bin/opc-issue-watcher.sh <issueId> <channel-uuid> <event-id> &`
+6. **Reply to the user** in whatever surface they asked from, WITH the link:
+   「已建立 ticket <identifier> (lane: <lane>): $PAPERCLIP_PUBLIC_URL/issues/<identifier>
+   開發中, 完成後我會貼結果。」
 
 ## Workflow: "progress? / 好了嗎?" query
 
@@ -182,8 +203,8 @@ no Buzz-side assignment. Create a ticket exactly like "develop <X>":
      branch/PR (not create a new repo), push the fix back to that PR, paste
      the PR link into the ticket comment, then set status `done`.
 3. Assign to the `engineering` lane's agent (`assigneeAgentId`); on Buzz also
-   add the `BUZZ_CHANNEL:` marker comment and spawn the watcher; reply to the
-   user.
+   add the `BUZZ_CHANNEL:` and `BUZZ_EVENT:` marker comments and spawn the
+   watcher; reply to the user with the ticket link.
 
 ## Notes
 

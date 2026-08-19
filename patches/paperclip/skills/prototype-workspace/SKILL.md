@@ -160,6 +160,23 @@ comment that you are about to push and where.
 A prototype's git repo is local by design. Commit your work there — the history
 is what makes it publishable later.
 
+## Finish the ticket in ONE run
+
+When the work is done, in the same run: post the preview URL as a comment
+**and** set the issue to `done` (`PATCH /api/issues/<id>` with
+`{"status":"done"}`).
+
+This is not bookkeeping. A run that ends with the issue still open is
+classified by pattern-matching your own prose for blocker language — "need …
+access", "requires … login", "waiting on … input". Describing work on anything
+involving accounts trips it on ordinary vocabulary, and the run is recorded as
+blocked, which wakes a second full run to re-read the codebase and finish what
+you already finished. On this stack that has doubled ticket time twice.
+
+Setting `done` is checked before that heuristic runs, so it short-circuits it
+entirely. If you genuinely are blocked, say so plainly and leave it open —
+that is what the classification is for.
+
 ## Never
 
 - **Never delete a prototype**, or any part of one — not the directory, not the

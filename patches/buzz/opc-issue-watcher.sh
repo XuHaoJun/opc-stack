@@ -42,15 +42,25 @@ LOG="${WATCHER_LOG:-${STATE_DIR}/watcher.log}"
 log() { echo "[$(date -u +%FT%TZ)][watcher] $*" >> "$LOG" 2>/dev/null || echo "[watcher] $*" >&2; }
 
 # post <content> — send to the buzz channel with the frontdoor agent identity
+# Reply INTO the conversation that asked for the work, not beside it.
+#
+# Without --reply-to every completion notice opens a fresh thread, so the user
+# gets an answer detached from their question — and with several tickets in
+# flight there is nothing tying the two together. ANCHOR is the event id of the
+# message that triggered the ticket, recorded as a BUZZ_EVENT marker comment
+# when the ticket was created. Falls back to an unanchored post: a notice in
+# the wrong shape still beats no notice.
 post() {
     if [ -n "${BUZZ_PRIVATE_KEY:-}" ] && [ -n "${BUZZ_RELAY_URL:-}" ]; then
-        if buzz messages send --channel "$CHANNEL" --content "$1" >/dev/null 2>&1; then
-            log "posted to $CHANNEL: $1"
+        set -- --channel "$CHANNEL" --content "$1"
+        [ -n "${ANCHOR:-}" ] && set -- "$@" --reply-to "$ANCHOR"
+        if buzz messages send "$@" >/dev/null 2>&1; then
+            log "posted to $CHANNEL${ANCHOR:+ (reply to $ANCHOR)}"
         else
-            log "buzz post FAILED to $CHANNEL: $1"
+            log "buzz post FAILED to $CHANNEL"
         fi
     else
-        log "no buzz identity (BUZZ_PRIVATE_KEY/RELAY_URL unset); would post: $1"
+        log "no buzz identity (BUZZ_PRIVATE_KEY/RELAY_URL unset); would post"
     fi
 }
 
@@ -105,6 +115,12 @@ find_github_url() {
         head -1
 }
 
+# find_anchor <issue-id> — BUZZ_EVENT marker: the message that asked for this.
+find_anchor() {
+    api_get "/issues/$1/comments" | jq -r '.. | strings? | select(test("BUZZ_EVENT:"))' 2>/dev/null \
+        | sed -n 's/.*BUZZ_EVENT:[[:space:]]*\([0-9a-fA-F]\{16,64\}\).*/\1/p' | head -1
+}
+
 # find_channel <issue-id> — BUZZ_CHANNEL marker from comments
 find_channel() {
     api_get "/issues/$1/comments" | jq -r '.. | strings? | select(test("BUZZ_CHANNEL:"))' 2>/dev/null | sed -n 's/.*BUZZ_CHANNEL:[[:space:]]*\([0-9a-fA-F-]\{1,64\}\).*/\1/p' | head -1
@@ -154,6 +170,11 @@ poll_once() {
 watch() {
     local ISSUE_ID="$1" start now
     CHANNEL="$2"
+    # Resolved once, from the marker, rather than passed in: the sweep
+    # re-attaches watchers after a restart and would otherwise lose the anchor,
+    # silently reverting to new-thread posts for exactly the tickets that
+    # outlived a deploy.
+    ANCHOR="${3:-$(find_anchor "$ISSUE_ID")}"
     mkdir -p "$STATE_DIR"
     start="$(date +%s)"
     while :; do
@@ -201,7 +222,7 @@ sweep() {
             rm -f "$STATE_DIR/$id.pid"
         fi
         log "sweep: re-attaching watcher for $id → $channel"
-        nohup "$0" "$id" "$channel" >> "$LOG" 2>&1 &
+        nohup "$0" "$id" "$channel" "$(find_anchor "$id")" >> "$LOG" 2>&1 &
     done
     log "sweep: done"
 }

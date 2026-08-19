@@ -315,6 +315,9 @@ services:
       # the board API key is injected by the entrypoint from
       # /keys/paperclip-api.key (paperclip-bootstrap writes it); no .env var.
       PAPERCLIP_API_URL: http://paperclip:3100
+      # Public board address, for building clickable ticket links in chat.
+      # PAPERCLIP_API_URL is the internal name and is useless to a browser.
+      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
     volumes:
       - frontdoor-hermes:/opt/data
       - frontdoor-nix:/nix
@@ -380,6 +383,9 @@ services:
       # Paperclip work-plane integration (GitHub dev flow): REST base only —
       # board API key comes from /keys/paperclip-api.key via the entrypoint.
       PAPERCLIP_API_URL: http://paperclip:3100
+      # Public board address, for building clickable ticket links in chat.
+      # PAPERCLIP_API_URL is the internal name and is useless to a browser.
+      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
     ports:
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:
@@ -437,6 +443,9 @@ services:
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
       PAPERCLIP_API_URL: http://paperclip:3100
+      # Public board address, for building clickable ticket links in chat.
+      # PAPERCLIP_API_URL is the internal name and is useless to a browser.
+      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
     ports:
       - "${HERMES_DASHBOARD_PORT:-9119}:9119"
     volumes:
@@ -580,6 +589,9 @@ services:
     entrypoint: ["/usr/local/bin/opc-paperclip-bootstrap.sh"]
     environment:
       PAPERCLIP_API_URL: http://paperclip:3100
+      # Public board address, for building clickable ticket links in chat.
+      # PAPERCLIP_API_URL is the internal name and is useless to a browser.
+      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
       PAPERCLIP_ADMIN_EMAIL: ${PAPERCLIP_ADMIN_EMAIL:-admin@opc.local}
       PAPERCLIP_ADMIN_PASSWORD: ${PAPERCLIP_ADMIN_PASSWORD:?set in .env}
       PAPERCLIP_ADMIN_NAME: ${PAPERCLIP_ADMIN_NAME:-Admin}
