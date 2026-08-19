@@ -10,7 +10,7 @@ Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-
 - **prototype lane** (`prototype` CLI, paperclip image): 一個 prototype = 一個 Paperclip project + `/prototypes/<name>` (自己的 git) + 一個 devenv 租約 + 一個掛在 **project workspace** 上的 runtime service。服務掛 project 層而非 execution workspace,所以沒有 issue 在跑時宣告仍在,**preview URL 跨 session 不變**。`prototype create` 冪等,同時是「建立」與「用名字接續」的路徑。設計見 `docs/superpowers/specs/2026-08-18-devenv-http-preview-design.md`。
 - **devenv** (`docker-compose.yml` 的 `devenv-pg` / `devenv-valkey`): paperclip agent 的開發資源租約。agent 跑 `devenv provision <key>` 拿到獨立的 postgres DB (pgvector) + valkey ACL user, 寫進 workspace `.env` 的 `DATABASE_URL`/`VALKEY_URL`。刻意不給 agent docker (不變量 6); 設計見 `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md`。
 - 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
-- LLM: OpenCode Go (`https://opencode.ai/zen/go/v1`)。`.env` 填 `OPENAI_API_KEY` 一個 key 全棧通用;Hermes custom provider runtime 讀 `OPENAI_API_KEY` + `OPENAI_BASE_URL`,model selection 以 `config.yaml` 為 source of truth（`OPENAI_MODEL` 用於 seed/local override）。
+- LLM: OpenCode Go (`https://opencode.ai/zen/go/v1`)。`.env` 填 `OPENAI_API_KEY` 一個 key 全棧通用;Hermes custom provider runtime 讀 `OPENAI_API_KEY` + `OPENAI_BASE_URL`。shared gateway/dashboard/Paperclip/TencentDB 的 model 用 `OPENAI_MODEL`（預設 deepseek-v4-flash）,frontdoor relay 用 `BUZZ_AGENT_MODEL`（預設 deepseek-v4-pro）;模型選擇以 `config.yaml` 為 source of truth。
 
 ## 運作模型 (為什麼派工長這樣)
 

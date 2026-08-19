@@ -86,25 +86,29 @@ The raw engine, for scripted/CI use:
 
 ## LLM provider: OpenCode Go (default)
 
-The stack ships pre-configured for **OpenCode Go** (`https://opencode.ai/zen/go/v1`,
-default model `deepseek-v4-flash`). Set `OPENAI_API_KEY` in `.env`; optionally
-set `OPENAI_BASE_URL` and `OPENAI_MODEL` as local stack overrides. For Hermes,
-the custom provider runtime reads its key/base URL from `OPENAI_API_KEY` /
-`OPENAI_BASE_URL`, while model selection is persisted in editable `config.yaml`
-and that file is the model source of truth:
+The stack ships pre-configured for **OpenCode Go** (`https://opencode.ai/zen/go/v1`).
+The shared gateway/dashboard/Paperclip/TencentDB default model is
+`deepseek-v4-flash`; the frontdoor relay's default is `deepseek-v4-pro`. Set
+`OPENAI_API_KEY` in `.env`; set `OPENAI_BASE_URL` for the OpenAI-compatible
+endpoint, `OPENAI_MODEL` for the shared services, and `BUZZ_AGENT_MODEL` for
+the frontdoor relay. For Hermes, the custom provider runtime reads its key/base
+URL from `OPENAI_API_KEY` / `OPENAI_BASE_URL`, while model selection is
+persisted in editable `config.yaml` and that file is the model source of truth:
 
 | Project | Where the model/key is configured | UI-editable? |
 |---|---|---|
-| Hermes (gateway + front door) | `config.yaml` seeded to `provider: custom`, `base_url: https://opencode.ai/zen/go/v1`, `default: deepseek-v4-flash`; custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — dashboard http://localhost:9119 → config/model pages** |
-| Paperclip | Agents use the Hermes Gateway adapter → model lives in Hermes | Agent adapter fields in the Paperclip UI |
-| TencentDB memory | `TDAI_LLM_*` / `LLM_*` / proxy upstream — all default to OpenCode Go | Panel has ApiKeys + knowledge LLM-binding pages; core extraction follows env |
+| Hermes gateway | `config.yaml` seeded to `provider: custom`, `base_url: https://opencode.ai/zen/go/v1`, `default: deepseek-v4-flash`; custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — dashboard http://localhost:9119 → config/model pages** |
+| Frontdoor relay (Buzz ACP) | `config.yaml` model seeded from `BUZZ_AGENT_MODEL` (`deepseek-v4-pro` by default); custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — shared Hermes dashboard config/model pages** |
+| Paperclip | Agents use the Hermes Gateway adapter → shared model default comes from `OPENAI_MODEL` | Agent adapter fields in the Paperclip UI |
+| TencentDB memory | `TDAI_LLM_*` / `LLM_*` / proxy upstream — shared defaults come from `OPENAI_MODEL` and `OPENAI_BASE_URL` | Panel has ApiKeys + knowledge LLM-binding pages; core extraction follows env |
 | Buzz | None needed | — |
 
-`OPENAI_MODEL` seeds a new Hermes config, but an existing editable `config.yaml`
-may need manual adjustment. If you prefer another provider, set
-`OPENAI_BASE_URL` and (for a fresh config) `OPENAI_MODEL` in `.env`, or change
-the provider/model in the Hermes dashboard. Any OpenAI-compatible endpoint works
-for every project above.
+`OPENAI_MODEL` seeds the shared Hermes gateway config; `BUZZ_AGENT_MODEL` seeds
+the frontdoor config. Existing editable configs may need manual adjustment.
+If you prefer another provider, set `OPENAI_BASE_URL` and the relevant model
+variable in `.env` (`OPENAI_MODEL` for shared services, `BUZZ_AGENT_MODEL` for
+the frontdoor), or change the provider/model in the Hermes dashboard. Any
+OpenAI-compatible endpoint works for every project above.
 
 | Project | Repo | Tag |
 |---|---|---|

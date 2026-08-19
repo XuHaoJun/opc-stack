@@ -101,9 +101,11 @@ memorized — this table is the starting hint list.
   (`apiBaseUrl: http://hermes:8642`); hermes upgrades must keep the API
   server contract (`/v1`, OpenAI-compatible) or paperclip agents break.
 - LLM key is shared through the single canonical `OPENAI_API_KEY` contract. Hermes
-  custom-provider runtime also consumes `OPENAI_BASE_URL`; model selection is
-  persisted in editable `config.yaml`. None of the four upgrades should require
-  .env changes unless a new version needs new env vars (config-drift check).
+  custom-provider runtime also consumes `OPENAI_BASE_URL`; shared
+  gateway/dashboard/Paperclip/TencentDB models use `OPENAI_MODEL`, while the
+  frontdoor relay model uses `BUZZ_AGENT_MODEL`. Model selection is persisted in
+  editable `config.yaml`. None of the four upgrades should require .env changes
+  unless a new version needs new env vars (config-drift check).
 
 ## 6. Post-upgrade verification (per component)
 
