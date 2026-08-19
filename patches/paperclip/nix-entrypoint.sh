@@ -17,12 +17,34 @@ opc_gh_seed
 . /usr/local/bin/opc-claude-seed.sh
 opc_claude_seed
 
-# Prototype working trees. Paperclip does not create a local_path workspace's
-# cwd, and the volume arrives root-owned, so make the root writable by the
-# runtime user before anything tries to use it.
-if [ -d /prototypes ]; then
-    chown node:node /prototypes 2>/dev/null || true
-fi
+# Assert that everything the runtime user must write is owned by the runtime
+# user — whoever created it.
+#
+# A container has two entry paths with different identities: this entrypoint
+# (root, then gosu node) and `docker compose exec` (always root). Both touch
+# the same trees, and whoever creates a path first owns it. Nothing in Docker
+# reconciles that, so the invariant has to be asserted somewhere.
+#
+# It is worth asserting because none of the symptoms look like permissions:
+# git reports "dubious ownership" and then silently commits nothing; Next fails
+# with EACCES on .next/dev surfacing only as a 500 from the runtime-service API;
+# pnpm reports "attempt to write a readonly database" from its store index.
+# Each one cost a debugging session to trace back to a uid.
+#
+# First-mismatch probe then repair, the same shape upstream's docker-entrypoint
+# uses for /paperclip: a correct tree costs one metadata walk that stops at the
+# first hit, and only a wrong one pays for chown -R.
+opc_own_runtime_trees() {
+    for _t in /prototypes "${HOME:-/paperclip}/.cache" "${HOME:-/paperclip}/.local"; do
+        [ -d "$_t" ] || continue
+        if [ -n "$(find "$_t" \( ! -user node -o ! -group node \) -print -quit 2>/dev/null)" ]; then
+            echo "[own] repairing ownership under $_t"
+            chown -R node:node "$_t" 2>/dev/null || true
+        fi
+    done
+}
+mkdir -p /prototypes
+opc_own_runtime_trees
 
 # devenv control DB + schema (optional lane; never fatal).
 . /usr/local/bin/opc-devenv-seed.sh

@@ -31,13 +31,19 @@ opc_nix_seed() {
     # tools, or the deprecated `nix profile install` replaced the profile),
     # re-add the full seed list once. Unpinned nixpkgs here is the existing
     # behavior (seed image itself is pinned). omp is mise-managed, not nix.
+    # `ps` is in the marker set deliberately: it arrived with a later seed, so
+    # an existing /nix volume is missing it and this heals it on the next boot
+    # rather than requiring `down -v`. Add every NEW tool to this condition or
+    # existing deployments will never receive it.
     if [ ! -e "$PROFILE/bin/rg" ] || [ ! -e "$PROFILE/bin/mise" ] \
-        || [ ! -e "$PROFILE/bin/just" ] || [ ! -e "$PROFILE/bin/gh" ]; then
+        || [ ! -e "$PROFILE/bin/just" ] || [ ! -e "$PROFILE/bin/gh" ] \
+        || [ ! -e "$PROFILE/bin/ps" ] || [ ! -e "$PROFILE/bin/ss" ]; then
         echo "[nix] seed tools missing from profile; re-adding"
         HOME=/root PATH="/nix/var/nix/profiles/default/bin:$PATH" \
             nix profile add \
                 nixpkgs#ripgrep nixpkgs#jq nixpkgs#fd nixpkgs#htop nixpkgs#bat \
-                nixpkgs#just nixpkgs#mise nixpkgs#gh || true
+                nixpkgs#just nixpkgs#mise nixpkgs#gh \
+                nixpkgs#procps nixpkgs#iproute2 nixpkgs#lsof || true
     fi
 
     # omp default model (used when omp runs inside this container).

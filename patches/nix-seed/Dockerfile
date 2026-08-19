@@ -44,6 +44,9 @@ RUN groupadd -r nixbld \
         github:NixOS/nixpkgs/8be7bd0c83f1#just \
         github:NixOS/nixpkgs/8be7bd0c83f1#mise \
         github:NixOS/nixpkgs/8be7bd0c83f1#gh \
+        github:NixOS/nixpkgs/8be7bd0c83f1#procps \
+        github:NixOS/nixpkgs/8be7bd0c83f1#iproute2 \
+        github:NixOS/nixpkgs/8be7bd0c83f1#lsof \
     && cp -al /nix /nix-seed
 
 CMD ["true"]
