@@ -19,6 +19,9 @@ SIG="ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 AUTH_TAG="[\"auth\",\"$OWNER_PUBKEY\",\"\",\"$SIG\"]"
 OLD_TAG="[\"auth\",\"$OWNER_PUBKEY\",\"\",\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"]"
 KEY_SECRET="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+# Mirrors the real frontdoor environment (docker-compose.yml): only the two
+# public vars are passed; BUZZ_OWNER_KEY_FILE must never reach any service.
+COMPOSE_CONFIG_JSON='{"services":{"frontdoor":{"image":"opc/frontdoor:local","environment":{"BUZZ_ACP_AGENT_OWNER":"","BUZZ_AUTH_TAG":""}}}}'
 
 PASS=0; FAIL=0
 pass() { echo "PASS  $1"; PASS=$((PASS+1)); }
@@ -67,7 +70,7 @@ printf 'docker %s\n' "$*" >> "${FAKE_CALL_LOG:?}"
 
 case "$*" in
     *"compose config --format json"*)
-        printf '%s\n' '{"services":{"frontdoor":{"image":"opc/frontdoor:local"}}}'
+        printf '%s\n' "$FAKE_COMPOSE_CONFIG"
         exit 0 ;;
 esac
 
@@ -145,6 +148,7 @@ run_prod() { # run_prod <dir> <case> — runs production script; sets $out $rc
     out="$(PATH="$1:$PATH" OPC_ENV_FILE="$1/.env" FAKE_DOCKER_CASE="$2" \
         FAKE_CALL_LOG="$1/calls" FAKE_OWNER="$OWNER_PUBKEY" \
         FAKE_AGENT="$AGENT_PUBKEY" FAKE_TAG="$AUTH_TAG" FAKE_OTHER="$OTHER_OWNER" \
+        FAKE_COMPOSE_CONFIG="$COMPOSE_CONFIG_JSON" \
         "$PROD" "$SELECTOR" < /dev/null 2>&1)"
     rc=$?
     set -e
@@ -183,6 +187,33 @@ else
 fi
 no_leak "happy" "$out"
 rm -rf "$dir"
+
+# ── compose invariant: BUZZ_OWNER_KEY_FILE must never reach a service ────────
+# Brief Step 5: docker-compose.yml passes only BUZZ_ACP_AGENT_OWNER and
+# BUZZ_AUTH_TAG to frontdoor; BUZZ_OWNER_KEY_FILE is a host-only path. Checked
+# twice so a future change passing the key into ANY service environment fails
+# the suite: (1) the real docker-compose.yml must contain no reference at all,
+# and (2) the compose-config fixture the script consumes (the same shape the
+# real `docker compose config --format json` produces) must satisfy the brief's
+# Step 6 jq expression.
+if grep -q 'BUZZ_OWNER_KEY_FILE' docker-compose.yml; then
+    fail "compose-invariant: BUZZ_OWNER_KEY_FILE appears in docker-compose.yml"
+else
+    pass "compose-invariant: BUZZ_OWNER_KEY_FILE absent from docker-compose.yml (every service)"
+fi
+if grep -qF 'BUZZ_ACP_AGENT_OWNER: ${BUZZ_ACP_AGENT_OWNER:-}' docker-compose.yml \
+   && grep -qF 'BUZZ_AUTH_TAG: ${BUZZ_AUTH_TAG:-}' docker-compose.yml; then
+    pass "compose-invariant: frontdoor passes BUZZ_ACP_AGENT_OWNER and BUZZ_AUTH_TAG"
+else
+    fail "compose-invariant: frontdoor pass-through missing from docker-compose.yml"
+fi
+if printf '%s' "$COMPOSE_CONFIG_JSON" | jq -e \
+    '.services.frontdoor.environment.BUZZ_AUTH_TAG != null and
+     ([.services[].environment.BUZZ_OWNER_KEY_FILE?] | all(. == null))' >/dev/null 2>&1; then
+    pass "compose-invariant: compose-config fixture passes BUZZ_AUTH_TAG, no service env has BUZZ_OWNER_KEY_FILE"
+else
+    fail "compose-invariant: compose-config fixture violates the env invariant"
+fi
 
 # ── failure cases: loud error, instruction, and byte-identical fixture ───────
 expect_fail() { # expect_fail <label> <dir> <sum-before> <msg-needle>
