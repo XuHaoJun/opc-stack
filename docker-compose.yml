@@ -273,6 +273,11 @@ services:
       # desktop must sign in with this key to decrypt. Entrypoint falls back
       # to /keys/relay.pub when unset.
       BUZZ_ACP_AGENT_OWNER: ${BUZZ_ACP_AGENT_OWNER:-}
+      # NIP-OA owner attestation: lets the desktop verify this relay agent is
+      # owned by the current human and ingest its owner-scoped ACP frames.
+      # Contains only a public signature; the owner's private key is never
+      # passed into the stack.
+      BUZZ_AUTH_TAG: ${BUZZ_AUTH_TAG:-}
       # Expose the ACP agent's chain-of-thought: buzz-acp only debug-logs
       # `agent_thought_chunk` updates (target `acp::thought`) and never relays
       # them, so the default `buzz_acp=info` filter hides thinking. The
