@@ -130,6 +130,19 @@ if [ -f "${BUZZ_KEYS_DIR:-/keys}/agent.nsec" ]; then
     echo "[frontdoor] agent key copied to $HH/.agent.nsec for runtime uid"
 fi
 
+# Same problem, same fix, for the board key. The issue watcher runs as the
+# agent uid and needs Paperclip access; when it is spawned by the agent it
+# inherits PAPERCLIP_API_KEY, but a watcher started any other way falls back to
+# /keys/paperclip-api.key — which is 600-root and unreadable, so it silently
+# polls forever logging "paperclip down?".
+if [ -f "${BUZZ_KEYS_DIR:-/keys}/paperclip-api.key" ]; then
+    mkdir -p "$HH"
+    cp "${BUZZ_KEYS_DIR:-/keys}/paperclip-api.key" "$HH/.paperclip-api.key"
+    chown "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/.paperclip-api.key" 2>/dev/null || true
+    chmod 600 "$HH/.paperclip-api.key"
+    echo "[frontdoor] board key copied to $HH/.paperclip-api.key for runtime uid"
+fi
+
 # TencentDB Knowledge Plane (PRD v10.1): sync the memory_tencentdb Hermes
 # MemoryProvider into $HERMES_HOME/plugins/ (user-plugin discovery path) on
 # every boot — image updates propagate into existing volumes.

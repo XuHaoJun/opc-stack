@@ -130,6 +130,8 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - **空 `*-mise` volume 首次開機會下載 node/rust/omp** (數分鐘, 看網路); bootstrap 完成前 `mise ls`/`just`/`omp` 可能失敗 — entrypoint 每 boot 檢查, 重開機即補。
 - **paperclip 既有 nix profile 有舊 omp 17.3.4** 會 shadow mise 的 17.3.5 (fresh nix volume 後消失)。
 - **rust toolchain 在 `$HOME/.cargo` (container layer)**: recreate 後首次 rustc/cargo 觸發 lazy ~300MB 重裝 (RUSTUP_HOME/CARGO_HOME 移 volume 的 fix 因 daemon-user write perm 考量擱置)。
+- **`/keys` 的檔案是 `600 root`, 而 agent 與它的子行程是 uid 10000 —— 讀不到**。entrypoint 因此把兩把鑰匙鏡像進 `$HERMES_HOME`(`.agent.nsec` / `.paperclip-api.key`, 改 owner 為 runtime uid)。任何以 agent 身分跑的東西**都要讀鏡像那份**。症狀不會是「權限不足」: 讀到空字串之後, buzz 變成「no buzz identity」靜靜不送、paperclip 變成無限「GET failed (paperclip down?)」—— **watcher 會怪伺服器,而不是怪自己少了憑證**。而且這個 bug 躲在重啟後面: 由開機 sweep 啟動的 watcher 繼承 entrypoint 的 env 所以正常, 只有**由 agent 啟動**的那些會壞(tool 子行程被刻意剝掉 `BUZZ_PRIVATE_KEY`, GHSA-rhgp-j443)。
+- **投遞失敗不可以標記成已投遞**: watcher 原本無論成敗都 `touch <id>.posted`, 於是 sweep(唯一的重送機制)永遠跳過它。一則通知就這樣永久消失。
 - **`docker exec` 互動 session 不繼承 entrypoint runtime export 的 env** (GH_CONFIG_DIR / GIT_SSH_COMMAND / GIT_CONFIG_GLOBAL): 需手動 `. /usr/local/bin/opc-gh-seed.sh` 補上。mise shims (`/opt/mise/shims`) 已 bake 進 image ENV PATH 尾, 所以 exec 也吃得到 omp/rustc/cargo (volume seed 後)。
 
 ## 檔案地圖

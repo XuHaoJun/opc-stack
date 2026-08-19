@@ -18,11 +18,35 @@ set -eu
 # are missing. Self-heal from known locations (same sources the entrypoints
 # use) so the watcher works no matter who spawns it.
 export PATH="/nix/var/nix/profiles/per-user/root/profile/bin:$PATH"
-if [ -z "${PAPERCLIP_API_KEY:-}" ] && [ -f /keys/paperclip-api.key ]; then
-    export PAPERCLIP_API_KEY="$(cat /keys/paperclip-api.key)"
+# Board key, from a file this process can READ — $HERMES_HOME first for the
+# same reason as the nsec below: /keys is 600-root and this runs as the agent
+# uid. Reading the unreadable one yields an empty key, and the symptom is not
+# "auth failed" but an endless "GET failed (paperclip down?)" — the watcher
+# blaming the server for its own missing credential.
+if [ -z "${PAPERCLIP_API_KEY:-}" ]; then
+    for _pk in "${HERMES_HOME:-/opt/data}/.paperclip-api.key" /keys/paperclip-api.key; do
+        if [ -r "$_pk" ]; then
+            export PAPERCLIP_API_KEY="$(cat "$_pk")"
+            break
+        fi
+    done
 fi
-if [ -z "${BUZZ_PRIVATE_KEY:-}" ] && [ -f "${BUZZ_KEYS_DIR:-/keys}/agent.nsec" ]; then
-    export BUZZ_PRIVATE_KEY="$(cat "${BUZZ_KEYS_DIR:-/keys}/agent.nsec")"
+# Buzz identity, from a file this process can actually READ.
+#
+# $HERMES_HOME/.agent.nsec first: /keys is a read-only mount owned by root 0600,
+# and this runs as the agent uid (10000). The old code only tried /keys, where
+# `cat` fails silently, leaving the watcher with no identity — it then logged
+# "would post" and moved on. Worse, that only bites when the watcher is spawned
+# by the AGENT (tool subprocesses are stripped of BUZZ_PRIVATE_KEY on purpose,
+# GHSA-rhgp-j443); a watcher started by the boot sweep inherits the entrypoint's
+# env and works, so the bug hid behind every restart.
+if [ -z "${BUZZ_PRIVATE_KEY:-}" ]; then
+    for _nsec in "${HERMES_HOME:-/opt/data}/.agent.nsec" "${BUZZ_KEYS_DIR:-/keys}/agent.nsec"; do
+        if [ -r "$_nsec" ]; then
+            export BUZZ_PRIVATE_KEY="$(cat "$_nsec")"
+            break
+        fi
+    done
 fi
 if [ -z "${BUZZ_RELAY_URL:-}" ]; then
     if [ -f /opt/data/buzz-relay-url ]; then
@@ -56,12 +80,13 @@ post() {
         [ -n "${ANCHOR:-}" ] && set -- "$@" --reply-to "$ANCHOR"
         if buzz messages send "$@" >/dev/null 2>&1; then
             log "posted to $CHANNEL${ANCHOR:+ (reply to $ANCHOR)}"
-        else
-            log "buzz post FAILED to $CHANNEL"
+            return 0
         fi
-    else
-        log "no buzz identity (BUZZ_PRIVATE_KEY/RELAY_URL unset); would post"
+        log "buzz post FAILED to $CHANNEL"
+        return 1
     fi
+    log "no buzz identity (BUZZ_PRIVATE_KEY/RELAY_URL unset); cannot post"
+    return 1
 }
 
 # api_get <path> — GET with bearer auth; empty string on any failure
@@ -146,22 +171,32 @@ poll_once() {
             url="$(find_service_url "$id")"
             if [ -z "$url" ]; then url="$(find_preview_url "$id")"; fi
             if [ -n "$url" ]; then
-                post "✅ ${title} 完成, demo: ${url}"
+                msg="✅ ${title} 完成, demo: ${url}"
             else
                 url="$(find_github_url "$id")"
                 if [ -n "$url" ]; then
-                    post "✅ ${title} 完成: ${url}"
+                    msg="✅ ${title} 完成: ${url}"
                 else
-                    post "✅ ${title} 完成 (ticket 內沒有連結, 見 paperclip)"
+                    msg="✅ ${title} 完成 (ticket 內沒有連結, 見 paperclip)"
                 fi
             fi
-            touch "$STATE_DIR/$id.posted" 2>/dev/null || true
-            return 0
+            # Mark delivered ONLY on a successful post. Marking regardless is
+            # how the OPC-8 notice was lost for good: the post failed for want
+            # of an identity, the marker said delivered, and the sweep — whose
+            # entire job is re-delivering — skipped it forever after.
+            if post "$msg"; then
+                touch "$STATE_DIR/$id.posted" 2>/dev/null || true
+                return 0
+            fi
+            log "delivery failed for $id — leaving unposted for the sweep to retry"
+            return 1
             ;;
         cancelled|blocked)
-            post "⚠️ ${title} 已終止 (status=${status})"
-            touch "$STATE_DIR/$id.posted" 2>/dev/null || true
-            return 0
+            if post "⚠️ ${title} 已終止 (status=${status})"; then
+                touch "$STATE_DIR/$id.posted" 2>/dev/null || true
+                return 0
+            fi
+            return 1
             ;;
         *) return 1 ;;
     esac
