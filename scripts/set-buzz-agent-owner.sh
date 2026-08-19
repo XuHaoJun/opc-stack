@@ -47,7 +47,9 @@ is_hex64() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$'; }
 # ── 1. Resolve exactly one active human identity ─────────────────────────────
 # The selector is passed through psql --set=selector=... and referenced with
 # :'selector' (psql SQL-literal quoting); raw selector text never touches the
-# SQL string.
+# SQL string. The SQL is fed on stdin, NOT via -c: psql does not interpolate
+# :variables inside -c command strings (the literal ':' would reach the
+# server as a syntax error), while commands read from stdin are substituted.
 IDENTITY_SQL="SELECT encode(pubkey, 'hex'), display_name,
        CASE WHEN agent_owner_pubkey IS NULL THEN 'human' ELSE 'agent' END
 FROM users
@@ -59,8 +61,8 @@ WHERE deactivated_at IS NULL
 ORDER BY encode(pubkey, 'hex');"
 
 set +e
-rows="$(docker compose exec -T buzz-db psql -U buzz -d buzz -A -t \
-  --set=selector="$selector" -c "$IDENTITY_SQL" 2>&1)"
+rows="$(printf '%s' "$IDENTITY_SQL" | docker compose exec -T buzz-db psql -U buzz -d buzz -A -t \
+  --set=selector="$selector" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || die "identity lookup failed (psql exit $rc): $(printf '%s' "$rows" | tail -n 1)"
@@ -204,16 +206,16 @@ ORDER BY created_at DESC, id DESC
 LIMIT 1;"
 
 check_mapping() {
-  value="$(docker compose exec -T buzz-db psql -U buzz -d buzz -A -t \
-    --set=agent="$agent_pubkey" -c "$MAPPING_SQL" 2>/dev/null \
+  value="$(printf '%s' "$MAPPING_SQL" | docker compose exec -T buzz-db psql -U buzz -d buzz -A -t \
+    --set=agent="$agent_pubkey" 2>/dev/null \
     | sed '/^[[:space:]]*$/d' | tail -n 1 | tr -d '[:space:]')"
   [ -n "$value" ] && [ "$value" = "$owner_pubkey" ]
 }
 
 check_kind() { # check_kind <kind> <sql>
   kind="$1"; sql="$2"
-  tags_text="$(docker compose exec -T buzz-db psql -U buzz -d buzz -A -t \
-    --set=agent="$agent_pubkey" -c "$sql" 2>/dev/null \
+  tags_text="$(printf '%s' "$sql" | docker compose exec -T buzz-db psql -U buzz -d buzz -A -t \
+    --set=agent="$agent_pubkey" 2>/dev/null \
     | sed '/^[[:space:]]*$/d' | tail -n 1)"
   [ -n "$tags_text" ] || return 1
   printf '%s' "$tags_text" | jq -e --argjson tag "$tag" 'any(. == $tag)' >/dev/null

@@ -76,12 +76,23 @@ esac
 
 case "$*" in
     *"compose exec -T buzz-db psql"*)
-        sql="${sql:-}"
+        # Real psql does NOT interpolate :variables inside -c command strings
+        # (the literal ':' reaches the server as a syntax error), so the
+        # production script MUST feed SQL via stdin. Guard the bug class: any
+        # -c argument containing ':' is rejected loudly; the SQL itself is
+        # read from stdin (psql variable substitution applies there).
         prev=""
         for a in "$@"; do
-            [ "$prev" = "-c" ] && sql="$a"
+            if [ "$prev" = "-c" ]; then
+                case "$a" in
+                    *:*)
+                        printf 'fake: psql -c with variable reference would fail on real psql: %s\n' "$a" >&2
+                        exit 1 ;;
+                esac
+            fi
             prev="$a"
         done
+        sql="$(cat)"
         case "$sql" in
             *"agent_owner_pubkey IS NULL"*)
                 case "${FAKE_DOCKER_CASE:-happy}" in
@@ -214,6 +225,20 @@ if printf '%s' "$COMPOSE_CONFIG_JSON" | jq -e \
 else
     fail "compose-invariant: compose-config fixture violates the env invariant"
 fi
+
+# ── psql -c guard: real psql does not interpolate :variables in -c strings ──
+# The production script feeds SQL via stdin; if it ever regresses to passing a
+# -c argument containing a variable reference, the fake rejects the invocation
+# and the suite fails (the query would be a syntax error on real psql 17).
+dir="$(mktemp -d)"
+make_fake_docker "$dir"
+if FAKE_CALL_LOG="$dir/calls" "$dir/docker" compose exec -T buzz-db psql -U buzz -d buzz \
+    -A -t --set=selector=noah -c "SELECT :'selector'" < /dev/null >/dev/null 2>&1; then
+    fail "psql-c-guard: fake accepted psql -c containing a : variable reference"
+else
+    pass "psql-c-guard: fake rejects psql -c containing a : variable reference"
+fi
+rm -rf "$dir"
 
 # ── failure cases: loud error, instruction, and byte-identical fixture ───────
 expect_fail() { # expect_fail <label> <dir> <sum-before> <msg-needle>
