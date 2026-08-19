@@ -42,6 +42,14 @@ env_file="${OPC_ENV_FILE:-$repo_dir/.env}"
 [ -f "$env_file" ] || die "env file not found: $env_file"
 env_file="$(realpath "$env_file")"
 
+# Docker Compose interpolates ${VAR} from the operator's shell environment
+# BEFORE the .env file, so an exported BUZZ_AUTH_TAG / BUZZ_ACP_AGENT_OWNER /
+# BUZZ_OWNER_KEY_FILE (e.g. from `set -a; source .env` or a prior session)
+# would silently override the values just written to .env — frontdoor would
+# boot with the OLD owner attestation. Unset all three before any compose
+# invocation; unsetting an unset variable is not an error under set -u.
+unset BUZZ_AUTH_TAG BUZZ_ACP_AGENT_OWNER BUZZ_OWNER_KEY_FILE
+
 is_hex64() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$'; }
 
 # ── 1. Resolve exactly one active human identity ─────────────────────────────
@@ -83,11 +91,19 @@ is_hex64 "$owner_pubkey" || die "resolved pubkey is not 64-hex: $owner_pubkey"
 echo "resolved: $selector -> $owner_pubkey"
 
 # ── 2. Reject ownership rotation before any write ────────────────────────────
-existing_owner="$(grep -E '^BUZZ_ACP_AGENT_OWNER=' "$env_file" | tail -n 1 | cut -d= -f2-)"
-existing_owner="${existing_owner#\"}"; existing_owner="${existing_owner%\"}"
-existing_owner="${existing_owner#\'}"; existing_owner="${existing_owner%\'}"
-if [ -n "$existing_owner" ] && [ "$existing_owner" != "$owner_pubkey" ]; then
-  die "Buzz agent is already owned by $existing_owner; refusing to rotate (run with that owner's account)"
+# A malformed .env may carry duplicate BUZZ_ACP_AGENT_OWNER lines; every
+# non-empty occurrence must match the resolved owner. If ANY occurrence names
+# a different owner the rewrite below would silently delete it — fail loudly
+# instead (no implicit rotation). Quote stripping mirrors the env parser.
+conflicting_owner="$(awk -F= -v owner="$owner_pubkey" '
+  /^BUZZ_ACP_AGENT_OWNER=/ {
+    v = substr($0, index($0, "=") + 1)
+    gsub(/^["\047]|["\047]$/, "", v)
+    if (v != "" && v != owner) { print v; exit }
+  }
+' "$env_file")"
+if [ -n "$conflicting_owner" ]; then
+  die "Buzz agent is already owned by $conflicting_owner; refusing to rotate (run with that owner's account)"
 fi
 
 # ── 3. Resolve and validate the owner key file ───────────────────────────────

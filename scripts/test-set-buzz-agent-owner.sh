@@ -93,6 +93,7 @@ case "$*" in
             prev="$a"
         done
         sql="$(cat)"
+        printf 'sql: %s\n' "$(printf '%s' "$sql" | tr '\n' ' ')" >> "$FAKE_CALL_LOG"
         case "$sql" in
             *"agent_owner_pubkey IS NULL"*)
                 # psql -A -t rows are pipe-separated ("<pubkey>|<name>|human")
@@ -144,6 +145,12 @@ make_fixture() { # make_fixture <dir> <case> — .env fixture + 0600 key file
         if [ "$case" = preowned ]; then
             echo "BUZZ_ACP_AGENT_OWNER=$OTHER_OWNER"
             echo "BUZZ_AUTH_TAG=[\"auth\",\"$OTHER_OWNER\",\"\",\"$SIG\"]"
+        elif [ "$case" = dupconflict ]; then
+            # malformed .env: an earlier line names a different owner, the
+            # last matches the resolved owner — the guard must still fail
+            echo "BUZZ_ACP_AGENT_OWNER=$OTHER_OWNER"
+            echo "BUZZ_ACP_AGENT_OWNER=$OWNER_PUBKEY"
+            echo "BUZZ_AUTH_TAG=$OLD_TAG"
         else
             echo "BUZZ_ACP_AGENT_OWNER=$OWNER_PUBKEY"
             echo "BUZZ_AUTH_TAG=$OLD_TAG"
@@ -186,6 +193,10 @@ assert_count "happy" "$dir/.env" '^BUZZ_AUTH_TAG=' 1
 assert_count "happy" "$dir/.env" '^BUZZ_ACP_AGENT_OWNER=' 1
 assert_count "happy" "$dir/.env" '^BUZZ_OWNER_KEY_FILE=' 1
 assert_called "happy" "$dir/calls" 'compose up -d --no-deps --force-recreate frontdoor'
+assert_called "happy" "$dir/calls" 'compose logs --no-color frontdoor'
+assert_called "happy" "$dir/calls" 'encode(agent_owner_pubkey'
+assert_called "happy" "$dir/calls" 'kind = 0 ORDER'
+assert_called "happy" "$dir/calls" 'kind = 10100 ORDER'
 if grep -qF "DEVENV_HTTP_BIND=100.92.16.32" "$dir/.env" \
    && grep -qF "# trailing comment" "$dir/.env"; then
     pass "happy: unrelated lines and comments preserved"
@@ -276,6 +287,7 @@ fail_case "agent-owner"   agent    "not a human"
 fail_case "key-mode-0644" keymode  "must not grant group/other access"
 fail_case "signer-mismatch" signer "signing failed"
 fail_case "pre-existing-owner" preowned "already owned by"
+fail_case "dup-owner-conflict" dupconflict "$OTHER_OWNER"
 
 # rotation check must fail BEFORE reading the agent pubkey or signing
 dir="$(mktemp -d)"
