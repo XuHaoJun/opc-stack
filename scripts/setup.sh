@@ -12,7 +12,7 @@ if [ ! -f .env ]; then
   cp .env.example .env
   echo "created .env from .env.example"
   echo "⚠  EDIT .env NOW:"
-  echo "    1. OPENCODE_API_KEY  (one key powers the whole stack)"
+  echo "    1. OPENAI_API_KEY  (one key powers the whole stack)"
   echo "    2. BUZZ_RELAY_URL    (set to this machine's LAN IP so desktop/phone"
   echo "                          can reach it; default ws://localhost:3000 works"
   echo "                          for same-machine use)"

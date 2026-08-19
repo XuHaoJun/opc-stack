@@ -13,7 +13,7 @@ Buzz(對話)+ Hermes(agent runtime)+ Paperclip(work 控制面)+ TencentDB-Agent-
 | `paperclip` | canonical work control plane | 3100 |
 | `tencentdb-core` / `-hub` / `-proxy` | memory gateway / panel+knowledge / LLM proxy | 8420 / 8125+8424 / 8096 |
 
-LLM 全棧使用 OpenCode Go(`https://opencode.ai/zen/go/v1`),`.env` 填 `OPENCODE_API_KEY` 一個 key 即可。Hermes 的記憶走官方 `memory_tencentdb` provider,直連 `tencentdb-core`。
+LLM 全棧預設使用 OpenCode Go(`https://opencode.ai/zen/go/v1`),`.env` 填 `OPENAI_API_KEY` 一個 key 即可。本地 stack 可用 `OPENAI_BASE_URL` / `OPENAI_MODEL` override;Hermes custom provider runtime 讀 key/base URL,模型以 `config.yaml` 為 source of truth。Hermes 的記憶走官方 `memory_tencentdb` provider,直連 `tencentdb-core`。
 
 ## 快速開始
 

@@ -16,7 +16,7 @@ touched — upgrading is a tag checkout + rebuild.
 git clone <this-repo-url> opc-stack && cd opc-stack
 git submodule update --init --recursive
 cp .env.example .env
-# edit .env: fill in OPENCODE_API_KEY (OpenCode Go — one key for the stack),
+# edit .env: fill in OPENAI_API_KEY (OpenCode Go — one key for the stack),
 #            set BUZZ_RELAY_URL to this machine's LAN IP for device access
 scripts/setup.sh          # same as: submodule init + prepare + up -d --build
 scripts/test-connectivity.sh
@@ -87,19 +87,24 @@ The raw engine, for scripted/CI use:
 ## LLM provider: OpenCode Go (default)
 
 The stack ships pre-configured for **OpenCode Go** (`https://opencode.ai/zen/go/v1`,
-default model `deepseek-v4-flash`, override via `OPENCODE_GO_MODEL` in `.env`). Set
-`OPENCODE_API_KEY` in `.env` and everything uses it:
+default model `deepseek-v4-flash`). Set `OPENAI_API_KEY` in `.env`; optionally
+set `OPENAI_BASE_URL` and `OPENAI_MODEL` as local stack overrides. For Hermes,
+the custom provider runtime reads its key/base URL from `OPENAI_API_KEY` /
+`OPENAI_BASE_URL`, while model selection is persisted in editable `config.yaml`
+and that file is the model source of truth:
 
 | Project | Where the model/key is configured | UI-editable? |
 |---|---|---|
-| Hermes (gateway + front door) | config.yaml seeded to `provider: custom`, `base_url: opencode.ai/zen/go/v1`, `default: deepseek-v4-flash`; key via `OPENAI_API_KEY` (= your `OPENCODE_API_KEY`) | **Yes — dashboard http://localhost:9119 → config/model pages** |
+| Hermes (gateway + front door) | `config.yaml` seeded to `provider: custom`, `base_url: https://opencode.ai/zen/go/v1`, `default: deepseek-v4-flash`; custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — dashboard http://localhost:9119 → config/model pages** |
 | Paperclip | Agents use the Hermes Gateway adapter → model lives in Hermes | Agent adapter fields in the Paperclip UI |
 | TencentDB memory | `TDAI_LLM_*` / `LLM_*` / proxy upstream — all default to OpenCode Go | Panel has ApiKeys + knowledge LLM-binding pages; core extraction follows env |
 | Buzz | None needed | — |
 
-If you prefer another provider, change it in the Hermes dashboard UI (or
-override `OPENCODE_GO_BASE_URL` / `OPENCODE_GO_MODEL` in `.env` for a fresh
-install). Any OpenAI-compatible endpoint works for every project above.
+`OPENAI_MODEL` seeds a new Hermes config, but an existing editable `config.yaml`
+may need manual adjustment. If you prefer another provider, set
+`OPENAI_BASE_URL` and (for a fresh config) `OPENAI_MODEL` in `.env`, or change
+the provider/model in the Hermes dashboard. Any OpenAI-compatible endpoint works
+for every project above.
 
 | Project | Repo | Tag |
 |---|---|---|
