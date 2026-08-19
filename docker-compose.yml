@@ -173,8 +173,7 @@ services:
       BUZZ_GIT_PROBE_WRITERS: "8"
       BUZZ_GIT_REPO_PATH: /data/git/repos
       RUST_LOG: buzz_relay=info
-      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
-      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "${BUZZ_PORT:-3000}:3000"
     volumes:
@@ -287,9 +286,9 @@ services:
       RUST_LOG: ${FRONTDOOR_RUST_LOG:-buzz_acp=info,acp::thought=debug}
       HERMES_HOME: /opt/data
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
-      OPENAI_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENAI_MODEL: ${BUZZ_AGENT_MODEL:-deepseek-v4-pro}
       # Agent model: deepseek-v4-flash degenerates (garbage output) with
       # hermes's long system prompt on the OpenCode Go endpoint — verified by
       # replaying hermes's exact request. Default deepseek-v4-pro (reliable):
@@ -298,8 +297,6 @@ services:
       # intermittently returns empty streams (hermes EmptyStreamError) and
       # skips the skills index — the paperclip flow fails with it. Override
       # via BUZZ_AGENT_MODEL in .env.
-      OPENCODE_GO_MODEL: ${BUZZ_AGENT_MODEL:-deepseek-v4-pro}
-      OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -367,11 +364,9 @@ services:
       API_SERVER_PORT: "8642"
       API_SERVER_KEY: ${HERMES_API_SERVER_KEY:?set in .env}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
-      OPENAI_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
-      OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}
-      OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4-flash}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -432,11 +427,9 @@ services:
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USERNAME:?set in .env}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:?set in .env}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
-      OPENAI_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
-      OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}
-      OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4-flash}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -507,8 +500,9 @@ services:
       # host's LAN IP if you open the board from other devices.
       PAPERCLIP_ALLOWED_HOSTNAMES: ${PAPERCLIP_ALLOWED_HOSTNAMES:-paperclip}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set in .env}
-      OPENAI_API_KEY: ${OPENCODE_API_KEY:-${OPENAI_API_KEY:-}}
-      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4-flash}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       # devenv: admin credentials for the CLI + boot schema apply. Agents never
@@ -680,9 +674,9 @@ services:
       TDAI_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       TDAI_DATA_DIR: /data/tdai-memory
       TDAI_SKILL_ENABLED: "true"
-      TDAI_LLM_API_KEY: ${OPENCODE_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
-      TDAI_LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}
-      TDAI_LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENCODE_GO_MODEL:-deepseek-v4-flash}}
+      TDAI_LLM_API_KEY: ${OPENAI_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
+      TDAI_LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}}
+      TDAI_LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENAI_MODEL:-deepseek-v4-flash}}
     ports:
       - "${TENCENTDB_CORE_PORT:-8420}:8420"
     volumes:
@@ -746,9 +740,9 @@ services:
       KNOWLEDGE_PUBLIC_BASE_URL: ${TENCENTDB_KNOWLEDGE_PUBLIC_URL:-http://localhost:8424/v3}
       LLM_MODE: custom
       LLM_PROTOCOL: openai
-      LLM_API_KEY: ${OPENCODE_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
-      LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}
-      LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENCODE_GO_MODEL:-deepseek-v4-flash}}
+      LLM_API_KEY: ${OPENAI_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
+      LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}}
+      LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENAI_MODEL:-deepseek-v4-flash}}
     ports:
       - "${TENCENTDB_PANEL_PORT:-8125}:8125"
       - "${TENCENTDB_KNOWLEDGE_PORT:-8424}:8424"
@@ -767,8 +761,8 @@ services:
       tencentdb-hub:
         condition: service_started
     environment:
-      PROXY_UPSTREAM_URL: ${PROXY_UPSTREAM_URL:-${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}}
-      PROXY_UPSTREAM_API_KEY: ${OPENCODE_API_KEY:-${PROXY_UPSTREAM_API_KEY:-}}
+      PROXY_UPSTREAM_URL: ${PROXY_UPSTREAM_URL:-${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}}
+      PROXY_UPSTREAM_API_KEY: ${PROXY_UPSTREAM_API_KEY:-${OPENAI_API_KEY:-}}
       PROXY_TDAI_ENDPOINT: http://tencentdb-core:8420
       PROXY_TDAI_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       PROXY_KNOWLEDGE_ENDPOINT: http://tencentdb-hub:8424
