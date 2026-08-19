@@ -3,11 +3,15 @@
 #
 # After a fresh deploy the relay/community exists but the agent is not yet in
 # any channel (channels are created by the desktop on first join) and has no
-# kind:0 profile, so it shows as a raw hex pubkey. This loop fixes both:
+# kind:0 profile, so it shows as a raw hex pubkey. This loop fixes all three
+# discovery surfaces, each with independent retry state:
 #   (1) publishes the agent's kind:0 profile (name: hermes) — idempotent,
-#   (2) joins the agent to every channel it can see (kind:9000 as relay owner).
+#   (2) publishes the agent's kind:10100 agent-directory profile (policy:
+#       anyone) so the desktop can discover the agent,
+#   (3) joins the agent to every channel it can see (kind:9000 as relay owner).
 # buzz-acp picks up each membership via its subscription and goes online in
 # the channel automatically. Runs alongside buzz-acp in the frontdoor pod.
+# Both events are signed with the ambient BUZZ_AUTH_TAG via the buzz CLI.
 set -eu
 
 BUZZ_KEYS_DIR="${BUZZ_KEYS_DIR:-/keys}"
@@ -36,24 +40,42 @@ if [ "$ready" -ne 1 ]; then
 fi
 log "relay ready: $RELAY_API"
 
-# 2) Profile (kind:0) — read-merge-write republish. Published once; only
-#    retried on failure (republishing every loop tick would spam the relay).
-profile_ok=0
-publish_profile() {
+# 2) Attested discovery surfaces — published once after readiness, then only
+#    the failed one is retried each loop (republishing a success every tick
+#    would spam the relay). BUZZ_AUTH_TAG is ambient in the frontdoor env;
+#    the buzz CLI injects it into both signed events — never built here.
+metadata_ok=0
+directory_ok=0
+
+publish_metadata() {
     if buzz --relay "$RELAY_API" --private-key "$AGENT_NSEC" users set-profile \
         --name hermes --about 'OPC front-door agent (hermes + opencode go)' \
         >/dev/null 2>&1; then
-        profile_ok=1
-        log "profile published"
+        metadata_ok=1
+        log "kind 0 profile published"
     else
-        log "profile publish failed — will retry"
+        log "kind 0 profile publish failed — will retry"
     fi
 }
-publish_profile
+
+publish_directory() {
+    if buzz --relay "$RELAY_API" --private-key "$AGENT_NSEC" \
+        channels set-add-policy --policy anyone >/dev/null 2>&1; then
+        directory_ok=1
+        log "kind 10100 agent directory profile published"
+    else
+        log "kind 10100 agent directory publish failed — will retry"
+    fi
+}
+publish_metadata
+publish_directory
 
 while true; do
-    if [ "$profile_ok" -ne 1 ]; then
-        publish_profile
+    if [ "$metadata_ok" -ne 1 ]; then
+        publish_metadata
+    fi
+    if [ "$directory_ok" -ne 1 ]; then
+        publish_directory
     fi
 
     # 3) Join every visible channel the agent is not already a member of.
