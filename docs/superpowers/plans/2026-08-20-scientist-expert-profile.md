@@ -1391,7 +1391,7 @@ check "the lease actually connects" \
 
 Run: `scripts/test-scientist.sh`
 
-Expected: 3 個新檢查全 FAIL。`result: 32 pass, 3 fail`。
+Expected: 3 個新檢查全 FAIL。`result: 33 pass, 3 fail`。
 
 - [ ] **Step 3: 決定租約怎麼發**
 
@@ -1473,7 +1473,7 @@ docker compose up -d --build
 
 Run: `scripts/test-scientist.sh`
 
-Expected: `result: 35 pass, 0 fail`。
+Expected: `result: 36 pass, 0 fail`。
 
 若「the lease actually connects」失敗且訊息是 `psql: not found`，那是 hermes image 沒有 postgres client —— 用 `docker compose exec hermes nix-add nixpkgs#postgresql` 裝上（這正是科學家自己會做的事），再重跑。
 
@@ -1516,7 +1516,7 @@ hermes gateway 8642 (API server; dashboard 關閉; **專家 agent 的宿主** �
 scripts/test-connectivity.sh && scripts/test-scientist.sh
 ```
 
-Expected: `23 pass, 0 fail` 與 `35 pass, 0 fail`。
+Expected: `23 pass, 0 fail` 與 `36 pass, 0 fail`。
 
 - [ ] **Step 8: Commit**
 
@@ -1734,7 +1734,7 @@ MSG
 ```bash
 scripts/audit-bootstrap.sh     # 17 pass, 0 fail  — 每份狀態都有自動產生者
 scripts/test-connectivity.sh   # 24 pass, 0 fail  — 既有功能沒被弄壞 + 科學家路由活著
-scripts/test-scientist.sh      # 35 pass, 0 fail  — 科學家 lane 從 volume 到 board
+scripts/test-scientist.sh      # 36 pass, 0 fail  — 科學家 lane 從 volume 到 board
 ```
 
 再加上兩個機器驗不出來的人工檢查：
