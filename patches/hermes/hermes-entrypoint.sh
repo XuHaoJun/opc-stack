@@ -172,6 +172,94 @@ fi
 : "${OPENAI_BASE_URL:=https://opencode.ai/zen/go/v1}"
 export OPENAI_API_KEY OPENAI_BASE_URL
 
+# ── Expert agent profiles ──────────────────────────────────────────────
+# Each expert is a named hermes profile under $HERMES_HOME/profiles/, served
+# by this one gateway process (GATEWAY_MULTIPLEX_PROFILES=1). The directory
+# lives on the hermes-profiles volume, which the dashboard also mounts — that
+# is what puts the expert in the dashboard's global profile switcher
+# (list_profiles() enumerates $HERMES_HOME/profiles).
+#
+# Idempotent: config.yaml and .env are seeded only when absent (both are
+# dashboard-editable afterwards), while SOUL.md and skills are overwritten
+# every boot from the image — same split, and same reasoning, as the default
+# profile above.
+opc_seed_expert_profile() { # <profile-name> <api-key-value>
+    _p="$1"
+    _key="$2"
+    _ph="$HH/profiles/$_p"
+
+    mkdir -p "$_ph/memories" "$_ph/sessions" "$_ph/skills" "$_ph/logs" \
+             "$_ph/plans" "$_ph/workspace" "$_ph/cron" "$_ph/home" "$_ph/plugins"
+
+    if [ -z "$_key" ]; then
+        echo "[hermes] WARNING profile $_p has no API key — the gateway will 401 every request for it" >&2
+    fi
+
+    # Per-profile secrets. Under multiplex the secret scope is authoritative
+    # and does NOT fall back to os.environ (agent/secret_scope.py:137-152),
+    # precisely so one profile cannot read another's credentials — so the
+    # provider key has to be repeated here, it is not inherited.
+    if [ ! -f "$_ph/.env" ]; then
+        cat > "$_ph/.env" <<ENVEOF
+API_SERVER_KEY=$_key
+OPENAI_API_KEY=${OPENAI_API_KEY:-}
+OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
+ENVEOF
+        chmod 600 "$_ph/.env"
+        echo "[hermes] seeded $_ph/.env"
+    else
+        # The API key is operator-rotatable via .env; keep it in sync without
+        # touching anything else the dashboard may have written.
+        if [ -n "$_key" ] && ! grep -qxF "API_SERVER_KEY=$_key" "$_ph/.env"; then
+            sed -i "/^API_SERVER_KEY=/d" "$_ph/.env"
+            printf 'API_SERVER_KEY=%s\n' "$_key" >> "$_ph/.env"
+            echo "[hermes] refreshed API_SERVER_KEY in $_ph/.env"
+        fi
+    fi
+
+    if [ ! -f "$_ph/config.yaml" ]; then
+        cat > "$_ph/config.yaml" <<YAML
+_config_version: 34
+agent:
+  disabled_toolsets:
+    - kanban
+kanban:
+  dispatch_in_gateway: false
+  review_dispatch: false
+  auto_decompose: false
+memory:
+  provider: memory_tencentdb
+model:
+  provider: custom
+  api_key: \${OPENAI_API_KEY}
+  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
+  default: ${OPENAI_MODEL:-deepseek-v4-flash}
+YAML
+        echo "[hermes] seeded $_ph/config.yaml"
+    fi
+
+    # Memory provider: same image copy the default profile gets. The plugin
+    # scopes writes by agent_identity (= the profile name) because
+    # MEMORY_TENCENTDB_AGENT_ID is process-wide and must stay UNSET on this
+    # container — that is why the profile is named agt-scientist and not
+    # scientist (the panel parses chat_memory-{team}-{agent} with
+    # lastIndexOf('-agt')).
+    if [ -d "/opt/hermes/memory_tencentdb" ]; then
+        rm -rf "$_ph/plugins/memory_tencentdb"
+        cp -r /opt/hermes/memory_tencentdb "$_ph/plugins/memory_tencentdb"
+    fi
+
+    # paperclip-api skill: the expert files its own findings as backlog issues.
+    if [ -d "/opt/hermes/skills/paperclip-api" ]; then
+        rm -rf "$_ph/skills/paperclip-api"
+        cp -r /opt/hermes/skills/paperclip-api "$_ph/skills/paperclip-api"
+    fi
+
+    echo "[hermes] expert profile ready: $_p"
+}
+
+opc_seed_expert_profile agt-scientist "${HERMES_SCIENTIST_API_KEY:-}"
+
 # Single-owner home: everything under $HERMES_HOME must belong to the hermes
 # runtime uid (10000) — the dashboard/gateway services run as that user, and
 # the Buzz front-door agent (same shared frontdoor-hermes volume) runs as it

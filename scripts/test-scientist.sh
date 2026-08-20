@@ -43,6 +43,27 @@ checkout "hermes mounts /opt/data/profiles" "/opt/data/profiles" \
 checkout "dashboard mounts /opt/data/profiles" "/opt/data/profiles" \
     docker compose exec -T hermes-dashboard sh -c 'mount | grep " /opt/data/profiles "'
 
+echo "── gateway multiplex ──"
+checkout "multiplex is on" "GATEWAY_MULTIPLEX_PROFILES=1" \
+    docker compose exec -T hermes sh -c 'env | grep ^GATEWAY_MULTIPLEX_PROFILES='
+# NOT a bare `/p/<profile>/v1/health -> 200` check: with multiplex OFF the
+# /p/ prefix is ignored entirely (api_server._resolve_request_profile), so
+# that route already 200s as the default profile and the check would pass
+# before any of this is implemented. What distinguishes a real profile route
+# is WHOSE credential it accepts, so assert that instead.
+check "profile route serves 200 with the PROFILE's own key" \
+    docker compose exec -T hermes sh -c "k=\$(sed -n 's/^API_SERVER_KEY=//p' /opt/data/profiles/$PROFILE/.env 2>/dev/null); test -n \"\$k\" && test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$k\" http://127.0.0.1:8642/p/$PROFILE/v1/models)\" = 200"
+check "profile route REJECTS the default profile's key" \
+    docker compose exec -T hermes sh -c "test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$API_SERVER_KEY\" http://127.0.0.1:8642/p/$PROFILE/v1/models)\" = 401"
+check "unknown profile -> 404" \
+    docker compose exec -T hermes sh -c "test \"\$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8642/p/no-such-expert/v1/health)\" = 404"
+check "profile home exists" \
+    docker compose exec -T hermes test -f "/opt/data/profiles/$PROFILE/config.yaml"
+check "profile .env carries an API_SERVER_KEY >=16 chars" \
+    docker compose exec -T hermes sh -c "test \"\$(sed -n 's/^API_SERVER_KEY=//p' /opt/data/profiles/$PROFILE/.env | wc -c)\" -ge 17"
+checkout "dashboard switcher lists the profile" "$PROFILE" \
+    docker compose exec -T -u 10000 -e HOME=/opt/data -e HERMES_HOME=/opt/data hermes-dashboard /opt/hermes/bin/hermes profile list
+
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,
 # against its live /proc/1-derived argv — not docker-compose.yml. Reverting

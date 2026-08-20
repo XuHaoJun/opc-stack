@@ -403,6 +403,17 @@ services:
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_PORT: "8642"
       API_SERVER_KEY: ${HERMES_API_SERVER_KEY:?set in .env}
+      # Expert agent profiles served by this one gateway process. Measured
+      # tradeoff (see the spec's §4.6): a container per expert costs ~118MB
+      # each because the Python heap is private per process, while multiplex
+      # is ~148MB fixed + ~9MB per profile. At 25 experts that is 2.95GB vs
+      # 373MB. Reversible per profile: upstream's container_boot reconciler
+      # gives any single profile its own supervised process when multiplex is
+      # off for it, with no data move.
+      GATEWAY_MULTIPLEX_PROFILES: "1"
+      # Seeded into the scientist profile's own .env by the entrypoint; the
+      # process-wide API_SERVER_KEY above only authorizes the default profile.
+      HERMES_SCIENTIST_API_KEY: ${HERMES_SCIENTIST_API_KEY:?set in .env}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
