@@ -9,6 +9,7 @@
 # identity -> board) so the first failure tells you which layer broke.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+. "$(dirname "$0")/load-env.sh"; opc_load_env ./.env
 
 PROFILE="agt-scientist"
 PASS=0
@@ -43,8 +44,20 @@ checkout "dashboard mounts /opt/data/profiles" "/opt/data/profiles" \
     docker compose exec -T hermes-dashboard sh -c 'mount | grep " /opt/data/profiles "'
 
 echo "── dashboard ──"
-check "dashboard 9119 responds" \
-    sh -c 'code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:9119/); [ "$code" = "200" ] || [ "$code" = "401" ] || [ "$code" = "302" ]'
+# The real gate: call upstream's own role detector inside the live container,
+# against its live /proc/1-derived argv — not docker-compose.yml. Reverting
+# `command` back to `sleep infinity` makes _read_container_argv() find
+# "sleep"/"infinity" after the main-wrapper.sh token instead of "dashboard",
+# so _is_dashboard_container() returns False and this check goes red. See
+# upstream/hermes/hermes_cli/container_boot.py:298-371 (_strip_container_argv_prefix
+# peels the s6/main-wrapper.sh launcher prefix and an optional leading
+# `hermes`, then _is_dashboard_container requires args[0] == "dashboard").
+checkout "dashboard container argv resolves to dashboard role" "True" \
+    docker compose exec -T hermes-dashboard /opt/hermes/.venv/bin/python3 -c \
+    'from hermes_cli.container_boot import _read_container_argv, _is_dashboard_container as f; print(f(_read_container_argv()))'
+
+check "dashboard ${HERMES_DASHBOARD_PORT:-9119} responds" \
+    sh -c 'code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${HERMES_DASHBOARD_PORT:-9119}/"); [ "$code" = "200" ] || [ "$code" = "401" ] || [ "$code" = "302" ]'
 if docker compose logs --since 10m hermes-dashboard 2>&1 | grep -q "Resource busy"; then
     fail "dashboard has no flock storm (found 'Resource busy')"
 else
