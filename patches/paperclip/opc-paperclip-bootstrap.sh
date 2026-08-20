@@ -24,6 +24,7 @@ ADMIN_NAME="${PAPERCLIP_ADMIN_NAME:-Admin}"
 COMPANY_NAME="${PAPERCLIP_COMPANY_NAME:-OPC}"
 AGENT_NAME="${PAPERCLIP_EXECUTOR_AGENT_NAME:-OMP Engineer}"
 PROTOTYPER_NAME="${PAPERCLIP_PROTOTYPER_AGENT_NAME:-Prototyper}"
+SCIENTIST_NAME="${PAPERCLIP_SCIENTIST_AGENT_NAME:-Scientist}"
 SKILLS_SRC="${OPC_SKILLS_DIR:-/opt/opc-skills}"
 KEY_NAME="${PAPERCLIP_KEY_NAME:-frontdoor}"
 JAR=/tmp/pc-cookies.txt
@@ -266,6 +267,59 @@ PROTOTYPER_DEVENV_OWNER="${PAPERCLIP_PROTOTYPER_DEVENV_OWNER:-prototyper}"
 # API can no longer persist a string. So devenv falls back to
 # `agent:$PAPERCLIP_AGENT_ID`; this key is intent + board-visible
 # documentation until upstream reads plain bindings.
+# reconcile_agent <display-name> <adapterType> <desired-config-fn>
+#
+# Create when absent; otherwise merge the desired keys over the live
+# adapterConfig and PATCH only on a real difference. The merge (rather than
+# overwrite) is what keeps paperclip's own instructions* keys and anything an
+# operator set on the board — only the keys <desired-config-fn> names are
+# asserted.
+#
+# Reconciling rather than create-only matters: without it a change to the
+# image only reaches agents created after that point, so the long-lived stack
+# silently keeps the config it was born with and nothing surfaces the gap.
+reconcile_agent() {
+    _ra_name="$1"
+    _ra_type="$2"
+    _ra_fn="$3"
+
+    _ra_id="$(api_get "/companies/$company_id/agents" | \
+        jq -r --arg n "$_ra_name" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)"
+
+    if [ -z "$_ra_id" ]; then
+        _ra_id="$(printf '{}' | "$_ra_fn" \
+            | jq -c --arg n "$_ra_name" --arg t "$_ra_type" \
+                  '{name:$n, adapterType:$t, adapterConfig:.}' \
+            | api_post_raw "/companies/$company_id/agents" | jq -r '.id // empty')"
+        if [ -n "$_ra_id" ]; then
+            echo "[pc-bootstrap] created agent: $_ra_name ($_ra_id)"
+        else
+            echo "[pc-bootstrap] $_ra_name creation failed" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    _ra_cfg="$(api_get "/companies/$company_id/agents" \
+        | jq -c --arg n "$_ra_name" '.[]? | select(.name == $n) | .adapterConfig // {}' | head -1)"
+    _ra_want="$(printf '%s' "$_ra_cfg" | "$_ra_fn")"
+    if [ "$(printf '%s' "$_ra_cfg" | jq -cS .)" = "$(printf '%s' "$_ra_want" | jq -cS .)" ]; then
+        echo "[pc-bootstrap] agent exists: $_ra_name (config current)"
+        return 0
+    fi
+
+    # Verified on the response, not on curl's exit: api_patch_raw ends in
+    # `|| true`, so an `&&` here would report success for every failure —
+    # the bug that left two skills stale on the board for several commits
+    # while bootstrap printed "skill updated" every boot.
+    if jq -nc --argjson c "$_ra_want" '{adapterConfig:$c}' \
+         | api_patch_raw "/agents/$_ra_id" | jq -e '.id? // empty' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] agent $_ra_name: adapterConfig reconciled"
+    else
+        echo "[pc-bootstrap] WARNING could not reconcile $_ra_name adapterConfig" >&2
+    fi
+}
+
 proto_desired_config() { # live adapterConfig on stdin → desired on stdout
     jq -c --argjson skills "$PROTOTYPER_SKILLS" --arg owner "$PROTOTYPER_DEVENV_OWNER" '
           .engine = "acp"
@@ -275,34 +329,43 @@ proto_desired_config() { # live adapterConfig on stdin → desired on stdout
     '
 }
 
-proto_id="$(api_get "/companies/$company_id/agents" | \
-    jq -r --arg n "$PROTOTYPER_NAME" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)"
-if [ -z "$proto_id" ]; then
-    proto_id="$(printf '{}' | proto_desired_config \
-        | jq -c --arg n "$PROTOTYPER_NAME" '{name:$n, adapterType:"claude_local", adapterConfig:.}' \
-        | api_post_raw "/companies/$company_id/agents" | jq -r '.id // empty')"
-    [ -n "$proto_id" ] && echo "[pc-bootstrap] created agent: $PROTOTYPER_NAME ($proto_id)" \
-                       || echo "[pc-bootstrap] prototyper creation failed" >&2
+reconcile_agent "$PROTOTYPER_NAME" claude_local proto_desired_config
+
+# ── 7. Scientist agent (remote hermes profile) ──
+# Unlike the two local agents above, this one runs somewhere else: the hermes
+# gateway container serves it as the `agt-scientist` profile, and paperclip
+# reaches it over the built-in hermes_gateway adapter. normalizeBaseUrl keeps
+# the path (gateway/server/execute.ts:121-140), which is what makes the
+# per-profile /p/<name> route usable as a base URL.
+#
+# sessionKeyStrategy "agent" keys the session on companyId+agentId alone, so
+# it is stable across issues and runs — one continuous session, which for a
+# research agent is the point rather than a hazard.
+SCIENTIST_BASE="${HERMES_SCIENTIST_BASE_URL:-http://hermes:8642/p/agt-scientist}"
+SCIENTIST_KEY="${HERMES_SCIENTIST_API_KEY:-}"
+
+sci_desired_config() { # live adapterConfig on stdin → desired on stdout
+    # dangerouslyAllowInsecureRemoteHttp: paperclip's hermes_gateway adapter
+    # (transport-security.ts isRemotePlainHttp) refuses plain http to any
+    # hostname it does not consider loopback — "hermes" is a compose DNS
+    # name, not localhost/127.0.0.1, so without this the run fails closed
+    # with errorCode hermes_gateway_plain_http_remote_denied before it ever
+    # sends a request. There is no TLS anywhere on the compose-internal
+    # network (every other inter-service hop in this stack is plain http on
+    # a private docker network too), so this is the same trust boundary the
+    # rest of the stack already relies on, not a new one.
+    jq -c --arg base "$SCIENTIST_BASE" --arg key "$SCIENTIST_KEY" '
+          .apiBaseUrl = $base
+        | .apiKey = $key
+        | .sessionKeyStrategy = "agent"
+        | .dangerouslyAllowInsecureRemoteHttp = true
+    '
+}
+
+if [ -z "$SCIENTIST_KEY" ]; then
+    echo "[pc-bootstrap] WARNING HERMES_SCIENTIST_API_KEY empty — skipping Scientist agent" >&2
 else
-    # Reconcile the config on an EXISTING agent. Without this, a change to the
-    # image only reaches agents created after that point — the long-lived
-    # stack would silently keep the config it was born with, and nothing would
-    # surface the gap. Only the keys proto_desired_config names are asserted.
-    proto_cfg="$(api_get "/companies/$company_id/agents" \
-        | jq -c --arg n "$PROTOTYPER_NAME" '.[]? | select(.name == $n) | .adapterConfig // {}' | head -1)"
-    proto_want="$(printf '%s' "$proto_cfg" | proto_desired_config)"
-    if [ "$(printf '%s' "$proto_cfg" | jq -cS .)" != "$(printf '%s' "$proto_want" | jq -cS .)" ]; then
-        # Verified on the response, not on curl's exit: api_patch_raw ends in
-        # `|| true`, so an `&&` here would report success for every failure.
-        if jq -nc --argjson c "$proto_want" '{adapterConfig:$c}' \
-             | api_patch_raw "/agents/$proto_id" | jq -e '.id? // empty' >/dev/null 2>&1; then
-            echo "[pc-bootstrap] agent $PROTOTYPER_NAME: adapterConfig reconciled"
-        else
-            echo "[pc-bootstrap] WARNING could not reconcile $PROTOTYPER_NAME adapterConfig" >&2
-        fi
-    else
-        echo "[pc-bootstrap] agent exists: $PROTOTYPER_NAME (config current)"
-    fi
+    reconcile_agent "$SCIENTIST_NAME" hermes_gateway sci_desired_config
 fi
 
 echo "[pc-bootstrap] done. admin=$ADMIN_EMAIL company=$company_id agent=$AGENT_NAME"

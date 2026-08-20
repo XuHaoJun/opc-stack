@@ -176,6 +176,22 @@ else
     fail "dashboard container does not run expert-profile seeding (role gate holds)"
 fi
 
+echo "── paperclip ──"
+PC_KEY="$(docker compose exec -T hermes cat /keys/paperclip-api.key 2>/dev/null | tr -d '\r\n')"
+pc_agents() {
+    docker compose exec -T hermes sh -c "curl -fsS -H 'Authorization: Bearer $PC_KEY' \$PAPERCLIP_API_URL/api/companies/\$(curl -fsS -H 'Authorization: Bearer $PC_KEY' \$PAPERCLIP_API_URL/api/companies | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][\"id\"])')/agents"
+}
+checkout "Scientist agent exists on the board" '"Scientist"' pc_agents
+checkout "Scientist uses the hermes_gateway adapter" 'hermes_gateway' pc_agents
+checkout "Scientist points at its own profile route" '/p/agt-scientist' pc_agents
+checkout "Scientist keeps one continuous session" '"sessionKeyStrategy":"agent"' pc_agents
+
+echo "── routing skill ──"
+check "lane table lists research in both skill copies" \
+    sh -c 'grep -q "research" patches/buzz/skills/paperclip-api/SKILL.md && grep -q "research" patches/hermes/skills/paperclip-api/SKILL.md'
+check "the two skill copies are byte-identical" \
+    cmp -s patches/buzz/skills/paperclip-api/SKILL.md patches/hermes/skills/paperclip-api/SKILL.md
+
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,
 # against its live /proc/1-derived argv — not docker-compose.yml. Reverting

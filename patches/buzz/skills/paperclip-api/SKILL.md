@@ -48,12 +48,18 @@ name — never hardcode an id, they change when the stack is rebuilt.
 |---|---|---|
 | `engineering` | `OMP Engineer` | Real work: features, bug fixes, existing PRs/issues, anything whose output is meant to be kept |
 | `prototype` | `Prototyper` | Fast experiments with a live preview URL — "does this feel right", "what would this look like", "can X even work". Built quickly, then **kept for as long as the user wants it**; see the prototype section below |
+| `research` | `Scientist` | 還沒有答案的問題 —— 「這個做得到嗎」「哪個方案比較快」「這個資料長什麼樣」。科學家自己跑實驗蒐證，然後回報，**不會**直接產出要留下來的程式碼；它的產出是一份判斷加上一張 backlog 提案 |
 
 **Default to `engineering` whenever you are not sure.** The two failure modes
 are not symmetric: a prototype request sent to engineering just gets built
 more carefully than it needed to be, while a real feature sent to the
 prototype lane is built by an agent told to skip tests, error handling and
 abstractions.
+
+`research` 與另外兩條的差別是**有沒有答案**：已經知道要做什麼、只是還沒做，那是
+`engineering` 或 `prototype`；還不知道該不該做、或不知道怎麼做比較好，那是
+`research`。把還沒想清楚的東西送去 engineering，會得到一個很仔細地實作了錯誤方向
+的結果。
 
 Prototype does NOT mean disposable. A prototype lives at a stable URL, keeps
 its database, and is resumed by name whenever the user comes back to it. It is

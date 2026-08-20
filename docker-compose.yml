@@ -709,6 +709,10 @@ services:
       PAPERCLIP_ADMIN_NAME: ${PAPERCLIP_ADMIN_NAME:-Admin}
       PAPERCLIP_COMPANY_NAME: ${PAPERCLIP_COMPANY_NAME:-OPC}
       PAPERCLIP_EXECUTOR_AGENT_NAME: ${PAPERCLIP_EXECUTOR_AGENT_NAME:-OMP Engineer}
+      PAPERCLIP_SCIENTIST_AGENT_NAME: ${PAPERCLIP_SCIENTIST_AGENT_NAME:-Scientist}
+      # Same value the hermes entrypoint seeds into the profile's own .env —
+      # this is the credential paperclip presents on /p/agt-scientist.
+      HERMES_SCIENTIST_API_KEY: ${HERMES_SCIENTIST_API_KEY:?set in .env}
     volumes:
       - opc-keys:/keys
       # Write-side of the board-key mirror the `prototype` CLI reads when a
