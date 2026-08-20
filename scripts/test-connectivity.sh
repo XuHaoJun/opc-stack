@@ -67,6 +67,11 @@ echo "── HTTP endpoints (host → published ports) ──"
 check "buzz relay REST  :${BUZZ_PORT:-3000}/_readiness" http_ok "http://127.0.0.1:${BUZZ_PORT:-3000}/_readiness" 200
 check "hermes dashboard :${HERMES_DASHBOARD_PORT:-9119}/" http_ok "http://127.0.0.1:${HERMES_DASHBOARD_PORT:-9119}/" 200 401 302
 check "hermes API       :${HERMES_API_PORT:-8642}/" http_ok "http://127.0.0.1:${HERMES_API_PORT:-8642}/" 200 401 403 404
+# Expert agent profiles are served on the same port under /p/<name>. A 404
+# here means the profile directory never got seeded; a 401 means it exists
+# but has no usable per-profile API_SERVER_KEY (the guard is fail-closed).
+check "hermes scientist :${HERMES_API_PORT:-8642}/p/agt-scientist/" http_ok \
+  "http://127.0.0.1:${HERMES_API_PORT:-8642}/p/agt-scientist/v1/health" 200
 check "paperclip health :${PAPERCLIP_PORT:-3100}/api/health" http_ok "http://127.0.0.1:${PAPERCLIP_PORT:-3100}/api/health" 200
 check "tencentdb core   :${TENCENTDB_CORE_PORT:-8420}/health" http_ok "http://127.0.0.1:${TENCENTDB_CORE_PORT:-8420}/health" 200
 check "tencentdb panel  :${TENCENTDB_PANEL_PORT:-8125}/" http_ok "http://127.0.0.1:${TENCENTDB_PANEL_PORT:-8125}/" 200 302

@@ -322,3 +322,46 @@ docker compose exec frontdoor hermes --version
   `deploy/panel-knowledge-combined` image for the hub instead.
 - Buzz has no web chat UI; conversation happens in the Buzz desktop/mobile
   clients against this relay.
+
+## 既有安裝: 啟用科學家 lane
+
+乾淨機器**不需要這段** —— `scripts/setup.sh` 會一次到位。這段是給目前那台**已經在跑**
+的 stack 的一次性手動調整 (`AGENTS.md`「部署假設」: 不為單一機器建立升級路徑)。需要它
+的原因只有一個: compose 的 one-shot 在容器已存在且 exit 0 時不會重跑 ——
+`buzz-keys` / `buzz-bootstrap` / `tencentdb-bootstrap` / `paperclip-bootstrap` 這四個
+既有的 one-shot 全部落在這一類。`devenv-expert-leases` 是這次新增的服務, 沒有既有容器
+可比對, 第一次 `up` 就會自己跑, 不需要手動催。
+
+```bash
+# 1. .env 補一把 per-profile 金鑰 (16 字元以上; 少於 16 會 fail-closed 全部 401)
+grep -q '^HERMES_SCIENTIST_API_KEY=' .env || \
+  printf 'HERMES_SCIENTIST_API_KEY=%s\n' "$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)" >> .env
+
+# 2. 重建 image 並套用 compose 改動 (也會建立新服務 devenv-expert-leases)
+scripts/prepare.sh && docker compose up -d --build
+
+# 3a. 科學家鑰匙先重跑。buzz-bootstrap 在 compose 裡只 depends_on buzz (已經
+#     healthy), 不 depends_on buzz-keys 本身 —— 那條邊在新機器上是靠 buzz
+#     間接 depends_on buzz-keys 撐出來的, 對「已經在跑」的 buzz 不成立。跟
+#     下一步驟的三個 one-shot 一起下在同一條指令會讓 buzz-bootstrap 有機會
+#     搶先讀到還不存在的 scientist.pub —— add-member.sh 讀不到就默默
+#     skip, 不是失敗, 所以看起來像成功但科學家其實沒被加進 relay membership。
+docker compose up --force-recreate buzz-keys
+
+# 3b. 其餘三個 one-shot 彼此獨立 (也不回頭依賴 3a 之外的東西), 可以一起下:
+docker compose up --force-recreate buzz-bootstrap tencentdb-bootstrap paperclip-bootstrap
+
+# 4. hermes 的 profile 骨架 (SOUL.md、experiment-queue cron、金鑰鏡像) 是開機時
+#    跑一次的 entrypoint 步驟, 不是像 frontdoor 的 register loop 那樣每 30 秒
+#    自己重試的常駐迴圈 —— 光靠它的 wait_for_keys 等窗口 (最多 180s) 賭得到
+#    上面兩步驟的時間差, 不保證。直接讓它的 entrypoint 再跑一次:
+docker compose restart hermes
+
+# 5. 驗證
+scripts/test-connectivity.sh && scripts/test-scientist.sh
+```
+
+四個既有的 one-shot 都是冪等的, 重跑幾次都不會產生重複資料: `buzz-keys` 只補缺的鑰匙
+(既有的 relay/agent 身分不動, 所以 community 與成員關係不受影響)、`buzz-bootstrap` 每次
+都對同一批 pubkey 重新 `add-member` (已是成員時後端本身冪等)、`tencentdb-bootstrap` 先
+get 再 create、`paperclip-bootstrap` 是 reconcile 而非 create-only。
