@@ -20,8 +20,11 @@ for _ in $(seq 1 120); do
 done
 [ -n "$ready" ] || { echo "[bootstrap] relay never became ready" >&2; exit 1; }
 
-/usr/local/bin/buzz-admin add-member \
-    --pubkey "$(cat "${KEYS_DIR:-/keys}/agent.pub")" \
-    --role member
-
-echo "[bootstrap] front-door agent is a relay member"
+# Every agent identity that posts to the relay needs membership. Loop rather
+# than repeat: adding the next expert is one filename.
+for _who in agent scientist; do
+    _pub="${KEYS_DIR:-/keys}/$_who.pub"
+    [ -s "$_pub" ] || { echo "[bootstrap] no $_who.pub — skipping"; continue; }
+    /usr/local/bin/buzz-admin add-member --pubkey "$(cat "$_pub")" --role member
+    echo "[bootstrap] $_who is a relay member"
+done

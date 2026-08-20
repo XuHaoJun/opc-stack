@@ -16,6 +16,7 @@
 # Declared globally so FROM ${NIX_SEED_IMAGE} expands; the `nix-seed` stage
 # below materializes it for COPY --from (which cannot expand variables).
 ARG NIX_SEED_IMAGE=opc/nix-seed:local
+ARG BUZZ_IMAGE=opc/frontdoor:local
 FROM debian:13.4 AS sqlite_build
 ARG SQLITE_AUTOCONF_VERSION=3530400
 ARG SQLITE_SHA256=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
@@ -63,6 +64,12 @@ FROM node:26-bookworm-slim@sha256:9e6f9357d371591e32ab6f2d8a26d63bdd0d17c29eee3f
 # materialized as a stage and copied from by name. The COPY --from=nix-seed
 # in the runtime stage below consumes it.
 FROM ${NIX_SEED_IMAGE} AS nix-seed
+# Buzz CLI source image. Expert agents post their own findings to Buzz, and
+# the CLI is a Rust binary that only the buzz build produces. Same stage-alias
+# trick as nix-seed above: BuildKit will not expand a variable in COPY --from.
+# The binary is built on bookworm and this image is trixie; glibc is forward
+# compatible and the copy was verified to execute here.
+FROM ${BUZZ_IMAGE} AS buzz-cli
 FROM debian:13.4
 
 ENV PYTHONUNBUFFERED=1
@@ -244,6 +251,14 @@ RUN groupadd -r nixbld \
     && usermod -aG nixagents hermes \
     && mkdir -m 0755 /nix
 COPY --from=nix-seed /nix-seed /nix-seed
+# NOTE: the source path is /usr/local/bin/buzz, not buzz.bin. The frontdoor
+# image ships the real binary under the plain name; frontdoor's own
+# entrypoint (frontdoor-entrypoint.sh) renames it to buzz.bin and writes a
+# wrapper over `buzz` at container *start*, so a fresh `docker build` never
+# sees a buzz.bin path to copy from. The pristine image was checked directly
+# (docker run --entrypoint sh opc/frontdoor:local -- ls /usr/local/bin/buzz*)
+# to confirm this before relying on it.
+COPY --from=buzz-cli /usr/local/bin/buzz /usr/local/bin/buzz.bin
 # PATH order is load-bearing. The seed (system) profile stays FIRST so an
 # agent cannot shadow a system tool: nix-seed self-heal checks the system
 # profile by path, but everything else on the stack resolves through PATH.

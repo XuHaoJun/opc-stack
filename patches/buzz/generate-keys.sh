@@ -35,4 +35,8 @@ gen() {
 
 gen relay
 gen agent
+# Expert agents get their OWN Nostr identity. Sharing agent.nsec would make
+# every expert post under the chief of staff's name — the spec calls this out
+# as a hard boundary, not a nicety.
+gen scientist
 echo "[keys] ready"

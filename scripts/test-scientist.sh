@@ -64,6 +64,20 @@ check "profile .env carries an API_SERVER_KEY >=16 chars" \
 checkout "dashboard switcher lists the profile" "$PROFILE" \
     docker compose exec -T -u 10000 -e HOME=/opt/data -e HERMES_HOME=/opt/data hermes-dashboard /opt/hermes/bin/hermes profile list
 
+echo "── buzz identity ──"
+check "scientist keypair exists" \
+    docker compose exec -T hermes sh -c 'test -s /keys/scientist.nsec && test -s /keys/scientist.pub'
+check "buzz CLI present in the hermes image" \
+    docker compose exec -T hermes test -x /usr/local/bin/buzz.bin
+checkout "buzz wrapper injects the profile identity" "BUZZ_PRIVATE_KEY" \
+    docker compose exec -T hermes cat /usr/local/bin/buzz
+check "profile carries its own nsec (not the chief of staff's)" \
+    docker compose exec -T hermes sh -c "test -s /opt/data/profiles/$PROFILE/.agent.nsec && ! cmp -s /opt/data/profiles/$PROFILE/.agent.nsec /keys/agent.nsec"
+check "agent uid can read its nsec" \
+    docker compose exec -T -u 10000 hermes sh -c "test -r /opt/data/profiles/$PROFILE/.agent.nsec"
+checkout "scientist is a relay member" '"channel_id"' \
+    docker compose exec -T -u 10000 -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c 'buzz --relay "http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")" channels list --member'
+
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,
 # against its live /proc/1-derived argv — not docker-compose.yml. Reverting

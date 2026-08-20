@@ -372,6 +372,7 @@ services:
       dockerfile: opc/Dockerfile
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
+        BUZZ_IMAGE: ${IMAGE_PREFIX:-opc}/frontdoor:local
     image: ${IMAGE_PREFIX:-opc}/hermes:local
     restart: unless-stopped
     depends_on:
@@ -388,6 +389,13 @@ services:
       paperclip-bootstrap:
         condition: service_completed_successfully
       tencentdb-bootstrap:
+        condition: service_completed_successfully
+      # /keys/scientist.nsec is written by this one-shot. Without the edge,
+      # a fresh boot can start the gateway first and the expert profile ends
+      # up with no Buzz identity — and the symptom is not an error: buzz
+      # reports "no buzz identity" and quietly does not send, which reads as
+      # a relay problem rather than a missing credential.
+      buzz-keys:
         condition: service_completed_successfully
     command: ["gateway", "run"]
     environment:
@@ -437,6 +445,11 @@ services:
       # Public board address, for building clickable ticket links in chat.
       # PAPERCLIP_API_URL is the internal name and is useless to a browser.
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
+      # Expert agents post their findings to Buzz with the CLI. Reachable from
+      # this container without sharing buzz's netns: the canonical host in
+      # .env is a routable address, not localhost (invariant 1 — do not
+      # rewrite it, the relay verifies NIP-42/98 signatures against it).
+      BUZZ_RELAY_URL: ${BUZZ_RELAY_URL:-ws://buzz:3000}
     ports:
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:

@@ -42,7 +42,7 @@ wait_for_keys() {
     echo "[hermes] WARNING: key files still missing after 180s:$missing — paperclip/memory integrations unavailable"
     return 1
 }
-wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id
+wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id /keys/scientist.nsec
 
 # Paperclip board API key written by the paperclip-bootstrap one-shot: the
 # keys volume is the single source of truth (no .env variable anymore).
@@ -270,6 +270,27 @@ opc_env_value() { # <env-file> <name>
     ' "$1" 2>/dev/null
 }
 
+# The agent replies/posts by running the buzz CLI, but hermes scrubs
+# BUZZ_PRIVATE_KEY from tool subprocess env (GHSA-rhgp-j443-p4rf: provider
+# credentials never reach terminal children), so the CLI cannot authenticate.
+# Wrap it to read the key from the profile home instead.
+#
+# $HERMES_HOME is what makes this per-profile under a single multiplexed
+# process: terminal children get the context-local profile home bridged into
+# their env by tools/environments/local.py `_inject_context_hermes_home`, so
+# each expert's CLI picks up its OWN nsec. The default profile has no
+# .agent.nsec, which is correct — the gateway's own home is not an identity.
+if [ -x /usr/local/bin/buzz.bin ]; then
+    cat > /usr/local/bin/buzz <<EOF
+#!/bin/sh
+export BUZZ_PRIVATE_KEY="\${BUZZ_PRIVATE_KEY:-\$(cat "\${HERMES_HOME:-/opt/data}/.agent.nsec" 2>/dev/null)}"
+export BUZZ_RELAY_URL="\${BUZZ_RELAY_URL:-${BUZZ_RELAY_URL:-ws://buzz:3000}}"
+exec /usr/local/bin/buzz.bin "\$@"
+EOF
+    chmod +x /usr/local/bin/buzz
+    echo "[hermes] buzz wrapper installed (per-profile agent identity)"
+fi
+
 opc_seed_expert_profile() { # <profile-name> <api-key-value>
     _p="$1"
     _key="$2"
@@ -411,6 +432,29 @@ YAML
     if [ -d "/opt/hermes/skills/paperclip-api" ]; then
         rm -rf "$_ph/skills/paperclip-api"
         cp -r /opt/hermes/skills/paperclip-api "$_ph/skills/paperclip-api"
+    fi
+
+    # Runtime-uid key mirror. /keys is mounted read-only and its files are
+    # 600 root, so the agent (uid 10000) and its terminal children cannot read
+    # them there. The failure mode is silent and misdirected: an empty key
+    # makes buzz report "no buzz identity" and quietly not send, which reads
+    # as a relay problem rather than a missing credential.
+    _nsec_src="/keys/${_p#agt-}.nsec"
+    if [ -f "$_nsec_src" ]; then
+        cp "$_nsec_src" "$_ph/.agent.nsec"
+        chown "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$_ph/.agent.nsec" 2>/dev/null || true
+        chmod 600 "$_ph/.agent.nsec"
+        echo "[hermes] $_p: buzz identity mirrored from $_nsec_src"
+    else
+        echo "[hermes] WARNING $_p: no $_nsec_src — the expert cannot post to Buzz" >&2
+    fi
+
+    # Same problem, same fix, for the board key: the expert files its own
+    # findings as backlog issues.
+    if [ -f /keys/paperclip-api.key ]; then
+        cp /keys/paperclip-api.key "$_ph/.paperclip-api.key"
+        chown "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$_ph/.paperclip-api.key" 2>/dev/null || true
+        chmod 600 "$_ph/.paperclip-api.key"
     fi
 
     echo "[hermes] expert profile ready: $_p"
