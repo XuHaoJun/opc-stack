@@ -39,7 +39,7 @@ wait_for_keys() {
         done
         [ -z "$missing" ] && { echo "[hermes] key files ready after $((n * 2))s"; return 0; }
     done
-    echo "[hermes] WARNING: key files still missing after 180s:$missing — paperclip/memory integrations unavailable"
+    echo "[hermes] WARNING: key files still missing after 180s:$missing — paperclip/memory integrations unavailable; a missing scientist.nsec additionally leaves the expert profile with no Buzz identity (buzz reports \"no buzz identity\" and quietly does not send)"
     return 1
 }
 wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id /keys/scientist.nsec
@@ -278,23 +278,71 @@ opc_env_value() { # <env-file> <name>
 # $HERMES_HOME is what makes this per-profile under a single multiplexed
 # process: terminal children get the context-local profile home bridged into
 # their env by tools/environments/local.py `_inject_context_hermes_home`, so
-# each expert's CLI picks up its OWN nsec. The default profile has no
-# .agent.nsec, which is correct — the gateway's own home is not an identity.
+# each expert's CLI picks up its OWN nsec.
+#
+# The wrapper resolves an identity ONLY when $HERMES_HOME names a directory
+# DIRECTLY under the profiles root — i.e. an expert profile. Anything else
+# (unset, the container's own home, the profiles root itself, a path nested
+# deeper) resolves to no identity at all, and buzz then reports "no buzz
+# identity" instead of signing as somebody.
+#
+# This is a structural rule, not a convenience. This image runs in TWO
+# containers. In `hermes`, $HERMES_HOME is /opt/data on the hermes-data
+# volume, whose root holds no .agent.nsec. In `hermes-dashboard` the SAME
+# image and the SAME entrypoint run with /opt/data bound to frontdoor-hermes
+# — and the frontdoor entrypoint copies the CHIEF OF STAFF's key to
+# /opt/data/.agent.nsec there. A wrapper that falls back to
+# "$HERMES_HOME/.agent.nsec" therefore signs every unscoped buzz invocation
+# in that container as the chief of staff, which is precisely the identity
+# leak this expert-agent work exists to prevent (/keys/agent.nsec is never
+# shared with an expert). Keying off the profiles root makes the leak
+# unreachable rather than merely unlikely.
+#
+# The frontdoor image keeps its own, different wrapper
+# (patches/buzz/frontdoor-entrypoint.sh): there the chief of staff's key at
+# $HERMES_HOME/.agent.nsec IS the correct identity.
 if [ -x /usr/local/bin/buzz.bin ]; then
     cat > /usr/local/bin/buzz <<EOF
 #!/bin/sh
-export BUZZ_PRIVATE_KEY="\${BUZZ_PRIVATE_KEY:-\$(cat "\${HERMES_HOME:-/opt/data}/.agent.nsec" 2>/dev/null)}"
-export BUZZ_RELAY_URL="\${BUZZ_RELAY_URL:-${BUZZ_RELAY_URL:-ws://buzz:3000}}"
+# Expert identity, resolved only for a named profile under the profiles root.
+_root="$HH/profiles"
+_hh="\${HERMES_HOME:-}"
+_nsec=""
+case "\$_hh" in
+    "\$_root"/*)
+        _rest="\${_hh#"\$_root"/}"
+        _rest="\${_rest%/}"
+        case "\$_rest" in
+            ''|.|..|*/*) ;;   # profiles root, dot paths, or nested deeper
+            *) _nsec="\$_root/\$_rest/.agent.nsec" ;;
+        esac
+        ;;
+esac
+if [ -n "\$_nsec" ] && [ -r "\$_nsec" ]; then
+    export BUZZ_PRIVATE_KEY="\${BUZZ_PRIVATE_KEY:-\$(cat "\$_nsec")}"
+fi
+export BUZZ_RELAY_URL="\${BUZZ_RELAY_URL:-${BUZZ_RELAY_URL:-ws://localhost:3000}}"
 exec /usr/local/bin/buzz.bin "\$@"
 EOF
     chmod +x /usr/local/bin/buzz
-    echo "[hermes] buzz wrapper installed (per-profile agent identity)"
+    echo "[hermes] buzz wrapper installed (identity only for $HH/profiles/<expert>)"
 fi
 
 opc_seed_expert_profile() { # <profile-name> <api-key-value>
     _p="$1"
     _key="$2"
     _ph="$HH/profiles/$_p"
+    # The expert's key basename is DERIVED from the profile name below
+    # (agt-<expert> -> /keys/<expert>.nsec). Exactly one name must never be
+    # derivable that way: agt-agent resolves to /keys/agent.nsec — the chief
+    # of staff's key — and would mirror it into an expert profile, handing an
+    # expert the one identity it must never have. Refuse the name outright
+    # rather than relying on nobody ever choosing it.
+    _expert="${_p#agt-}"
+    if [ "$_expert" = "agent" ]; then
+        echo "[hermes] FATAL: profile name '$_p' is reserved — it would mirror /keys/agent.nsec (the chief of staff's identity) into an expert profile" >&2
+        exit 1
+    fi
 
     mkdir -p "$_ph/memories" "$_ph/sessions" "$_ph/skills" "$_ph/logs" \
              "$_ph/plans" "$_ph/workspace" "$_ph/cron" "$_ph/home" "$_ph/plugins"
@@ -439,7 +487,7 @@ YAML
     # them there. The failure mode is silent and misdirected: an empty key
     # makes buzz report "no buzz identity" and quietly not send, which reads
     # as a relay problem rather than a missing credential.
-    _nsec_src="/keys/${_p#agt-}.nsec"
+    _nsec_src="/keys/$_expert.nsec"
     if [ -f "$_nsec_src" ]; then
         cp "$_nsec_src" "$_ph/.agent.nsec"
         chown "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$_ph/.agent.nsec" 2>/dev/null || true

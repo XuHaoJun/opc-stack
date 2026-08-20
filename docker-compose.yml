@@ -370,6 +370,26 @@ services:
     build:
       context: ./upstream/hermes
       dockerfile: opc/Dockerfile
+      # Build-time dependency on ANOTHER service's image. The Dockerfile pulls
+      # the buzz CLI out of the frontdoor image (`COPY --from=buzz-cli`), and
+      # that image only exists once compose has built the `frontdoor` service.
+      # `depends_on` does NOT create that edge — it orders containers at `up`,
+      # while `docker compose build hermes` builds exactly one service and
+      # would try to PULL ${IMAGE_PREFIX}/frontdoor:local from a registry it
+      # was never pushed to. On a clean clone that is a hard failure, which
+      # breaks the open-box condition (clone -> scripts/setup.sh -> working
+      # stack, no manual steps).
+      #
+      # `service:frontdoor` as a named build context is the edge: compose
+      # builds frontdoor first and hands its image to this build under the
+      # name `buzz-cli`. A BuildKit named context takes precedence over a
+      # same-named Dockerfile stage, so the `FROM ${BUZZ_IMAGE} AS buzz-cli`
+      # stage stays as the fallback for a manual `docker build` (the path
+      # AGENTS.md documents) while compose overrides it with the image it
+      # just built. Both entry points therefore work, and neither needs the
+      # image to pre-exist.
+      additional_contexts:
+        buzz-cli: "service:frontdoor"
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
         BUZZ_IMAGE: ${IMAGE_PREFIX:-opc}/frontdoor:local
@@ -445,11 +465,22 @@ services:
       # Public board address, for building clickable ticket links in chat.
       # PAPERCLIP_API_URL is the internal name and is useless to a browser.
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
-      # Expert agents post their findings to Buzz with the CLI. Reachable from
-      # this container without sharing buzz's netns: the canonical host in
-      # .env is a routable address, not localhost (invariant 1 — do not
-      # rewrite it, the relay verifies NIP-42/98 signatures against it).
-      BUZZ_RELAY_URL: ${BUZZ_RELAY_URL:-ws://buzz:3000}
+      # Expert agents post their findings to Buzz with the CLI.
+      #
+      # Same default as buzz / buzz-bootstrap / frontdoor on purpose: one
+      # canonical host string, one community (invariant 1). The relay verifies
+      # NIP-42/98 signatures against the host it was addressed by, so a
+      # container-local rewrite (`ws://buzz:3000`) is not a convenience — it
+      # produces signatures the relay does not consider canonical, and the
+      # rejection is silent.
+      #
+      # Note the default is not usable HERE: unlike frontdoor, this container
+      # does not share buzz's network namespace, so ws://localhost:3000 points
+      # at itself. Expert agents therefore require BUZZ_RELAY_URL in .env to
+      # be a routable address (LAN/tailnet IP) — which invariant 1 wants
+      # anyway, since that same string is what desktop clients connect to.
+      # .env.example and scripts/setup.sh say so at the point you set it.
+      BUZZ_RELAY_URL: ${BUZZ_RELAY_URL:-ws://localhost:3000}
     ports:
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:

@@ -20,8 +20,21 @@ for _ in $(seq 1 120); do
 done
 [ -n "$ready" ] || { echo "[bootstrap] relay never became ready" >&2; exit 1; }
 
-# Every agent identity that posts to the relay needs membership. Loop rather
-# than repeat: adding the next expert is one filename.
+# Every agent identity that posts to the relay needs membership.
+#
+# Adding the next expert is FOUR edits, not one — the identity list is
+# duplicated across four files and nothing checks them against each other:
+#   1. patches/buzz/generate-keys.sh        `gen <expert>`  (mints the keypair)
+#   2. patches/buzz/add-member.sh           this loop       (relay membership)
+#   3. patches/buzz/opc-register-agent.sh   the AGENTS list (kind:0 + kind:10100
+#                                                            + channel joins)
+#   4. patches/hermes/hermes-entrypoint.sh  `opc_seed_expert_profile agt-<expert>`
+#                                                           (mirrors the key into
+#                                                            the profile home)
+# Miss THIS entry specifically and the failure is invisible: the key is
+# generated, mirrored into the profile, and the CLI happily signs with it —
+# but the relay drops every event from a non-member, so the expert posts
+# nothing and no gate in this repo catches it.
 for _who in agent scientist; do
     _pub="${KEYS_DIR:-/keys}/$_who.pub"
     [ -s "$_pub" ] || { echo "[bootstrap] no $_who.pub — skipping"; continue; }

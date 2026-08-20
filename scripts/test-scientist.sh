@@ -25,8 +25,18 @@ check() {
 }
 
 # checkout <label> <expected-substring> <cmd...> — pass when stdout contains it.
+#
+# An EMPTY want is always a bug, never a check: `grep -qF -- ""` matches any
+# output at all, including the error text of a command that did not run. Three
+# vacuous checks have landed in this repo that way (one of them in this very
+# file — a wanted substring built from a `docker compose exec ... cat` that
+# failed silently and expanded to nothing). Fail loudly instead of passing.
 checkout() {
     local label="$1" want="$2"; shift 2
+    if [ -z "$want" ]; then
+        fail "$label (BUG: empty wanted-substring — this check would match anything)"
+        return
+    fi
     local got
     got="$("$@" 2>&1)"
     if printf '%s' "$got" | grep -qF -- "$want"; then

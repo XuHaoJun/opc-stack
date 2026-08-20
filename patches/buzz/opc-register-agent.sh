@@ -66,6 +66,12 @@ log "relay ready: $RELAY_API"
 #    because the set is now a loop: /tmp/reg-<who>-<what> exists once that
 #    surface has been published successfully, so a success is never
 #    republished (which would spam the relay) and only failures retry.
+#    Lifetime note: /tmp is in the container filesystem, so these markers
+#    survive `docker restart` but NOT a container recreate (up --build,
+#    compose changes, down/up). Consequence: if the relay loses an identity's
+#    kind:0 / kind:10100 / channel membership while the container keeps
+#    running, this loop believes it already published and those surfaces stay
+#    gone until the container is recreated (or the marker deleted by hand).
 publish_surfaces() { # <who> <name> <about> <nsec> <auth-tag>
     _who="$1"; _name="$2"; _about="$3"; _nsec="$4"; _tag="${5:-}"
     if [ ! -f "/tmp/reg-$_who-meta" ]; then
