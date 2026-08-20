@@ -157,6 +157,25 @@ checkout "tencentdb knows the scientist agent" '"agent_id"' \
         -e OPC_TDAI_USER_KEY="${TENCENTDB_ADMIN_USER_KEY:-}" \
         tencentdb-core sh -c "curl -sS -X POST http://127.0.0.1:8420/v3/meta/agent/get -H 'Content-Type: application/json' -H 'x-tdai-service-id: default' -H \"Authorization: Bearer \$OPC_TDAI_API_KEY\" -H \"x-tdai-user-key: \$OPC_TDAI_USER_KEY\" -d '{\"agent_id\":\"$PROFILE\"}'"
 
+# opc_is_dashboard_container in patches/hermes/hermes-entrypoint.sh gates
+# opc_seed_expert_profile to the gateway container only (see the comment
+# above that function for the two-writer race this avoids). Assert the
+# consequence from both directions in the dashboard container's own boot
+# log: the skip message fired, AND the "profile ready" message — which only
+# prints once opc_seed_expert_profile runs to completion — did NOT. A single
+# grep for the skip string alone could stay green if the message text just
+# got duplicated onto both paths; requiring the ready message's ABSENCE too
+# means removing the gate (which lets opc_seed_expert_profile actually run in
+# this container) flips both signals, not one that could coincidentally still
+# read as a pass.
+_dash_logs="$(docker compose logs hermes-dashboard 2>&1)"
+if printf '%s' "$_dash_logs" | grep -qF "dashboard container — skipping expert profile seeding" \
+    && ! printf '%s' "$_dash_logs" | grep -qF "expert profile ready: $PROFILE"; then
+    pass "dashboard container does not run expert-profile seeding (role gate holds)"
+else
+    fail "dashboard container does not run expert-profile seeding (role gate holds)"
+fi
+
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,
 # against its live /proc/1-derived argv — not docker-compose.yml. Reverting

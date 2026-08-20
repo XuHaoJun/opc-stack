@@ -118,6 +118,14 @@ ensure_agent "$AGENT_ID" "$AGENT_NAME"
 # Split on comma/newline only (see EXTRA_AGENTS above), with globbing off:
 # unquoted word-splitting also pathname-expands, so an entry containing `*`
 # or `?` would silently become whatever happens to match in the CWD.
+#
+# Force IFS to the POSIX default before capturing it: under `set -eu`, an
+# unset IFS would abort the script right here (`set -u` treats `$IFS` as an
+# unbound variable), and if it were already empty, restoring that empty value
+# at the end would silently disable field splitting for the rest of the
+# script. Only `echo done` follows today, so nothing depends on it yet, but
+# the assignment costs nothing and removes the trap for whatever comes after.
+IFS="$(printf ' \t\n')"
 _old_ifs="$IFS"
 set -f
 IFS=',

@@ -442,9 +442,94 @@ model:
   api_key: \${OPENAI_API_KEY}
   base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
   default: ${OPENAI_MODEL:-deepseek-v4-flash}
+platforms:
+  api_server:
+    enabled: false
 YAML
         echo "[hermes] seeded $_ph/config.yaml"
     fi
+
+    # Converge platforms.api_server.enabled: false on EVERY boot, not just at
+    # creation. gateway/config.py's api_server loader force-enables the
+    # platform on any profile whose API_SERVER_KEY resolves as usable — which
+    # this profile's does, deliberately, since a usable per-profile key is
+    # what makes the /p/<profile>/ credential isolation work — unless the
+    # profile's own config.yaml names `enabled` explicitly
+    # (config.py:1515,1712). Without the explicit `false`, gateway/run.py's
+    # secondary-profile loader raises SecondaryPortBindingConfigError BEFORE
+    # the per-profile adapter loop runs, so this profile starts ZERO secondary
+    # adapters — any platform it gains later is silently dead behind a warning
+    # that names only api_server. Documented remedy:
+    # upstream/hermes/website/docs/user-guide/multi-profile-gateways.md
+    # ("Keep port-binding platforms disabled in secondary profile configs").
+    #
+    # This has to reconcile, not just create-once: config.yaml is
+    # dashboard-editable, and an existing profile home (including the live
+    # one at the time this was added) would otherwise carry the warning
+    # forever. Edits only the platforms.api_server.enabled line — everything
+    # else the operator or the dashboard wrote is left untouched, same
+    # discipline as the API_SERVER_KEY sync above.
+    python3 - "$_ph/config.yaml" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    lines = handle.readlines()
+
+
+def block_end(start, indent):
+    i = start
+    while i < len(lines):
+        stripped = lines[i].rstrip("\n")
+        if stripped.strip() == "":
+            i += 1
+            continue
+        cur_indent = len(stripped) - len(stripped.lstrip(" "))
+        if cur_indent <= indent:
+            break
+        i += 1
+    return i
+
+
+changed = False
+plat_idx = next((i for i, l in enumerate(lines) if l.rstrip("\n") == "platforms:"), None)
+if plat_idx is None:
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines += ["platforms:\n", "  api_server:\n", "    enabled: false\n"]
+    changed = True
+else:
+    plat_end = block_end(plat_idx + 1, 0)
+    api_idx = next(
+        (i for i in range(plat_idx + 1, plat_end) if lines[i].rstrip("\n") == "  api_server:"),
+        None,
+    )
+    if api_idx is None:
+        lines[plat_idx + 1 : plat_idx + 1] = ["  api_server:\n", "    enabled: false\n"]
+        changed = True
+    else:
+        api_end = block_end(api_idx + 1, 2)
+        en_idx = next(
+            (
+                i
+                for i in range(api_idx + 1, api_end)
+                if lines[i].lstrip().startswith("enabled:")
+                and (len(lines[i]) - len(lines[i].lstrip(" "))) == 4
+            ),
+            None,
+        )
+        if en_idx is None:
+            lines[api_idx + 1 : api_idx + 1] = ["    enabled: false\n"]
+            changed = True
+        elif lines[en_idx].rstrip("\n") != "    enabled: false":
+            lines[en_idx] = "    enabled: false\n"
+            changed = True
+
+if changed:
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+    print("[hermes] converged platforms.api_server.enabled: false in " + path)
+PYEOF
     # model.api_key stays — this part IS established, both from source and
     # confirmed against the running gateway: dropping the line does NOT fall
     # back to the profile's secret scope, it breaks the profile outright.
@@ -591,7 +676,14 @@ YAML
 # cron.jobs.create_job does not reject a duplicate name — both containers can
 # list (nothing), both create, and the expert then wakes up twice every
 # Monday with nothing on the board or in the gate to say why. The dashboard is
-# an observer: it reads what the gateway seeds, and must not write here at all.
+# an observer for THIS seeding step specifically: it must not run
+# opc_seed_expert_profile (config.yaml/.env/cron/plugin/skill content
+# generation for a profile), which is the only thing gated below. It is not a
+# claim that the dashboard container never writes to this volume at all — the
+# unconditional `chown -R "$HH"` near the end of this script runs in BOTH
+# containers and does traverse the shared profiles tree; that is a metadata
+# fix-up for ownership, not a content race, so it is harmless for two writers
+# to repeat.
 #
 # Role comes from the container's command, not a flag, for the same reason
 # upstream keys its own reconciliation skip off it
@@ -602,6 +694,14 @@ YAML
 # yet, so /proc/1/cmdline carries no main-wrapper.sh token to peel — read the
 # same fact from "$@" instead (compose's `command:`, or the image CMD), and
 # mirror upstream's peeling so a wrapped argv resolves identically.
+#
+# This reads ONLY "$@" (the container's command), not the container's actual
+# name or role — so `docker compose run hermes-dashboard sh` (argv `sh`, not
+# `dashboard`) would resolve as non-dashboard and re-enable seeding from the
+# observer container. Acceptable here because compose.yml pins `command:` for
+# hermes-dashboard's normal `up`/`start`/`restart` path; it is a gap only for
+# an operator deliberately overriding the command on that service, the same
+# class of gap upstream's own flag-based check has.
 opc_is_dashboard_container() { # <container command argv...>
     _has_wrapper=0
     for _a in "$@"; do
