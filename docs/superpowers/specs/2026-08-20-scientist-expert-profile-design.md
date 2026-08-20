@@ -102,18 +102,28 @@ paperclip `canary/v2026.722.1-canary.0`)。
 - secret scope 在 multiplex 下是 authoritative — 缺 key 不 fallback 去讀
   `os.environ` (那裡可能有別的 profile 的值), `agent/secret_scope.py:137-152`。
   每個 profile 的 secrets 來自它自己的 `<home>/.env` overlay。
-- ⚠️ **但 provider key 的隔離是 per-variable-name, 不是 per-profile** (2026-08-20 實測,
-  Task 2 fix round)。兩件事同時成立:
-  - profile `config.yaml` 裡的 `${VAR}` **確實**讀得到該 profile 自己的 `.env`
-    (只存在於 `profiles/agt-scientist/.env` 的變數可以正常解析)。
+- ⚠️ **provider key 的隔離是 per-variable-name, 不是 per-profile, 而且機制未證實**
+  (2026-08-20 實測, Task 2 fix round)。量到的是三件事:
+  - profile `config.yaml` 裡的 `${VAR}` **確實**讀得到只存在於該 profile 自己
+    `.env` 的變數 (`profiles/agt-scientist/.env` 裡的變數可以正常解析)。
   - 但兩個 profile 用**同一個變數名、不同的值**時, **重啟後先接到請求的那個 profile 會
-    污染另一條路由** (實測: 另一邊直接 401)。用不同的變數名就乾淨。
-  所以「每個專家一把自己的 provider key」目前**做不到** —— 全棧共用一把
-  `OPENAI_API_KEY` 是現況也是前提。真要分開, 得給每個 profile **不同的變數名**。
-- **profile 的 `config.yaml` 不能省略 `model.api_key`**: 拿掉之後 profile 直接 401。
-  原因是 `runtime_provider.py:1325-1335` 把 `OPENAI_API_KEY` 這個候選來源 **host-gate
-  到 openai.com**, 而我們的 base_url 是 opencode.ai, 於是一路落到 `"no-key-required"`。
-  這與 commit `1881e40` 對 default profile 修的是同一件事, 每個 profile 都要各自寫一份。
+    污染另一條路由** (實測: 另一邊直接 401)。
+  - 換成**不同的變數名**則兩邊乾淨。
+  這三件量到的事**不足以證明**「`${VAR}` 是對著該 profile 自己的 `.env` 解析」這個
+  因果 —— 讀 source 反而指向相反方向: `config.py::_env_expand_match` (~2591-2637)
+  只從 `os.environ` 解析 `${VAR}`, 解不到就留字面不動; `gateway/run.py:1963-1975`
+  在 multiplex 下明確拒絕把 profile 的 `.env` load 進 `os.environ`;
+  `_profile_runtime_scope` (`gateway/run.py:2067-2100`) 建的是完全不動
+  `os.environ` 的隔離 dict。沒找到能讓「per-profile `.env` 解析」這個說法成立的路徑
+  —— 真正在解析的可能是某個共用的 credential pool, 或另一個 global, 目前不知道是
+  哪個。**操作規則不受這個因果影響**: 「每個專家一把自己的 provider key」目前
+  **做不到** —— 全棧共用一把 `OPENAI_API_KEY` 是現況也是前提。真要分開, 得給每個
+  profile **不同的變數名**; 這裡的憑證行為要靠量測驗證, 不要只靠讀 source 判斷。
+- **profile 的 `config.yaml` 不能省略 `model.api_key`**(這件事獨立, 已證實): 拿掉之後
+  profile 直接 401。原因是 `runtime_provider.py:1325-1335` 把 `OPENAI_API_KEY` 這個
+  候選來源 **host-gate 到 openai.com**, 而我們的 base_url 是 opencode.ai, 於是一路
+  落到 `"no-key-required"`。這與 commit `1881e40` 對 default profile 修的是同一件事,
+  每個 profile 都要各自寫一份。
 - cron 在 multiplex 下是 **per-profile ticking** (`cron/scheduler_provider.py:436`)。
 - **terminal 子行程拿得到正確的 per-profile `HERMES_HOME`**: contextvar override 由
   `tools/environments/local.py:497` `_inject_context_hermes_home()` 橋接進 child env。

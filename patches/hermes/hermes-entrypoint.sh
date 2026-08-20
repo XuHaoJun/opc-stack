@@ -208,10 +208,24 @@ opc_key_is_usable() { # <value>
 }
 
 # Read one value out of a .env the way hermes parses it (config.py load_env +
-# _parse_env_value): comments skipped, an `export ` prefix stripped, last
-# assignment wins, surrounding quotes removed. Comparing raw file text instead
-# would treat a dashboard-written `API_SERVER_KEY="…"` as different from the
-# identical unquoted value and rewrite + log "refreshed" on every single boot.
+# _parse_env_value, and agent/secret_scope.py::_strip_inline_comment for the
+# comment handling): comments skipped, an `export ` prefix stripped, last
+# assignment wins, an inline `# ...` comment stripped, surrounding quotes
+# removed. Comparing raw file text instead would treat a dashboard-written
+# `API_SERVER_KEY="…"` as different from the identical unquoted value and
+# rewrite + log "refreshed" on every single boot; not stripping the inline
+# comment the way upstream does causes the same spurious one-time rewrite for
+# `KEY=abc # note` (self-healing on the next boot, but the log then lies
+# about why it fired).
+#
+# Inline-comment rule mirrors _strip_inline_comment exactly: for a value
+# starting with a quote, scan for the matching close quote (backslash-escape
+# aware for double quotes only, since the writer emits \"/\\ escapes); if
+# what follows the close quote, after leading whitespace, starts with `#`,
+# keep only through the close quote — otherwise leave the value untouched
+# (lenient, not a parse error). For an unquoted value, truncate at the first
+# `#` that is preceded by whitespace, so `foo#bar` is kept whole but
+# `foo # bar` becomes `foo`, and a value that itself starts with `#` is kept.
 opc_env_value() { # <env-file> <name>
     [ -f "$1" ] || return 0
     awk -v want="$2" '
@@ -226,6 +240,26 @@ opc_env_value() { # <env-file> <name>
             if (k != want) next
             v = substr(line, index(line, "=") + 1)
             gsub(/^[ \t]+|[ \t]+$/, "", v)
+            n = length(v)
+            q = substr(v, 1, 1)
+            if (n >= 1 && (q == dq || q == sq)) {
+                i = 2; closed = 0; closeidx = 0
+                while (i <= n) {
+                    ch = substr(v, i, 1)
+                    if (q == dq && ch == "\\") { i += 2 }
+                    else if (ch == q) { closed = 1; closeidx = i; break }
+                    else { i++ }
+                }
+                if (closed) {
+                    rest = substr(v, closeidx + 1)
+                    gsub(/^[ \t]+/, "", rest)
+                    if (substr(rest, 1, 1) == "#") v = substr(v, 1, closeidx)
+                    # else: non-comment trailing junk — leave v untouched
+                }
+                # else: unterminated quote — leave v untouched
+            } else if (match(v, /[ \t]+#/) > 0) {
+                v = substr(v, 1, RSTART - 1)
+            }
             n = length(v)
             if (n >= 2 && ((substr(v, 1, 1) == dq && substr(v, n, 1) == dq) || \
                            (substr(v, 1, 1) == sq && substr(v, n, 1) == sq)))
@@ -277,7 +311,16 @@ opc_seed_expert_profile() { # <profile-name> <api-key-value>
         # (`OPENAI_BASE_URL=…API_SERVER_KEY=xxx`), corrupting the provider URL
         # and the key at once, with a 401 as the only symptom. awk's print
         # always terminates the line, so this normalises the file instead.
+        #
+        # Pre-create the temp file at 600 before anything is written into it:
+        # the shell's `>` redirection below truncates an existing file rather
+        # than recreating it, so an existing 600 mode survives untouched — a
+        # plain `awk ... > "$_tmp"` on a not-yet-existing path would instead
+        # create it at the process umask (typically 644), leaving the API key
+        # briefly world-readable between the write and the `mv` below.
         _tmp="$_ph/.env.opc-tmp.$$"
+        : > "$_tmp"
+        chmod 600 "$_tmp"
         if OPC_NEW_KEY="$_key" awk '
                 BEGIN { k = ENVIRON["OPC_NEW_KEY"] }
                 !/^[ \t]*(export[ \t]+)?API_SERVER_KEY[ \t]*=/ { print }
@@ -315,28 +358,43 @@ model:
 YAML
         echo "[hermes] seeded $_ph/config.yaml"
     fi
-    # model.api_key stays, and it is the .env copy above that feeds it —
-    # both halves verified against the running gateway, because the code reads
-    # like the opposite is true:
-    #   * Dropping the line does NOT fall back to the profile's secret scope,
-    #     it breaks the profile outright. runtime_provider.py:1325-1335 gates
-    #     the OPENAI_API_KEY candidate on an openai.com / openai.azure.com
-    #     HOST, and this base_url is opencode.ai — so a bare `custom` provider
-    #     with no config api_key ends at the literal "no-key-required"
-    #     (:1360) and every completion 401s even with a perfectly good key in
-    #     the profile's .env. Same reason 1881e40 added it to the default
-    #     profile.
-    #   * The ${...} ref resolves against the PROFILE's .env, not the
-    #     container env: pointing it at a var that exists only in
-    #     profiles/<p>/.env completes normally, and setting that var to a bad
-    #     value 401s this profile while the default profile keeps working.
-    #     (config.py::_env_expand_match reads os.environ and does say
-    #     otherwise — do not "fix" this from the source alone; measure it.)
-    # Caveat for whoever gives an expert its own provider key: keep the VAR
-    # NAME distinct. With both profiles naming OPENAI_API_KEY but holding
-    # different values, whichever profile takes the first turn after a restart
-    # decides the value the other one gets too (observed: bogus key in the
-    # expert's .env, expert turn first, default route then 401s as well).
+    # model.api_key stays — this part IS established, both from source and
+    # confirmed against the running gateway: dropping the line does NOT fall
+    # back to the profile's secret scope, it breaks the profile outright.
+    # runtime_provider.py:1325-1335 gates the OPENAI_API_KEY candidate on an
+    # openai.com / openai.azure.com HOST, and this base_url is opencode.ai —
+    # so a bare `custom` provider with no config api_key ends at the literal
+    # "no-key-required" (:1360) and every completion 401s even with a
+    # perfectly good key in the profile's .env. Same reason 1881e40 added it
+    # to the default profile.
+    #
+    # What is NOT established: the mechanism behind ${...} resolution inside
+    # a profile's config.yaml. Measured (2026-08-20, across a container
+    # restart):
+    #   * a var defined ONLY in profiles/<p>/.env resolved fine in that
+    #     profile's own config.yaml ${VAR} reference;
+    #   * default and agt-scientist both naming OPENAI_API_KEY but holding
+    #     DIFFERENT values: after a restart, whichever profile served the
+    #     first request decided the value BOTH routes then got — the other
+    #     route started 401ing;
+    #   * giving them distinct variable names instead behaved cleanly.
+    # These three observations do not add up to "${VAR} resolves against the
+    # profile's own .env" as a mechanism — reading the source points the
+    # other way: config.py::_env_expand_match (~2591-2637) resolves ${VAR}
+    # from os.environ ONLY and leaves an unresolved ref literal;
+    # gateway/run.py:1963-1975 explicitly refuses to load a profile's .env
+    # into os.environ under multiplex; and _profile_runtime_scope
+    # (gateway/run.py:2067-2100) builds an isolated dict without ever
+    # mutating os.environ. No path was found that would make per-profile-.env
+    # resolution true — something else (a shared credential pool, or some
+    # other global) is doing this, and which one is unknown. Do not "fix"
+    # this comment from source reading alone.
+    #
+    # The operational rule holds regardless of the cause, so keep following
+    # it: do not give two profiles different values under the same variable
+    # name; an expert that needs its own provider key must use a distinct
+    # variable name; verify credential behaviour here by measuring against
+    # the running gateway, not by reading the source.
 
     # Memory provider: same image copy the default profile gets. The plugin
     # scopes writes by agent_identity (= the profile name) because
