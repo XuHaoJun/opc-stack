@@ -60,7 +60,7 @@ check "unknown profile -> 404" \
 check "profile home exists" \
     docker compose exec -T hermes test -f "/opt/data/profiles/$PROFILE/config.yaml"
 check "profile .env carries an API_SERVER_KEY >=16 chars" \
-    docker compose exec -T hermes sh -c "test \"\$(sed -n 's/^API_SERVER_KEY=//p' /opt/data/profiles/$PROFILE/.env | wc -c)\" -ge 17"
+    docker compose exec -T hermes sh -c "test \"\$(sed -n 's/^API_SERVER_KEY=//p' /opt/data/profiles/$PROFILE/.env | head -1 | wc -c)\" -ge 17"
 checkout "dashboard switcher lists the profile" "$PROFILE" \
     docker compose exec -T -u 10000 -e HOME=/opt/data -e HERMES_HOME=/opt/data hermes-dashboard /opt/hermes/bin/hermes profile list
 

@@ -179,10 +179,63 @@ export OPENAI_API_KEY OPENAI_BASE_URL
 # is what puts the expert in the dashboard's global profile switcher
 # (list_profiles() enumerates $HERMES_HOME/profiles).
 #
-# Idempotent: config.yaml and .env are seeded only when absent (both are
-# dashboard-editable afterwards), while SOUL.md and skills are overwritten
-# every boot from the image — same split, and same reasoning, as the default
-# profile above.
+# What opc_seed_expert_profile actually does today: create the profile's
+# directory tree; seed config.yaml and .env when absent (both are
+# dashboard-editable afterwards); keep API_SERVER_KEY in .env in sync with the
+# operator's .env on every boot; converge .env on mode 600 whichever branch
+# ran; and re-copy the memory plugin and the paperclip-api skill from the image
+# (those two are image-owned, same as for the default profile). It does NOT
+# write SOUL.md — the expert's identity lands here in a later task, and the
+# SOUL.md already sitting in the profile is hermes's own default, written by
+# the runtime.
+
+# Mirror hermes's own acceptance rule for a per-profile gateway key.
+# api_server.py::_expected_api_key() resolves a named profile's key through
+# auth.py::has_usable_secret(key, min_length=16): anything shorter than 16
+# characters after stripping, or one of upstream's placeholder strings,
+# resolves to "" and then EVERY request to that profile 401s with nothing but a
+# logger.warning buried in the gateway log. compose's `${VAR:?}` only catches
+# empty, so a 6-char key or `your-api-key-here` sails through it — refuse the
+# same values upstream refuses, loudly, at the point they are written.
+opc_key_is_usable() { # <value>
+    _v="$(printf '%s' "${1-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ "${#_v}" -ge 16 ] || return 1
+    case "$(printf '%s' "$_v" | tr '[:upper:]' '[:lower:]')" in
+        '*'|'**'|'***'|changeme|your_api_key|your_api_key_here|your-api-key|placeholder|example|dummy|null|none)
+            return 1 ;;
+    esac
+    return 0
+}
+
+# Read one value out of a .env the way hermes parses it (config.py load_env +
+# _parse_env_value): comments skipped, an `export ` prefix stripped, last
+# assignment wins, surrounding quotes removed. Comparing raw file text instead
+# would treat a dashboard-written `API_SERVER_KEY="…"` as different from the
+# identical unquoted value and rewrite + log "refreshed" on every single boot.
+opc_env_value() { # <env-file> <name>
+    [ -f "$1" ] || return 0
+    awk -v want="$2" '
+        BEGIN { sq = sprintf("%c", 39); dq = sprintf("%c", 34) }
+        {
+            line = $0
+            sub(/^[ \t]+/, "", line); sub(/[ \t\r]+$/, "", line)
+            if (line ~ /^#/ || index(line, "=") == 0) next
+            sub(/^export[ \t]+/, "", line)
+            k = substr(line, 1, index(line, "=") - 1)
+            gsub(/^[ \t]+|[ \t]+$/, "", k)
+            if (k != want) next
+            v = substr(line, index(line, "=") + 1)
+            gsub(/^[ \t]+|[ \t]+$/, "", v)
+            n = length(v)
+            if (n >= 2 && ((substr(v, 1, 1) == dq && substr(v, n, 1) == dq) || \
+                           (substr(v, 1, 1) == sq && substr(v, n, 1) == sq)))
+                v = substr(v, 2, n - 2)
+            out = v; found = 1
+        }
+        END { if (found) print out }
+    ' "$1" 2>/dev/null
+}
+
 opc_seed_expert_profile() { # <profile-name> <api-key-value>
     _p="$1"
     _key="$2"
@@ -191,8 +244,15 @@ opc_seed_expert_profile() { # <profile-name> <api-key-value>
     mkdir -p "$_ph/memories" "$_ph/sessions" "$_ph/skills" "$_ph/logs" \
              "$_ph/plans" "$_ph/workspace" "$_ph/cron" "$_ph/home" "$_ph/plugins"
 
-    if [ -z "$_key" ]; then
-        echo "[hermes] WARNING profile $_p has no API key — the gateway will 401 every request for it" >&2
+    if opc_key_is_usable "$_key"; then
+        _key_ok=1
+    else
+        _key_ok=0
+        if [ -z "$_key" ]; then
+            echo "[hermes] WARNING profile $_p has no API key — the gateway will 401 every request for it" >&2
+        else
+            echo "[hermes] WARNING profile $_p: API key rejected by hermes's own rule (needs >=16 chars after stripping and must not be a placeholder such as changeme / your-api-key / placeholder) — NOT writing it; the gateway will 401 every request for it" >&2
+        fi
     fi
 
     # Per-profile secrets. Under multiplex the secret scope is authoritative
@@ -200,22 +260,40 @@ opc_seed_expert_profile() { # <profile-name> <api-key-value>
     # precisely so one profile cannot read another's credentials — so the
     # provider key has to be repeated here, it is not inherited.
     if [ ! -f "$_ph/.env" ]; then
-        cat > "$_ph/.env" <<ENVEOF
-API_SERVER_KEY=$_key
-OPENAI_API_KEY=${OPENAI_API_KEY:-}
-OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-ENVEOF
+        : > "$_ph/.env"
         chmod 600 "$_ph/.env"
+        [ "$_key_ok" = 1 ] && printf 'API_SERVER_KEY=%s\n' "$_key" >> "$_ph/.env"
+        printf 'OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY:-}" >> "$_ph/.env"
+        printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}" >> "$_ph/.env"
         echo "[hermes] seeded $_ph/.env"
-    else
+    elif [ "$_key_ok" = 1 ] && [ "$(opc_env_value "$_ph/.env" API_SERVER_KEY)" != "$_key" ]; then
         # The API key is operator-rotatable via .env; keep it in sync without
         # touching anything else the dashboard may have written.
-        if [ -n "$_key" ] && ! grep -qxF "API_SERVER_KEY=$_key" "$_ph/.env"; then
-            sed -i "/^API_SERVER_KEY=/d" "$_ph/.env"
-            printf 'API_SERVER_KEY=%s\n' "$_key" >> "$_ph/.env"
+        #
+        # Rewrite through a temp file rather than `sed -i /d` + `>>`: GNU sed
+        # preserves a missing final newline, so appending to a file another
+        # writer left unterminated — precisely the dashboard case this branch
+        # exists for — lands the key on the end of the previous line
+        # (`OPENAI_BASE_URL=…API_SERVER_KEY=xxx`), corrupting the provider URL
+        # and the key at once, with a 401 as the only symptom. awk's print
+        # always terminates the line, so this normalises the file instead.
+        _tmp="$_ph/.env.opc-tmp.$$"
+        if OPC_NEW_KEY="$_key" awk '
+                BEGIN { k = ENVIRON["OPC_NEW_KEY"] }
+                !/^[ \t]*(export[ \t]+)?API_SERVER_KEY[ \t]*=/ { print }
+                END { print "API_SERVER_KEY=" k }
+            ' "$_ph/.env" > "$_tmp"; then
+            mv "$_tmp" "$_ph/.env"
             echo "[hermes] refreshed API_SERVER_KEY in $_ph/.env"
+        else
+            rm -f "$_tmp"
+            echo "[hermes] WARNING could not refresh API_SERVER_KEY in $_ph/.env" >&2
         fi
     fi
+    # Converge on 600 on every boot, not just on the create path: an .env that
+    # already existed with a looser mode was never tightened, and neither was
+    # the one the refresh branch just wrote through a fresh temp file.
+    chmod 600 "$_ph/.env"
 
     if [ ! -f "$_ph/config.yaml" ]; then
         cat > "$_ph/config.yaml" <<YAML
@@ -237,6 +315,28 @@ model:
 YAML
         echo "[hermes] seeded $_ph/config.yaml"
     fi
+    # model.api_key stays, and it is the .env copy above that feeds it —
+    # both halves verified against the running gateway, because the code reads
+    # like the opposite is true:
+    #   * Dropping the line does NOT fall back to the profile's secret scope,
+    #     it breaks the profile outright. runtime_provider.py:1325-1335 gates
+    #     the OPENAI_API_KEY candidate on an openai.com / openai.azure.com
+    #     HOST, and this base_url is opencode.ai — so a bare `custom` provider
+    #     with no config api_key ends at the literal "no-key-required"
+    #     (:1360) and every completion 401s even with a perfectly good key in
+    #     the profile's .env. Same reason 1881e40 added it to the default
+    #     profile.
+    #   * The ${...} ref resolves against the PROFILE's .env, not the
+    #     container env: pointing it at a var that exists only in
+    #     profiles/<p>/.env completes normally, and setting that var to a bad
+    #     value 401s this profile while the default profile keeps working.
+    #     (config.py::_env_expand_match reads os.environ and does say
+    #     otherwise — do not "fix" this from the source alone; measure it.)
+    # Caveat for whoever gives an expert its own provider key: keep the VAR
+    # NAME distinct. With both profiles naming OPENAI_API_KEY but holding
+    # different values, whichever profile takes the first turn after a restart
+    # decides the value the other one gets too (observed: bogus key in the
+    # expert's .env, expert turn first, default route then 401s as well).
 
     # Memory provider: same image copy the default profile gets. The plugin
     # scopes writes by agent_identity (= the profile name) because
