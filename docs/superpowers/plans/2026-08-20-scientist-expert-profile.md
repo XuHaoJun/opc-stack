@@ -18,6 +18,7 @@
 - **絕不共用 `/keys/agent.nsec`** —— 那是參謀長的 Buzz 身分。科學家用 `/keys/scientist.nsec`。
 - **per-profile `API_SERVER_KEY` 必須 ≥16 字元**，否則 `_expected_api_key()` fail-closed 回空字串，所有請求 401（`gateway/platforms/api_server.py:1759-1777`）。
 - **兩份 `paperclip-api/SKILL.md` 與兩份 `SOUL.md` 必須逐字相同**，`scripts/prepare.sh` 的 drift guard 會擋 build。
+- **開箱即用是驗收條件**（`AGENTS.md` 的「部署假設」）: 一台乾淨機器 `git clone` → `scripts/setup.sh` 之後，科學家必須**完整可用**，不需要任何手動補步驟。所有狀態的產生者都必須是 compose 的 one-shot 或 entrypoint，且冪等。**不要寫 migration / 升版腳本** —— 目前只有一台既有的 stack，它手動調整就好（Task 7 Step 4 把手動那半收斂成一段可貼的指令）。
 - **不變量 6**: 容器內 root 隨便折騰，但沒有 host mount / privileged。
 - 每個 task 結束時 commit。commit message 結尾加 `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`。
 
@@ -667,12 +668,37 @@ ARG BUZZ_IMAGE=opc/frontdoor:local
 COPY --from=buzz-cli /usr/local/bin/buzz.bin /usr/local/bin/buzz.bin
 ```
 
-- [ ] **Step 7: compose 傳 build arg 並排序 build**
+- [ ] **Step 7: compose 傳 build arg、排序 build、並等鑰匙**
 
 在 `docker-compose.yml` 的 `hermes` 服務 `build.args` 區塊，`NIX_SEED_IMAGE:` 之後插入：
 
 ```yaml
         BUZZ_IMAGE: ${IMAGE_PREFIX:-opc}/frontdoor:local
+```
+
+在同一個服務的 `depends_on:` 區塊插入（`nix-seed:` 那組之後）：
+
+```yaml
+      # /keys/scientist.nsec is written by this one-shot. Without the edge,
+      # a fresh boot can start the gateway first and the expert profile ends
+      # up with no Buzz identity — and the symptom is not an error: buzz
+      # reports "no buzz identity" and quietly does not send, which reads as
+      # a relay problem rather than a missing credential.
+      buzz-keys:
+        condition: service_completed_successfully
+```
+
+`depends_on` 只排 compose 啟動順序；手動 / `--no-deps` / 重建單一容器的路徑繞得過它，所以
+entrypoint 也要等。在 `patches/hermes/hermes-entrypoint.sh` 把
+
+```sh
+wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id
+```
+
+換成
+
+```sh
+wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id /keys/scientist.nsec
 ```
 
 在 `hermes` 服務的 `environment:` 區塊，`PAPERCLIP_PUBLIC_URL:` 之後插入：
@@ -1450,12 +1476,211 @@ MSG
 
 ---
 
+### Task 7: 開箱即用驗收
+
+**為什麼需要這個 task**: Task 1–6 全程都是對一個**既有**的 stack 手動
+`--force-recreate` 某個 one-shot。那證明不了「乾淨機器 `setup.sh` 一次到位」——
+compose 的 one-shot 在容器已存在且 exit 0 時**不會**重跑，所以「我手動重跑過所以它
+會動」是錯的推論。這個 task 把開箱即用變成一條會失敗的檢查。
+
+**Files:**
+- Create: `scripts/audit-bootstrap.sh`
+- Modify: `scripts/test-connectivity.sh`
+- Modify: `SETUP.md`
+
+**Interfaces:**
+- Consumes: Task 1–6 的全部產物。
+- Produces: 無下游。
+
+- [ ] **Step 1: 寫 bootstrap 歸屬稽核（非破壞性）**
+
+這支 script 問一個問題：**科學家需要的每一份狀態，是不是都有一個 compose 裡的
+自動產生者？** 它不碰資料，可以隨時跑。
+
+Create `scripts/audit-bootstrap.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Does every piece of scientist state have an automatic producer?
+#
+# A fresh `scripts/setup.sh` must produce a fully working expert lane with no
+# migration script and no manual step. The trap this guards against: compose
+# one-shots are NOT re-run when a container already exists and exited 0, so
+# "I re-ran it by hand and it worked" says nothing about a fresh machine.
+# Every row below must name a producer that runs unattended on `up`.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+PASS=0
+FAIL=0
+ok()   { printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()  { printf 'FAIL  %s\n' "$1"; FAIL=$((FAIL + 1)); }
+
+# has <label> <file> <pattern>
+has() {
+    if grep -q -- "$3" "$2" 2>/dev/null; then ok "$1"; else bad "$1 (missing in $2)"; fi
+}
+
+echo "── every artifact has an automatic producer ──"
+has "scientist keypair: buzz-keys one-shot"           patches/buzz/generate-keys.sh          'gen scientist'
+has "relay membership: buzz-bootstrap one-shot"       patches/buzz/add-member.sh             'for _who in agent scientist'
+has "discovery + channels: frontdoor register loop"   patches/buzz/opc-register-agent.sh     'scientist|scientist|'
+has "profile skeleton: hermes entrypoint"             patches/hermes/hermes-entrypoint.sh    'opc_seed_expert_profile agt-scientist'
+has "SOUL.md: image + boot sync"                      patches/hermes/hermes-entrypoint.sh    'profiles/$_p/SOUL.md'
+has "experiment queue: hermes entrypoint"             patches/hermes/hermes-entrypoint.sh    'experiment-queue'
+has "memory tenancy: tencentdb-bootstrap one-shot"    patches/tencentdb-agent-memory/MemoryCore/opc-tencentdb-provision.sh 'EXTRA_AGENTS'
+has "board agent: paperclip-bootstrap one-shot"       patches/paperclip/opc-paperclip-bootstrap.sh 'SCIENTIST_NAME'
+has "devenv lease: devenv-expert-leases one-shot"     docker-compose.yml                     'devenv-expert-leases'
+has "api key ships in .env.example"                   .env.example                           'HERMES_SCIENTIST_API_KEY'
+
+echo "── ordering: nothing races its producer ──"
+# hermes reads /keys/scientist.nsec; buzz-keys writes it.
+if python3 - <<'PYEOF'
+import sys, re
+svc = open("docker-compose.yml").read()
+m = re.search(r"\n  hermes:\n(.*?)(?=\n  [a-z][a-z0-9-]*:\n)", svc, re.S)
+sys.exit(0 if m and "buzz-keys:" in m.group(1) else 1)
+PYEOF
+then ok "hermes depends_on buzz-keys"; else bad "hermes depends_on buzz-keys"; fi
+has "entrypoint also waits for the key"  patches/hermes/hermes-entrypoint.sh  'wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id /keys/scientist.nsec'
+
+echo "── idempotence: re-running a producer must not duplicate ──"
+has "keys: only generates what is absent"    patches/buzz/generate-keys.sh       'already present'
+has "cron: guarded by job name"              patches/hermes/hermes-entrypoint.sh 'grep -q "experiment-queue"'
+has "board agent: reconciles, not create-only" patches/paperclip/opc-paperclip-bootstrap.sh 'adapterConfig reconciled'
+has "tencentdb: get before create"           patches/tencentdb-agent-memory/MemoryCore/opc-tencentdb-provision.sh 'already exists'
+
+echo
+printf 'result: %d pass, %d fail\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]
+```
+
+```bash
+chmod +x scripts/audit-bootstrap.sh
+```
+
+- [ ] **Step 2: 跑它**
+
+Run: `scripts/audit-bootstrap.sh`
+
+Expected: `result: 16 pass, 0 fail`。任何一項 FAIL 都代表那份狀態在乾淨機器上不會自己
+出現 —— 回去把它補成 one-shot 或 entrypoint 的一部分，**不要**寫 migration script。
+
+- [ ] **Step 3: 把科學家納入 setup.sh 建議的驗證**
+
+`setup.sh` 結尾指的是 `scripts/test-connectivity.sh`，所以那支要看得到科學家，否則
+乾淨安裝壞掉時沒有任何地方會講。在 `scripts/test-connectivity.sh` 的
+`check "hermes API       :${HERMES_API_PORT:-8642}/" ...` 那行之後插入：
+
+```bash
+# Expert agent profiles are served on the same port under /p/<name>. A 404
+# here means the profile directory never got seeded; a 401 means it exists
+# but has no usable per-profile API_SERVER_KEY (the guard is fail-closed).
+check "hermes scientist :${HERMES_API_PORT:-8642}/p/agt-scientist/" http_ok \
+  "http://127.0.0.1:${HERMES_API_PORT:-8642}/p/agt-scientist/v1/health" 200
+```
+
+Run: `scripts/test-connectivity.sh`
+
+Expected: `result: 24 pass, 0 fail`。
+
+- [ ] **Step 4: 寫既有安裝的手動調整段落**
+
+使用者要的是「別人開箱即用；我這台既有的手動調就好」。把手動那半收斂成一段可以
+整段貼的指令，不要散落在六個 task 裡。在 `SETUP.md` 末尾新增：
+
+```markdown
+## 既有安裝: 啟用科學家 lane
+
+乾淨機器**不需要這段** —— `scripts/setup.sh` 會一次到位。這段是給目前那台**已經在跑**
+的 stack 的一次性手動調整 (`AGENTS.md`「部署假設」: 不為單一機器建立升級路徑)。
+需要它的原因只有一個: compose 的 one-shot 在容器已存在且 exit 0 時不會重跑。
+
+```bash
+# 1. .env 補一把 per-profile 金鑰 (16 字元以上; 少於 16 會 fail-closed 全部 401)
+grep -q '^HERMES_SCIENTIST_API_KEY=' .env || \
+  printf 'HERMES_SCIENTIST_API_KEY=%s\n' "$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)" >> .env
+
+# 2. 重建 image 並套用 compose 改動
+scripts/prepare.sh && docker compose up -d --build
+
+# 3. 催三個既有的 one-shot (新的 devenv-expert-leases 會自己跑)
+docker compose up --force-recreate buzz-keys buzz-bootstrap tencentdb-bootstrap paperclip-bootstrap
+
+# 4. 驗證
+scripts/test-connectivity.sh && scripts/test-scientist.sh
+```
+
+三個 one-shot 都是冪等的: `buzz-keys` 只補缺的鑰匙 (既有的 relay/agent 身分不動,
+所以 community 與成員關係不受影響)、`tencentdb-bootstrap` 先 get 再 create、
+`paperclip-bootstrap` 是 reconcile 而非 create-only。
+```
+
+- [ ] **Step 5: 乾淨機器演練（破壞性 —— 先問過人再做）**
+
+⚠️ **這一步會刪掉所有資料**: `down -v` 之後 Buzz community 與全部對話、Paperclip 的
+issue 與 project、TencentDB 的記憶、prototype 目錄與 devenv 租約**全部重建**。
+AGENTS.md 的不變量 5 說這條路徑應該一次到位，而這正是在驗證那句話 —— 但驗證的代價
+是真實資料。**執行前必須取得使用者對「現在可以清掉」的明確同意**，不要自行判斷。
+
+同意之後：
+
+```bash
+docker compose down -v
+scripts/setup.sh
+```
+
+`setup.sh` 跑完後（第一次 build + mise seed 可能要數分鐘）：
+
+```bash
+scripts/test-connectivity.sh && scripts/test-scientist.sh
+```
+
+Expected: `24 pass, 0 fail` 與 `31 pass, 0 fail`，**中間沒有任何手動步驟**。
+
+其中三項需要環境條件而非程式碼，若 FAIL 先確認是不是這個原因：
+
+| 檢查 | 需要的前置 |
+|---|---|
+| `scientist is a relay member` | relay 上至少要有一個 channel —— 全新的 relay 還沒有人建過，用 Buzz 桌面端建一個再重跑 |
+| `the lease actually connects` | hermes image 沒有 psql，`docker compose exec hermes nix-add nixpkgs#postgresql` |
+| `Scientist agent exists on the board` | `paperclip-bootstrap` 要先 exit 0，看 `docker compose logs paperclip-bootstrap` |
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/audit-bootstrap.sh scripts/test-connectivity.sh SETUP.md
+git commit -m "$(cat <<'MSG'
+feat: make the scientist lane work out of the box
+
+Tasks 1-6 were all verified against a live stack by re-running one-shots
+by hand, which proves nothing about a fresh machine: compose does not
+re-run a one-shot whose container already exited 0. audit-bootstrap.sh
+asks the question that actually matters — does every piece of scientist
+state have an unattended producer, is nothing racing that producer, and
+is every producer idempotent.
+
+test-connectivity.sh gains the profile route because that is the script
+setup.sh tells people to run; without it a broken fresh install has
+nowhere to surface.
+
+SETUP.md gets the existing-install steps as one pasteable block rather
+than scattered across the plan. Fresh machines need none of it.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+MSG
+)"
+```
+
+---
+
 ## Verification Summary
 
 實作完成後這兩條都要綠：
 
 ```bash
-scripts/test-connectivity.sh   # 23 pass, 0 fail  — 既有功能沒被弄壞
+scripts/audit-bootstrap.sh     # 16 pass, 0 fail  — 每份狀態都有自動產生者
+scripts/test-connectivity.sh   # 24 pass, 0 fail  — 既有功能沒被弄壞 + 科學家路由活著
 scripts/test-scientist.sh      # 31 pass, 0 fail  — 科學家 lane 從 volume 到 board
 ```
 
@@ -1463,3 +1688,4 @@ scripts/test-scientist.sh      # 31 pass, 0 fail  — 科學家 lane 從 volume 
 
 1. **Buzz 發文者是 `scientist` 不是 `hermes`**（Task 3 Step 11）—— 這是「不共用參謀長身分」那條硬需求唯一的真實檢驗。
 2. **從 board 指派一張 issue 會叫醒科學家，dashboard 切 profile 看得到那次 session**（Task 5 Step 9）—— 這是整條鏈路的端到端證明。
+3. **`down -v` + `setup.sh` 之後兩條 gate 都綠，中間零手動步驟**（Task 7 Step 5）—— 這是「開箱即用」唯一算數的證明。**破壞性，執行前要拿到明確同意。**

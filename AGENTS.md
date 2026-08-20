@@ -55,6 +55,26 @@ Buzz  (或 hermes-dashboard chat / 未來 Telegram — 同一個 agent, 不同 p
 Lean Mode (拿掉 Paperclip、Hermes Kanban 轉正) 是 PRD 允許的另一種模式, 但**不可與現況混用** —
 兩個 canonical work plane 同時存在是明確禁止的。
 
+## 部署假設 (誰會跑這個 stack)
+
+**現況: 一個使用者、一台在跑的 stack、專案尚未對外開放。**
+
+由此推出兩條相反方向的規則, 兩條都要成立:
+
+- **不寫 migration / 升版腳本。** 既有那台**手動調整就好** —— 改動附一段可以整段貼的
+  指令即可 (放 `SETUP.md`), 不要為了一台機器建立一條要長期維護的升級路徑。
+  (`scripts/upgrade.sh` 是**另一回事** —— 它升的是 upstream submodule 的 tag, 不是遷移
+  我們自己產生的狀態。)
+- **但必須假設別人開箱即用。** 乾淨機器 `git clone` → `scripts/setup.sh` 之後,
+  **全部功能可用, 不需要任何手動補步驟**。所以每一份狀態 (金鑰、community membership、
+  board agent、meta registry 註冊、profile 目錄、租約……) 的產生者都得是 **compose 的
+  one-shot 或 entrypoint, 而且冪等**。
+
+**最容易騙過自己的地方**: compose 的 one-shot 在**容器已存在且 exit 0 時不會重跑**。
+所以開發時「我 `docker compose up --force-recreate <bootstrap>` 過, 它會動」對**乾淨
+安裝完全沒有證明力** —— 那台機器上根本沒有那個容器, 走的是另一條路徑。真正算數的驗證
+只有 `docker compose down -v` + `scripts/setup.sh` 之後兩條 gate 直接綠。
+
 ## 常用指令
 
 ```bash
