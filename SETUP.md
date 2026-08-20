@@ -17,7 +17,14 @@ git clone <this-repo-url> opc-stack && cd opc-stack
 git submodule update --init --recursive
 cp .env.example .env
 # edit .env: fill in OPENAI_API_KEY (OpenCode Go — one key for the stack),
-#            set BUZZ_RELAY_URL to this machine's LAN IP for device access
+#            and BUZZ_RELAY_URL — REQUIRED: change it from the ws://localhost:3000
+#            default to this machine's LAN/tailnet IP (e.g. ws://192.168.1.10:3000).
+#            The hermes container (expert agents) does not share the relay's
+#            network namespace, so the localhost default points at itself there
+#            and their Buzz posts go nowhere; separately, the relay binds ONE
+#            canonical host and rejects any other host SILENTLY (invariant 1 —
+#            one canonical Buzz host = one community, enforced by NIP-42/98
+#            signature verification), so this is not just a device-access nice-to-have
 scripts/setup.sh          # same as: submodule init + prepare + up -d --build
 scripts/test-connectivity.sh
 ```
@@ -30,6 +37,18 @@ service endpoint and the frontdoor→relay link without ever calling an LLM.
 > Note: after `docker compose down -v`, relay/agent keys, community,
 > tencentdb admin, and paperclip bootstrap are all recreated automatically by
 > the one-shot bootstrap containers. Fresh installs need no manual signing.
+
+> **Known limit:** `scripts/setup.sh` warns but does not stop if
+> `BUZZ_RELAY_URL` is still the `ws://localhost:3000` default — a clean
+> machine will otherwise come up green on every check except one. Expert
+> agents (e.g. the scientist profile) sign into Buzz from the `hermes`
+> container, which cannot reach `ws://localhost:3000`, so
+> `scripts/test-scientist.sh`'s "is a relay member" check fails until you set
+> a real `BUZZ_RELAY_URL` and recreate `buzz`/`frontdoor`/`hermes`. This is
+> not a regression — the previous default (`ws://buzz:3000`) was silently
+> non-canonical instead, which is worse — but it is a real manual step this
+> guide is not able to script away, since only you know this machine's
+> LAN/tailnet IP.
 
 ## First boot: verify the toolchain
 
@@ -147,9 +166,11 @@ OpenAI-compatible endpoint works for every project above.
 
 The front-door Hermes (buzz-acp → `hermes acp`) is added as a relay member
 automatically by the `buzz-bootstrap` one-shot container on first boot, and
-runs in the relay's network namespace (its `BUZZ_RELAY_URL` is the same
-`ws://localhost:3000` the relay's community binding is derived from). Chat
-with it in any Buzz channel via @mention.
+runs in the relay's network namespace, so it always reaches the relay
+regardless of what `BUZZ_RELAY_URL` resolves to — but it still uses the SAME
+canonical `BUZZ_RELAY_URL` you set in `.env` (the value the relay's community
+binding is derived from), not a hardcoded `ws://localhost:3000`. Chat with it
+in any Buzz channel via @mention.
 
 To open the relay instead (LAN-only self-hosting), set
 `BUZZ_REQUIRE_RELAY_MEMBERSHIP=false` in `.env` before first `up` (any

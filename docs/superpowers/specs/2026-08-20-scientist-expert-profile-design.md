@@ -268,6 +268,20 @@ hermes image 沒有。實測把 `/usr/local/bin/buzz.bin` 從 frontdoor 容器�
 `FROM ${IMAGE} AS <alias>` + `COPY --from=<alias>` pattern (BuildKit 的 `--from`
 不展開變數)。
 
+### 4.10 已知的 open-box 限制: relay 預設值下 scientist 進不了 relay
+
+`.env.example` 的 `BUZZ_RELAY_URL` 預設仍是 `ws://localhost:3000` (為了跟其餘服務
+一致的 fallback, 不是「可用」的意思)。`hermes` 容器沒有跟 buzz relay 共用 network
+namespace, 所以在這個預設值下專家 (scientist) 的 buzz wrapper 就算解出正確身分,
+連線目標仍然指向 hermes 自己, 貼文送不出去。實測: 乾淨機器跑完
+`scripts/setup.sh`(只警告不擋) 後, `scripts/test-scientist.sh` 的「scientist is a
+relay member」一項會 FAIL, 直到操作者把 `BUZZ_RELAY_URL` 改成這台機器可路由的
+LAN/tailnet IP 並重啟 `buzz`/`frontdoor`/`hermes`。這不是 regression — 舊預設
+`ws://buzz:3000` 是靜默地不合法 (violates 不變量 1), 比現在「已知且會被 gate 擋到」
+更差 — 但驗收條件「乾淨機器跑完 setup.sh 免手動步驟」在這一項上目前不成立, 記在這
+裡當作已量測的事實, 而不是留給 gate 才發現。SETUP.md 的 Quickstart 區塊有對應的
+operator-facing 提示。
+
 ## 5. 架構決策
 
 ### 5.1 容器形狀: multiplex, 不新增 service

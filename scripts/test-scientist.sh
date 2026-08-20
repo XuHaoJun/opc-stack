@@ -94,18 +94,28 @@ checkout "scientist is a relay member" '"channel_id"' \
 # chief of staff's key genuinely sits at /opt/data/.agent.nsec (precondition
 # asserted below, else this check would be vacuous) — with THIS container's
 # own unscoped HERMES_HOME=/opt/data, the wrapper must still resolve no
-# identity. Assert that as a property, not a reworded message string: the
-# buzz CLI's own --help documents its exit codes ("3=auth error"), and with
-# no BUZZ_PRIVATE_KEY it refuses locally — before any network call — with
-# exit 3. A wrapper that leaked the chief of staff's key here would instead
-# exit 0 (or fail later, for an unrelated reason).
-check "dashboard wrapper yields NO identity (chief of staff's key must stay unreachable)" \
-    docker compose exec -T -u 10000 -e HOME=/opt/data -e HERMES_HOME=/opt/data hermes-dashboard sh -c '
+# identity.
+#
+# Fix round 3 (review finding 1): this used to assert "buzz exits 3", on the
+# theory that a missing key makes the CLI refuse locally before any network
+# call. But upstream/buzz/crates/buzz-cli/src/error.rs:87-104 maps a relay
+# 401/403 to the SAME exit code 3 — the check only discriminated because this
+# container happens to have no reachable BUZZ_RELAY_URL, so a LEAKED key
+# would instead fail on the network with exit 2. That is incidental, not the
+# property we care about, and a later change to give hermes-dashboard a
+# working relay URL would make a real leak pass green. Assert the property
+# directly instead: run the wrapper's own resolution logic — with its final
+# `exec` line stripped off and replaced with something that prints
+# $BUZZ_PRIVATE_KEY — and require the result to be empty. This never invokes
+# the real buzz binary (no network involved) and is blind to how many exit
+# codes the CLI happens to share.
+check "dashboard wrapper resolves to NO identity (chief of staff's key must stay unreachable)" \
+    docker compose exec -T -u 10000 -e HOME=/opt/data -e HERMES_HOME=/opt/data hermes-dashboard sh -c "
         test -s /opt/data/.agent.nsec || exit 9
         unset BUZZ_PRIVATE_KEY
-        buzz channels list >/dev/null 2>&1
-        test $? -eq 3
-    '
+        got=\$(sed '\$d' /usr/local/bin/buzz | { cat; printf '%s\n' 'printf \"%s\" \"\$BUZZ_PRIVATE_KEY\"'; } | sh)
+        [ -z \"\$got\" ]
+    "
 
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,

@@ -301,6 +301,18 @@ opc_env_value() { # <env-file> <name>
 # The frontdoor image keeps its own, different wrapper
 # (patches/buzz/frontdoor-entrypoint.sh): there the chief of staff's key at
 # $HERMES_HOME/.agent.nsec IS the correct identity.
+#
+# Fix round 3 (review finding 2, defence in depth): the case match above is
+# purely textual — it accepts any $HERMES_HOME string that LOOKS like
+# "$_root/<one-component>", without asking whether that component is a real
+# profile directory or a symlink pointing somewhere else entirely (e.g. at
+# /opt/data, which in hermes-dashboard is the chief of staff's home). Reaching
+# this requires write access to the shared hermes-profiles volume root, which
+# every expert already has (all experts run as uid 10000) — so this closes a
+# reachable path, not a hypothetical one. Reject outright rather than resolve
+# with realpath: a component that is itself a symlink is never a profile
+# directory the seeding function created, so refusing it can never break a
+# legitimate profile.
 if [ -x /usr/local/bin/buzz.bin ]; then
     cat > /usr/local/bin/buzz <<EOF
 #!/bin/sh
@@ -314,7 +326,13 @@ case "\$_hh" in
         _rest="\${_rest%/}"
         case "\$_rest" in
             ''|.|..|*/*) ;;   # profiles root, dot paths, or nested deeper
-            *) _nsec="\$_root/\$_rest/.agent.nsec" ;;
+            *)
+                if [ -L "\$_root/\$_rest" ]; then
+                    : # symlinked profile component — never an identity source
+                else
+                    _nsec="\$_root/\$_rest/.agent.nsec"
+                fi
+                ;;
         esac
         ;;
 esac
