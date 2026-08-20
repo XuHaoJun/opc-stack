@@ -6,9 +6,9 @@ Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-
 
 - **`upstream/`** = 4 個 git submodule, pin 在 upstream tag commit (乾淨 checkout, 永不直接編輯): buzz `desktop-v0.5.14` / hermes `v2026.8.16` / paperclip `canary/v2026.722.1-canary.0` / tencentdb `v2.0.0`。
 - **`patches/`** = 全部本地客製 (opc/Dockerfile、entrypoints、one-shot scripts)。build 前 `scripts/prepare.sh` 把 `patches/<proj>/` rsync 進 `upstream/<proj>/opc/` (冪等)。**改 image 一律改 `patches/`, 不改 upstream 主 Dockerfile。**
-- **`patches/nix-seed/`** = 第一個不屬 submodule 的 build context (compose service `nix-seed`, one-shot)。pin nix 2.35.2 + nixpkgs `8be7bd0c83f1`, 建 `/nix-seed` (cp -al hardlink) 含 11 工具 (ripgrep jq fd htop bat just mise gh procps iproute2 lsof — 後三個是 ps/pkill/ss/lsof, 沒有它們連「誰在跑」「誰佔著 port」都查不了)。各 build service `depends_on nix-seed` + `FROM ${NIX_SEED_IMAGE} AS nix-seed` / `COPY --from=nix-seed` 取用 (BuildKit 不支援 `--from` 變數展開, 故用 stage alias)。改 seed 工具清單 = 改這個 Dockerfile, seed 只重裝 1 次。
+- **`patches/nix-seed/`** = 第一個不屬 submodule 的 build context (compose service `nix-seed`, one-shot)。pin nix 2.35.2 + nixpkgs `8be7bd0c83f1`, 建 `/nix-seed` (cp -al hardlink) 含 12 工具 (ripgrep jq fd htop bat just mise gh procps iproute2 lsof postgresql — procps/iproute2/lsof 是 ps/pkill/ss/lsof, 沒有它們連「誰在跑」「誰佔著 port」都查不了; postgresql 是為了 **client** psql/pg_isready — 「租約真的連得上」這種檢查必須在乾淨機器上直接成立, nixpkgs 沒有 client-only 切分所以 server binary 一起進來 ~150MB, 沒有任何東西會啟動它)。各 build service `depends_on nix-seed` + `FROM ${NIX_SEED_IMAGE} AS nix-seed` / `COPY --from=nix-seed` 取用 (BuildKit 不支援 `--from` 變數展開, 故用 stage alias)。改 seed 工具清單 = 改這個 Dockerfile, seed 只重裝 1 次。
 - **prototype lane** (`prototype` CLI, paperclip image): 一個 prototype = 一個 Paperclip project + `/prototypes/<name>` (自己的 git) + 一個 devenv 租約 + 一個掛在 **project workspace** 上的 runtime service。服務掛 project 層而非 execution workspace,所以沒有 issue 在跑時宣告仍在,**preview URL 跨 session 不變**。`prototype create` 冪等,同時是「建立」與「用名字接續」的路徑。設計見 `docs/superpowers/specs/2026-08-18-devenv-http-preview-design.md`。
-- **devenv** (`docker-compose.yml` 的 `devenv-pg` / `devenv-valkey`): paperclip agent 的開發資源租約。agent 跑 `devenv provision <key>` 拿到獨立的 postgres DB (pgvector) + valkey ACL user, 寫進 workspace `.env` 的 `DATABASE_URL`/`VALKEY_URL`。刻意不給 agent docker (不變量 6); 設計見 `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md`。
+- **devenv** (`docker-compose.yml` 的 `devenv-pg` / `devenv-valkey`): agent 的開發資源租約, **兩類租戶**。(1) paperclip agent 自己跑 `devenv provision <key>`, 拿到獨立的 postgres DB (pgvector) + valkey ACL user, 寫進 workspace `.env` 的 `DATABASE_URL`/`VALKEY_URL`。(2) **hermes 專家 agent 有常駐租約**: one-shot `devenv-expert-leases` (跑 paperclip image, 因為 devenv CLI 只住在那裡) provision `scientist` 到 `/keys/devenv-scientist.env`, hermes entrypoint 的 `opc_seed_expert_profile()` 把它 merge 進 profile 的 `.env`。**租約壞掉只會降級專家, 不會擋 gateway 起來** —— one-shot 一律 exit 0, 失敗時印 WARNING (詳見不變量 8)。刻意不給 agent docker (不變量 6); 設計見 `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md`。
 - 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉; **專家 agent 的宿主** — multiplex 服務 `hermes-profiles` volume 上的每個 profile, 目前有 `agt-scientist`) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
 - LLM: OpenCode Go (`https://opencode.ai/zen/go/v1`)。`.env` 填 `OPENAI_API_KEY` 一個 key 全棧通用;Hermes custom provider runtime 讀 `OPENAI_API_KEY` + `OPENAI_BASE_URL`。shared gateway/dashboard/Paperclip/TencentDB 的 model 用 `OPENAI_MODEL`（預設 deepseek-v4-flash）,frontdoor relay 用 `BUZZ_AGENT_MODEL`（預設 deepseek-v4-pro）;模型選擇以 `config.yaml` 為 source of truth。
 
@@ -105,7 +105,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 2. **Hermes Kanban 關閉** (Paperclip 是唯一 work plane): hermes/frontdoor 的 config.yaml seed 有 `agent.disabled_toolsets: [kanban]` + dispatcher off。別把它們開回來。
 3b. **兩條入口、兩個身分**: entrypoint 以 root 起再降權到 runtime user, 但 `docker compose exec` **永遠**落在 root — 兩者共用同一批可寫的樹, 而**誰先建立誰擁有**。paperclip entrypoint 的 `opc_own_runtime_trees` 每次開機用 first-mismatch `find` 探測 `/prototypes` 與 runtime user 的 cache, 不符才 `chown -R`(乾淨時只花一次 metadata walk)。之所以值得主張這個不變量, 是因為**症狀都不像權限問題**: git 說 `dubious ownership` 然後 commit 靜靜失敗、Next 的 `EACCES: mkdir .next/dev` 只以 API 500 呈現、pnpm 說 `attempt to write a readonly database`。這與 `/keys` 是**不同**問題 — 那邊是刻意的 600 root 機密, 解法是鏡像一份給 runtime uid, 不是 chown。
 3. **nix: 一個 store、一個 daemon、兩層 profile**。`/nix` 是**單一共用 volume `opc-nix`** (buzz/frontdoor/hermes/hermes-dashboard/paperclip 全掛同一個), 由 compose service **`nix-daemon`** 獨佔擁有 (`patches/nix-seed/opc-nix-daemon.sh`, 與 nix-seed 同 image 的長駐角色)。之所以能一個 daemon 服務全部容器: **unix socket 放在共用 volume 上跨容器連得到** (實測: daemon 在 hermes、client 在 hermes-dashboard 以 uid 10000 連上)。daemon 獨佔的原因是這些事只能有一個 writer: volume seeding、系統 profile 自癒、共用 agent profile、wrapper 發佈 —— 四個容器同時對同一個 store 自癒就是 race。
-   - **兩層 profile**: 系統層 `per-user/root/profile` (11 工具, **只有 root 能改**) 在 PATH **最前**; 共用 agent 層 `profiles/opc-agents/profile` 在其後。所以 agent 裝的東西全棧可見, 但**蓋不掉**系統工具, 自癒也騙不了 (偵測讀 profile 路徑, 不是 `command -v`)。**加新 seed 工具時必須同時加進偵測條件**, 否則既有 volume 永遠收不到它。
+   - **兩層 profile**: 系統層 `per-user/root/profile` (12 工具, **只有 root 能改**) 在 PATH **最前**; 共用 agent 層 `profiles/opc-agents/profile` 在其後。所以 agent 裝的東西全棧可見, 但**蓋不掉**系統工具, 自癒也騙不了 (偵測讀 profile 路徑, 不是 `command -v`)。**加新 seed 工具時必須同時加進偵測條件** (`patches/nix-seed/opc-nix-daemon.sh` 的第 3 段, 與 Dockerfile 的清單是兩個必改的地方), 否則既有 volume 永遠收不到它 —— image 的 `/nix-seed` 只在 volume 空的時候被複製, 既有 volume 的唯一入口是自癒。自癒與 Dockerfile 用**同一個 pin** (`$NIXPKGS`), 否則既有機器拿到的版本會與乾淨機器不同。
    - **agent 自主安裝**: nix 從 single-user 改為 **multi-user**, 非 root 的 agent 自動偵測 socket 即可安裝。權限靠群組 **`nixagents` gid 3000** (跨 image 必須同數字 —— 共用 volume 上比對的是數字); hermes 的 s6-setuidgid 與 paperclip 的 gosu 都會帶 supplementary groups, 但 frontdoor 的 `opc-hermes-acp.sh` 用 `setpriv --groups 3000` (該 image 沒有 uid 10000 的 passwd entry, `--init-groups` 不能用, 而原本的 `--clear-groups` 會把群組全丟掉)。
    - **agent 一律走 `nix-add` / `nix-rm` / `nix-list`** (daemon 發佈到 `/nix/var/nix/opc-bin`), **不要裸 `nix profile add`**。兩個理由: 裸 add 進的是呼叫者自己的 profile, 不在別人 PATH 上 (「裝一次大家都有」無聲失效); 而且它會在 `$HOME` 留下 resolve 得進 `/nix/store` 的 symlink 鏈, 而 hermes-dashboard 的 Files page 用無 per-entry 保護的 list comprehension 建清單 (`web_server.py:2562-2567`), 對逃出 managed root 的 entry 直接 403 (`:2425`) —— **一條 symlink 就讓整個目錄列不出來**。帶 `--profile` 時 symlink 指向 HOME 內尚未存在的路徑, 不會逃逸 (兩種都實測過)。frontdoor entrypoint 另有開機清除當保險。
    - root 經 `docker exec` 的 `nix profile add` 仍然是**系統層**安裝 (SETUP.md 的既有語意不變)。加 tool 用 `add` (deprecated `install` 會蓋掉 profile)。
@@ -118,18 +118,33 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
    server 的 5 個週期性 timer 沒有一個碰 workspace/project)。唯一的刪除路徑是
    `prototype destroy <name>`, 它會先列出將刪的東西並要求打名字確認, 且**刻意不提供
    `--yes`** — 那個旗標會讓這條規則變成一行 script 就能繞過。閒置 7 天只停 process,
-   不動資料。
+   不動資料。手動回收面共兩條: prototype 走 `prototype destroy <name>`; **hermes 專家
+   的常駐 devenv 租約走 `devenv release scientist`** (在 paperclip 容器內跑) —— 專家退役
+   時要記得, 否則那顆 DB 與 valkey 槽位會一直佔著, 而 `devenv-expert-leases` one-shot
+   每次 `up` 又會把它 provision 回來 (要真的退, 連 one-shot 一起從 compose 拿掉)。
 7. **`upstream/` 是 submodule** — 直接改它 = 改壞版控。改動一律放 `patches/`。升版後 (新 tag checkout) patches 可能不兼容, 升版前 review upstream changelog。
 8. **專家 agent 住在 `hermes-profiles` volume, 而 `hermes` 容器不得掛 `frontdoor-hermes`。**
    兩顆 volume 分開不是整理癖: `frontdoor-hermes` 根目錄有參謀長的 `.agent.nsec`
    (600 uid 10000), 而專家跑在**同一個 uid**, hermes 的 cross-profile guard 又不涵蓋
-   terminal tool (`agent/file_safety.py:443`, 上游原話「不是 security boundary」)。
+   terminal tool (`agent/file_safety.py:427`, 上游原話「Soft guard, NOT a security boundary: the agent runs as the same OS user」)。
    整顆掛進去 = 一行 `cat` 就拿到參謀長的 Buzz 身分, 之後它發的文都掛在參謀長名下。
    dashboard 兩顆都掛是刻意的 —— 它只讀不跑, 那是「一次登入看到全部 agent」的來源
    (`list_profiles()` 列舉 `$HERMES_HOME/profiles`)。
    **專家之間不隔離** (同容器同 uid), 這是換 8 倍記憶體的顯式取捨: 每專家一容器是
-   ~118MB × N (Python heap 是 RssAnon, 行程間不共享), multiplex 是 ~148MB + ~9MB × N。
+   ~118MB × N (Python heap 是 RssAnon, 行程間不共享), multiplex 是 ~148MB + ~9MB × N
+   (量測見 `docs/superpowers/specs/2026-08-20-scientist-expert-profile-design.md` §4.6)。
    要對某個專家硬隔離, 用上游 `container_boot.py` 的 per-profile s6 slot, 資料不用搬。
+   **專家的 devenv 租約壞掉時只降級專家, 不擋 gateway。** `hermes` 用
+   `service_completed_successfully` 等 `devenv-expert-leases` 是為了排序 (乾淨
+   `setup.sh` 必須先有租約檔才輪到 profile seeding), 但那條邊同時意味著 one-shot 任何
+   非零 exit 都會讓整個 agent runtime 起不來 —— valkey 槽位用罄 (`devenv` exit 3)、salt
+   輪替、admin 密碼錯、後端剛好不健康, 全都算。所以 one-shot **一律 exit 0**, 失敗時印
+   `[devenv-expert-leases] WARNING`(並把 provisioner 輸出裡的密碼遮掉再印), 讓專家退化成
+   「沒有 `DATABASE_URL`/`VALKEY_URL`」而不是全棧起不來。與
+   `patches/paperclip/opc-devenv-seed.sh` 同一個立場: devenv 的問題要在**用到資源時**炸,
+   不是在開機時。偵測器是 `scripts/test-scientist.sh` 的 `── devenv lease ──` 三條
+   (含一條真的用租約 `psql` 連上去), 修完重跑
+   `docker compose up devenv-expert-leases` 即可 —— 它是冪等的。
    **dashboard 容器的 `command` argv[0] 必須是 `dashboard`** —— upstream 用
    `/proc/1/cmdline` 判斷要不要跳過 profile reconcile, 判錯就是兩個容器搶
    `logs/gateways/<profile>/lock` 的 s6-log restart storm。

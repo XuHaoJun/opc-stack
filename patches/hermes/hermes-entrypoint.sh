@@ -668,17 +668,39 @@ PYEOF
     # Merged rather than seeded-once: the lease is re-derived from
     # DEVENV_SECRET_SALT on every provision (that is what makes it idempotent),
     # so a salt rotation must be able to reach an existing profile.
+    #
+    # Every line below is defensive about the lease file's CONTENT, because a
+    # parse slip here does not degrade the lease — it aborts the entrypoint
+    # under `set -eu` and the container never boots. Specifically: a line with
+    # no `=` would make $_k the whole line, and any `/` in it then terminates
+    # the sed address early and sed exits 1. The `|| [ -n "$_line" ]` is the
+    # usual unterminated-last-line guard (same class as 5879bde).
     _lease="/keys/devenv-${_p#agt-}.env"
     if [ -f "$_lease" ]; then
-        while IFS= read -r _line; do
+        _merged=0
+        while IFS= read -r _line || [ -n "$_line" ]; do
             case "$_line" in
                 ''|'#'*) continue ;;
+                *=*) ;;
+                *) continue ;;
             esac
             _k="${_line%%=*}"
-            sed -i "/^${_k}=/d" "$_ph/.env"
+            [ -n "$_k" ] || continue
+            # Escape everything sed treats specially in a /…/ address,
+            # including the delimiter itself.
+            _ke="$(printf '%s' "$_k" | sed 's/[][\\.^$*\/]/\\&/g')"
+            sed -i "/^${_ke}=/d" "$_ph/.env"
             printf '%s\n' "$_line" >> "$_ph/.env"
+            _merged=$((_merged + 1))
         done < "$_lease"
-        echo "[hermes] $_p: devenv lease merged into profile .env"
+        # Silence on an empty/comment-only lease file: "merged" must mean
+        # something actually reached the profile, or the log agrees with a
+        # gate that is red.
+        if [ "$_merged" -gt 0 ]; then
+            echo "[hermes] $_p: devenv lease merged into profile .env ($_merged keys)"
+        else
+            echo "[hermes] WARNING $_p: $_lease has no assignments — no devenv lease merged" >&2
+        fi
     fi
 
     echo "[hermes] expert profile ready: $_p"

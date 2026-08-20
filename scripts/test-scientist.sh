@@ -228,7 +228,7 @@ echo "── devenv lease ──"
 check "profile .env carries DATABASE_URL" \
     docker compose exec -T hermes sh -c "grep -q '^DATABASE_URL=postgres' /opt/data/profiles/$PROFILE/.env"
 check "profile .env carries VALKEY_URL" \
-    docker compose exec -T hermes sh -c "grep -q '^VALKEY_URL=' /opt/data/profiles/$PROFILE/.env"
+    docker compose exec -T hermes sh -c "grep -q '^VALKEY_URL=redis' /opt/data/profiles/$PROFILE/.env"
 check "the lease actually connects" \
     docker compose exec -T -u 10000 hermes sh -c "psql \"\$(sed -n 's/^DATABASE_URL=//p' /opt/data/profiles/$PROFILE/.env)\" -tAc 'select 1'"
 

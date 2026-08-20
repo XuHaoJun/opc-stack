@@ -25,6 +25,9 @@ OPC_BIN=/nix/var/nix/opc-bin
 # Must match the `nixagents` group baked into every service image. Compared
 # NUMERICALLY across the shared volume — the name is irrelevant there.
 NIXAGENTS_GID=3000
+# Must stay equal to the rev the Dockerfile seeds from, so the self-heal below
+# reinstates exactly what a clean machine got.
+NIXPKGS=github:NixOS/nixpkgs/8be7bd0c83f1
 
 export NIX_SSL_CERT_FILE="${NIX_SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
@@ -53,12 +56,18 @@ printf 'experimental-features = nix-command flakes\n' > /nix/etc/nix/nix.conf
 # Add every NEW seed tool to this condition or existing volumes never get it.
 if [ ! -e "$ROOT_PROFILE/bin/rg" ] || [ ! -e "$ROOT_PROFILE/bin/mise" ] \
     || [ ! -e "$ROOT_PROFILE/bin/just" ] || [ ! -e "$ROOT_PROFILE/bin/gh" ] \
-    || [ ! -e "$ROOT_PROFILE/bin/ps" ] || [ ! -e "$ROOT_PROFILE/bin/ss" ]; then
+    || [ ! -e "$ROOT_PROFILE/bin/ps" ] || [ ! -e "$ROOT_PROFILE/bin/ss" ] \
+    || [ ! -e "$ROOT_PROFILE/bin/psql" ]; then
     echo "[nix-daemon] seed tools missing from system profile; re-adding"
+    # Same pinned rev as the Dockerfile's seed install. Bare `nixpkgs#` would
+    # resolve through the flake registry to whatever unstable is today, so the
+    # heal would (a) need to fetch and build a second copy of tools the store
+    # already has and (b) hand an existing volume different versions from the
+    # ones a clean machine gets.
     HOME=/root nix profile add --profile "$ROOT_PROFILE" \
-        nixpkgs#ripgrep nixpkgs#jq nixpkgs#fd nixpkgs#htop nixpkgs#bat \
-        nixpkgs#just nixpkgs#mise nixpkgs#gh \
-        nixpkgs#procps nixpkgs#iproute2 nixpkgs#lsof || true
+        "$NIXPKGS#ripgrep" "$NIXPKGS#jq" "$NIXPKGS#fd" "$NIXPKGS#htop" "$NIXPKGS#bat" \
+        "$NIXPKGS#just" "$NIXPKGS#mise" "$NIXPKGS#gh" \
+        "$NIXPKGS#procps" "$NIXPKGS#iproute2" "$NIXPKGS#lsof" "$NIXPKGS#postgresql" || true
 fi
 
 # ── 4. Shared agent profile ──────────────────────────────────────────────

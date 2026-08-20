@@ -730,6 +730,22 @@ services:
   #
   # There is no automatic reclamation anywhere in this stack (invariant 6b);
   # release it by hand with `devenv release scientist` if the expert is retired.
+  #
+  # ALWAYS exits 0. `hermes` waits on this one-shot completing (it must, so a
+  # clean setup.sh has the lease on disk before the profile .env is seeded),
+  # which means any non-zero exit here would take the whole agent runtime down:
+  # exhausted valkey slots (`devenv` exits 3), a rotated DEVENV_SECRET_SALT, a
+  # wrong admin password, a backend that came up unhealthy. That inverts the
+  # stance this stack already took for the same subsystem in
+  # patches/paperclip/opc-devenv-seed.sh — a devenv problem must surface when
+  # the resource is USED, not as the runtime failing to start. So a failed
+  # provision degrades the scientist's database access (no DATABASE_URL /
+  # VALKEY_URL in its profile .env) and the three `── devenv lease ──` checks
+  # in scripts/test-scientist.sh are the detector for that state.
+  #
+  # `paperclip: service_started`, not service_healthy: all this needs is the
+  # image's devenv CLI reaching devenv-pg/devenv-valkey directly. A board that
+  # is slow to become healthy is not a reason to hold the gateway's start.
   devenv-expert-leases:
     image: ${IMAGE_PREFIX:-opc}/paperclip:local
     restart: "no"
@@ -739,13 +755,31 @@ services:
       devenv-valkey:
         condition: service_healthy
       paperclip:
-        condition: service_healthy
+        condition: service_started
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        devenv provision scientist --env-file /keys/devenv-scientist.env
-        chmod 600 /keys/devenv-scientist.env
-        echo "[devenv-expert-leases] scientist lease written"
+        # Output is captured, not streamed: `devenv provision` prints the
+        # tenant DATABASE_URL/VALKEY_URL, passwords and all, and
+        # `docker compose logs` keeps them for the life of the container.
+        # The lease belongs in the 600 file, nowhere else.
+        _rc=0
+        _out="$$(devenv provision scientist --env-file /keys/devenv-scientist.env 2>&1)" || _rc=$$?
+        if [ "$$_rc" -eq 0 ]; then
+            chmod 600 /keys/devenv-scientist.env \
+                || echo "[devenv-expert-leases] WARNING: could not chmod 600 the lease file" >&2
+            echo "[devenv-expert-leases] scientist lease written -> /keys/devenv-scientist.env"
+        else
+            echo "[devenv-expert-leases] WARNING: devenv provision scientist failed (exit $$_rc)." >&2
+            echo "[devenv-expert-leases] WARNING: the scientist keeps whatever lease it already had; a first" >&2
+            echo "[devenv-expert-leases] WARNING: boot leaves it with no DATABASE_URL/VALKEY_URL. Diagnose with" >&2
+            echo "[devenv-expert-leases] WARNING: 'scripts/test-scientist.sh' (the devenv lease block) and re-run" >&2
+            echo "[devenv-expert-leases] WARNING: 'docker compose up devenv-expert-leases'. Provisioner output:" >&2
+            # Redact rather than drop: an error can legitimately quote a URL,
+            # and the password is the only part that must not be logged.
+            printf '%s\n' "$$_out" | sed 's#\(://[^:/@]*\):[^@]*@#\1:***@#g; s/^/[devenv-expert-leases]   /' >&2
+        fi
+        exit 0
     environment:
       DEVENV_OWNER: scientist
       # Same admin-connection env the paperclip service uses (line ~625

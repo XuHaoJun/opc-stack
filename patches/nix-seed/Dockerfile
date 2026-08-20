@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 #
 # OPC shared nix seed — the ONE place nix gets installed. Produces
-# /nix-seed (nix 2.35.2 + 11 pinned tools) which the buzz/hermes/paperclip
+# /nix-seed (nix 2.35.2 + 12 pinned tools) which the buzz/hermes/paperclip
 # images COPY in. Tool-list changes rebuild ONLY this image; service images
 # just re-COPY the layer (seconds).
 #
@@ -56,6 +56,13 @@ RUN groupadd -r nixbld \
         github:NixOS/nixpkgs/8be7bd0c83f1#procps \
         github:NixOS/nixpkgs/8be7bd0c83f1#iproute2 \
         github:NixOS/nixpkgs/8be7bd0c83f1#lsof \
+        # postgresql is here for its CLIENT (psql/pg_isready): a devenv lease
+        # is only real if something can connect with it, and that check has to
+        # work on a clean machine from scripts/setup.sh with no `nix-add` by
+        # hand. nixpkgs has no client-only split, so the server binaries come
+        # along (~150MB closure, most of it icu4c, paid once in the shared
+        # store). Nothing starts a postgres here — devenv-pg is the server.
+        github:NixOS/nixpkgs/8be7bd0c83f1#postgresql \
     && cp -al /nix /nix-seed
 
 # Two roles, one image:
