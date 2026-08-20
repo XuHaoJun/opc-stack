@@ -236,6 +236,12 @@ COPY opc/memory_tencentdb/ /opt/hermes/memory_tencentdb/
 COPY opc/SOUL.md /opt/hermes/SOUL.md
 COPY opc/skills/paperclip-api/ /opt/hermes/skills/paperclip-api/
 
+# Expert profile identities. Same contract as SOUL.md above: the image is the
+# source of truth and the entrypoint overwrites the volume copy every boot,
+# because config.yaml is not a safe place for a rule that must hold (hermes
+# migrates it — this repo lost a seeded system_prompt that way).
+COPY opc/profiles/ /opt/hermes/profiles/
+
 # Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
 # above); a tool-list change rebuilds only the nix-seed image.
 # `nixagents` (gid 3000) is how an unprivileged agent gets write access to

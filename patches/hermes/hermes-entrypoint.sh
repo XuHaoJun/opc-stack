@@ -500,6 +500,16 @@ YAML
         cp -r /opt/hermes/skills/paperclip-api "$_ph/skills/paperclip-api"
     fi
 
+    # Identity, overwritten every boot from the image — same reasoning as the
+    # default profile's SOUL.md. Note this file is deliberately NOT a copy of
+    # the front door's: the "you are not the implementer" rule constrains the
+    # triage role, and applying it here would break the experiment loop the
+    # expert exists to run.
+    if [ -f "/opt/hermes/profiles/$_p/SOUL.md" ]; then
+        cp "/opt/hermes/profiles/$_p/SOUL.md" "$_ph/SOUL.md"
+        echo "[hermes] $_p: synced SOUL.md"
+    fi
+
     # Runtime-uid key mirror. /keys is mounted read-only and its files are
     # 600 root, so the agent (uid 10000) and its terminal children cannot read
     # them there. The failure mode is silent and misdirected: an empty key
@@ -521,6 +531,23 @@ YAML
         cp /keys/paperclip-api.key "$_ph/.paperclip-api.key"
         chown "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$_ph/.paperclip-api.key" 2>/dev/null || true
         chmod 600 "$_ph/.paperclip-api.key"
+    fi
+
+    # Autonomous experiment queue. Idempotent by job name: `cron create` would
+    # otherwise add a duplicate on every boot, and duplicates are invisible
+    # until the agent starts waking up twice as often for no stated reason.
+    #
+    # The prompt deliberately does NOT say "start an experiment": an empty
+    # notebook should produce silence, not invented work. Filing is capped at
+    # backlog, which wakes nobody (issue-assignment-wakeup.ts).
+    if [ -x /opt/hermes/bin/hermes ]; then
+        if ! HERMES_HOME="$_ph" /opt/hermes/bin/hermes cron list 2>/dev/null | grep -q "experiment-queue"; then
+            HERMES_HOME="$_ph" /opt/hermes/bin/hermes cron create '0 9 * * 1' \
+                'Review your experiment notebook (memories/). Is there an open question worth an experiment this week? If yes, run it and report what you found — method and numbers, including anything that did not work. If there is nothing worth doing, say so and stop; do not invent work. If a finding is worth someone else acting on, file it as a Paperclip issue at status=backlog.' \
+                --name experiment-queue >/dev/null 2>&1 \
+                && echo "[hermes] $_p: seeded cron job experiment-queue" \
+                || echo "[hermes] WARNING $_p: could not seed cron job experiment-queue" >&2
+        fi
     fi
 
     echo "[hermes] expert profile ready: $_p"

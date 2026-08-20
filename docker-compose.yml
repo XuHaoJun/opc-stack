@@ -790,6 +790,11 @@ services:
       TDAI_LLM_API_KEY: ${OPENAI_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
       TDAI_LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}}
       TDAI_LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENAI_MODEL:-deepseek-v4-flash}}
+      # Exposed under these (non-TDAI_-prefixed) names too so an operator can
+      # `docker compose exec tencentdb-core` and hit the gateway with the
+      # same admin credentials scripts/test-scientist.sh uses.
+      TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
+      TENCENTDB_ADMIN_USER_KEY: ${TENCENTDB_ADMIN_USER_KEY:-}
     ports:
       - "${TENCENTDB_CORE_PORT:-8420}:8420"
     volumes:
@@ -831,6 +836,7 @@ services:
       TENCENTDB_TEAM_NAME: ${TENCENTDB_TEAM_NAME:-OPC}
       TENCENTDB_AGENT_ID: ${TENCENTDB_AGENT_ID:-agt-hermes-front-door}
       TENCENTDB_AGENT_NAME: ${TENCENTDB_AGENT_NAME:-Hermes Front Door}
+      TENCENTDB_EXTRA_AGENTS: ${TENCENTDB_EXTRA_AGENTS:-agt-scientist:Scientist}
     volumes:
       - opc-keys:/keys
 

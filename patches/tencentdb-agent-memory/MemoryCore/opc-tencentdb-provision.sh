@@ -24,6 +24,11 @@ TEAM_ID="${TENCENTDB_TEAM_ID:-opc}"
 TEAM_NAME="${TENCENTDB_TEAM_NAME:-OPC}"
 AGENT_ID="${TENCENTDB_AGENT_ID:-agt-hermes-front-door}"
 AGENT_NAME="${TENCENTDB_AGENT_NAME:-Hermes Front Door}"
+# Additional agents to register, one `id:name` pair per whitespace-separated
+# entry. Every id MUST start with `agt`: the Memory Hub panel parses
+# chat_memory-{team}-{agent} asset ids with lastIndexOf('-agt'), and an id
+# without that prefix leaves the panel silently empty.
+EXTRA_AGENTS="${TENCENTDB_EXTRA_AGENTS:-agt-scientist:Scientist}"
 
 meta() { # <path> <json-body> → envelope via stdout
   curl -fsS -m 30 -X POST "$GATEWAY$1" \
@@ -75,17 +80,27 @@ else
   echo "[tencentdb-provision] team '${TEAM_ID}' created: $(printf '%s' "$RES" | head -c 200)"
 fi
 
-# 3. Agent: get → create. createAgent mints the chat_memory asset + fixed
+# 3. Agents: get → create. createAgent mints the chat_memory asset + fixed
 #    binding automatically, so the panel's Chat_Memory page renders the data.
-CODE="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$GATEWAY/v3/meta/agent/get" \
-  -H 'Content-Type: application/json' -H 'x-tdai-service-id: default' \
-  -H "Authorization: Bearer ${API_KEY}" -H "x-tdai-user-key: ${USER_KEY}" \
-  -d "{\"agent_id\":\"${AGENT_ID}\"}")"
-if [ "$CODE" = "200" ]; then
-  echo "[tencentdb-provision] agent '${AGENT_ID}' already exists"
-else
-  RES="$(meta /v3/meta/agent/create "{\"team_id\":\"${TEAM_ID}\",\"agent_id\":\"${AGENT_ID}\",\"owner_user_id\":\"${USER_ID}\",\"name\":\"${AGENT_NAME}\"}")"
-  echo "[tencentdb-provision] agent '${AGENT_ID}' created: $(printf '%s' "$RES" | head -c 200)"
-fi
+ensure_agent() { # <agent_id> <agent_name>
+  _aid="$1"
+  _aname="$2"
+  CODE="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$GATEWAY/v3/meta/agent/get" \
+    -H 'Content-Type: application/json' -H 'x-tdai-service-id: default' \
+    -H "Authorization: Bearer ${API_KEY}" -H "x-tdai-user-key: ${USER_KEY}" \
+    -d "{\"agent_id\":\"${_aid}\"}")"
+  if [ "$CODE" = "200" ]; then
+    echo "[tencentdb-provision] agent '${_aid}' already exists"
+  else
+    RES="$(meta /v3/meta/agent/create "{\"team_id\":\"${TEAM_ID}\",\"agent_id\":\"${_aid}\",\"owner_user_id\":\"${USER_ID}\",\"name\":\"${_aname}\"}")"
+    echo "[tencentdb-provision] agent '${_aid}' created: $(printf '%s' "$RES" | head -c 200)"
+  fi
+}
+
+ensure_agent "$AGENT_ID" "$AGENT_NAME"
+for _pair in $EXTRA_AGENTS; do
+  [ -n "$_pair" ] || continue
+  ensure_agent "${_pair%%:*}" "${_pair#*:}"
+done
 
 echo "[tencentdb-provision] done"

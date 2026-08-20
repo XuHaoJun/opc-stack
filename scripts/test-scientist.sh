@@ -117,6 +117,29 @@ check "dashboard wrapper resolves to NO identity (chief of staff's key must stay
         [ -z \"\$got\" ]
     "
 
+echo "── identity & memory ──"
+checkout "profile SOUL.md is the scientist's, not the front door's" "scientist" \
+    docker compose exec -T hermes head -5 "/opt/data/profiles/$PROFILE/SOUL.md"
+# A bare `! cmp -s scientist chief` is vacuous here: before the sync in
+# opc_seed_expert_profile exists, hermes has already written its own generic
+# built-in identity text ("You are Hermes Agent... created by Nous
+# Research...") into a freshly-created profile home, and that generic text
+# already differs from the chief of staff's fully-custom SOUL.md — so the
+# bare comparison would pass whether or not this task's sync code ever ran.
+# Require BOTH: the profile file is no longer the untouched generic default,
+# AND it is not literally the chief of staff's file (the regression the
+# comparison was meant to catch in the first place).
+check "profile SOUL.md differs from the chief of staff's" \
+    docker compose exec -T hermes sh -c "! grep -qF 'created by Nous Research' /opt/data/profiles/$PROFILE/SOUL.md && ! cmp -s /opt/data/profiles/$PROFILE/SOUL.md /opt/data/SOUL.md"
+check "no process-wide MEMORY_TENCENTDB_AGENT_ID on the gateway" \
+    docker compose exec -T hermes sh -c '! env | grep -q ^MEMORY_TENCENTDB_AGENT_ID='
+checkout "autonomous experiment queue is scheduled exactly once" "experiment-queue" \
+    docker compose exec -T -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes /opt/hermes/bin/hermes cron list
+check "the cron job was not duplicated across boots" \
+    docker compose exec -T -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c "test \"\$(/opt/hermes/bin/hermes cron list 2>/dev/null | grep -c experiment-queue)\" -eq 1"
+checkout "tencentdb knows the scientist agent" '"agent_id"' \
+    docker compose exec -T tencentdb-core sh -c "curl -sS -X POST http://127.0.0.1:8420/v3/meta/agent/get -H 'Content-Type: application/json' -H 'x-tdai-service-id: default' -H \"Authorization: Bearer \$TENCENTDB_GATEWAY_API_KEY\" -H \"x-tdai-user-key: \$TENCENTDB_ADMIN_USER_KEY\" -d '{\"agent_id\":\"agt-scientist\"}'"
+
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,
 # against its live /proc/1-derived argv — not docker-compose.yml. Reverting
