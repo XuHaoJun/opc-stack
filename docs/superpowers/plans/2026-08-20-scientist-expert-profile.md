@@ -260,8 +260,15 @@ MSG
 echo "── gateway multiplex ──"
 checkout "multiplex is on" "GATEWAY_MULTIPLEX_PROFILES=1" \
     docker compose exec -T hermes sh -c 'env | grep ^GATEWAY_MULTIPLEX_PROFILES='
-check "profile route /p/$PROFILE/v1/health -> 200" \
-    docker compose exec -T hermes sh -c "test \"\$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8642/p/$PROFILE/v1/health)\" = 200"
+# NOT a bare `/p/<profile>/v1/health -> 200` check: with multiplex OFF the
+# /p/ prefix is ignored entirely (api_server._resolve_request_profile), so
+# that route already 200s as the default profile and the check would pass
+# before any of this is implemented. What distinguishes a real profile route
+# is WHOSE credential it accepts, so assert that instead.
+check "profile route serves 200 with the PROFILE's own key" \
+    docker compose exec -T hermes sh -c "k=\$(sed -n 's/^API_SERVER_KEY=//p' /opt/data/profiles/$PROFILE/.env 2>/dev/null); test -n \"\$k\" && test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$k\" http://127.0.0.1:8642/p/$PROFILE/v1/models)\" = 200"
+check "profile route REJECTS the default profile's key" \
+    docker compose exec -T hermes sh -c "test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$API_SERVER_KEY\" http://127.0.0.1:8642/p/$PROFILE/v1/models)\" = 401"
 check "unknown profile -> 404" \
     docker compose exec -T hermes sh -c "test \"\$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8642/p/no-such-expert/v1/health)\" = 404"
 check "profile home exists" \
@@ -276,7 +283,7 @@ checkout "dashboard switcher lists the profile" "$PROFILE" \
 
 Run: `scripts/test-scientist.sh`
 
-Expected: 6 個新檢查全 FAIL，Task 1 的 4 個仍 PASS。`result: 4 pass, 6 fail`。
+Expected: 7 個新檢查**全部** FAIL，Task 1 既有的 5 個仍 PASS。`result: 5 pass, 7 fail`。若有任何一個新檢查在此刻就 PASS，那個檢查沒有在測任何東西 —— 修檢查，不要調目標。
 
 - [ ] **Step 3: `.env.example` 加金鑰**
 
@@ -414,7 +421,7 @@ Expected: `prepare.sh` 印 `SAME` 四行後 `SYNC` 各專案；build 成功；`d
 
 Run: `scripts/test-scientist.sh`
 
-Expected: `result: 10 pass, 0 fail`。
+Expected: `result: 12 pass, 0 fail`。
 
 - [ ] **Step 8: 手動確認 per-profile 認證真的分開**
 
@@ -497,7 +504,7 @@ checkout "scientist is a relay member" "$(docker compose exec -T hermes cat /key
 
 Run: `scripts/test-scientist.sh`
 
-Expected: 6 個新檢查全 FAIL；前 10 個 PASS。`result: 10 pass, 6 fail`。
+Expected: 6 個新檢查全 FAIL；前 12 個 PASS。`result: 12 pass, 6 fail`。
 
 - [ ] **Step 3: 多產一把鑰匙**
 
@@ -783,7 +790,7 @@ Expected: `docker compose exec hermes ls -l /keys/scientist.nsec` 顯示檔案�
 
 Run: `scripts/test-scientist.sh`
 
-Expected: `result: 17 pass, 0 fail`。
+Expected: `result: 18 pass, 0 fail`。
 
 「scientist is a relay member」這項需要 relay 上**至少有一個 channel**；若 relay 是全新的、還沒有人建過 channel，這項會 FAIL 而其他全 PASS —— 那是環境狀態不是 bug，用 Buzz 桌面端建一個 channel 後重跑。
 
@@ -863,7 +870,7 @@ checkout "tencentdb knows the scientist agent" '"agent_id"' \
 
 Run: `scripts/test-scientist.sh`
 
-Expected: 6 個新檢查中 SOUL.md 兩項、cron 兩項與 tencentdb 一項 FAIL，`MEMORY_TENCENTDB_AGENT_ID` 那項 PASS（本來就沒設）。`result: 17 pass, 5 fail`。
+Expected: 6 個新檢查中 SOUL.md 兩項、cron 兩項與 tencentdb 一項 FAIL，`MEMORY_TENCENTDB_AGENT_ID` 那項 PASS（本來就沒設）。`result: 19 pass, 5 fail`。
 
 - [ ] **Step 3: 寫科學家的 SOUL.md**
 
@@ -1068,7 +1075,7 @@ Expected: 列出 `experiment-queue`，schedule `0 9 * * 1`。再 `docker compose
 
 Run: `scripts/test-scientist.sh`
 
-Expected: `result: 22 pass, 0 fail`。
+Expected: `result: 24 pass, 0 fail`。
 
 - [ ] **Step 11: 確認面板看得到**
 
@@ -1138,7 +1145,7 @@ check "the two skill copies are byte-identical" \
 
 Run: `scripts/test-scientist.sh`
 
-Expected: 4 個 Paperclip 檢查與 `research` 那項 FAIL，「byte-identical」PASS。`result: 23 pass, 5 fail`。
+Expected: 4 個 Paperclip 檢查與 `research` 那項 FAIL，「byte-identical」PASS。`result: 25 pass, 5 fail`。
 
 - [ ] **Step 3: 先抽出共用的 reconcile helper（純重構，行為不變）**
 
@@ -1315,7 +1322,7 @@ Expected: `prepare.sh` 印 `SAME  paperclip-api skill`；bootstrap 印 `created 
 
 Run: `scripts/test-scientist.sh`
 
-Expected: `result: 28 pass, 0 fail`。
+Expected: `result: 30 pass, 0 fail`。
 
 - [ ] **Step 11: 端到端指派一張票**
 
@@ -1384,7 +1391,7 @@ check "the lease actually connects" \
 
 Run: `scripts/test-scientist.sh`
 
-Expected: 3 個新檢查全 FAIL。`result: 28 pass, 3 fail`。
+Expected: 3 個新檢查全 FAIL。`result: 30 pass, 3 fail`。
 
 - [ ] **Step 3: 決定租約怎麼發**
 
@@ -1466,7 +1473,7 @@ docker compose up -d --build
 
 Run: `scripts/test-scientist.sh`
 
-Expected: `result: 31 pass, 0 fail`。
+Expected: `result: 33 pass, 0 fail`。
 
 若「the lease actually connects」失敗且訊息是 `psql: not found`，那是 hermes image 沒有 postgres client —— 用 `docker compose exec hermes nix-add nixpkgs#postgresql` 裝上（這正是科學家自己會做的事），再重跑。
 
@@ -1509,7 +1516,7 @@ hermes gateway 8642 (API server; dashboard 關閉; **專家 agent 的宿主** �
 scripts/test-connectivity.sh && scripts/test-scientist.sh
 ```
 
-Expected: `23 pass, 0 fail` 與 `31 pass, 0 fail`。
+Expected: `23 pass, 0 fail` 與 `33 pass, 0 fail`。
 
 - [ ] **Step 8: Commit**
 
@@ -1727,7 +1734,7 @@ MSG
 ```bash
 scripts/audit-bootstrap.sh     # 17 pass, 0 fail  — 每份狀態都有自動產生者
 scripts/test-connectivity.sh   # 24 pass, 0 fail  — 既有功能沒被弄壞 + 科學家路由活著
-scripts/test-scientist.sh      # 31 pass, 0 fail  — 科學家 lane 從 volume 到 board
+scripts/test-scientist.sh      # 33 pass, 0 fail  — 科學家 lane 從 volume 到 board
 ```
 
 再加上兩個機器驗不出來的人工檢查：
