@@ -130,6 +130,14 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
   - **`config.yaml` 的 `agent.system_prompt` 也不行** — 那個 key 由 `cli.py` 的 `class HermesCLI` 解析 (`resolve_ephemeral_system_prompt`), 只對 `hermes chat` 生效。**ACP lane 完全不讀** (`acp_adapter/session.py` 建 `AIAgent(**kwargs)` 時沒傳 `system_prompt`), 而 frontdoor 跑的正是 `hermes acp`。與 `completion_queue` 只被 cli.py / gateway 消耗是同一類的 lane 落差。
   - **`SOUL.md` 才對** — `AIAgent` 自己組 prompt 時會讀 (`agent/system_prompt.py` → `load_soul_md`, 且 scope 在 agent 自己的 `HERMES_HOME`), 所以**每個 lane 都吃得到**。兩個 image 各 bake 一份 `/opt/hermes/SOUL.md`, entrypoint 每次開機覆蓋進 home (與 skill 同一套機制)。兩份必須逐字相同, `scripts/prepare.sh` 會擋。
   lane 表繼續留在 skill (那是會變的細節), 「你不是實作者」是常駐約束。
+- **hermes multiplex 的 provider key 隔離是 per-variable-name, 不是 per-profile** (實測):
+  profile 的 `config.yaml` 用 `${VAR}` 確實讀得到自己 `.env` 的值, 但兩個 profile 用
+  **同名變數不同值**時, 重啟後**先接到請求的那個會污染另一條路由**(另一邊 401)。所以
+  「每個專家一把自己的 provider key」目前做不到 —— 全棧共用一把 `OPENAI_API_KEY` 是前提;
+  真要分開得改用**不同的變數名**。另外 profile 的 `config.yaml` **不可省略
+  `model.api_key`**: 省掉會 401, 因為 `runtime_provider.py:1325-1335` 把 `OPENAI_API_KEY`
+  這個候選 host-gate 到 openai.com, 而我們的 base_url 是 opencode.ai, 最後落到
+  `"no-key-required"`(與 `1881e40` 修的同一件事, 每個 profile 各要一份)。
 - **`config.yaml` 不是放「必須成立的規則」的地方**: seed 是「不存在才寫」, 而且 **hermes 會自己遷移它** — frontdoor 的 volume 被遷到 `_config_version 37` 的過程中 **`system_prompt` 整個不見了**, 於是它有很長一段時間在**沒有 system prompt** 的狀態下跑, 而沒有任何地方會顯示這件事。config.yaml 現在只放對話語氣與 Buzz 發文機制, 且每次開機 reconcile。
 - **派工路由住在 `paperclip-api` skill, 不在 system_prompt**: hermes 是決定 assignee 的那一層 (Paperclip 在本 stack 沒有自動路由 — 無 CEO、org 全扁平、`role=general`, 未指派的 ticket 沒人會醒)。lane 表 (`engineering`→`OMP Engineer` / `prototype`→`Prototyper`) 放 skill 的理由: skill 由 image 在每次開機同步進 **兩個** hermes home (frontdoor 與 gateway), 而 `config.yaml` 的 system_prompt 是 per-home 且 dashboard 可編輯 — 規則放 prompt 會分歧。**改 skill 要同時改 `patches/buzz/skills/` 與 `patches/hermes/skills/` 兩份** (內容必須相同)。channel 層的 `platforms.<name>.channel_overrides[channel_id]` 可覆寫 system_prompt/model, 但那是 per-platform × per-channel-id, 只適合當加速器, 不要拿來當路由機制。
 - **preview 的對外位址由 `PAPERCLIP_PUBLIC_URL` 決定, 不要另外設一份**: `DEVENV_HTTP_PUBLIC_HOST` 留空時從它的 host 推導 (`providers/http.sh`)。理由是 preview 連結**長在 board 上**, 兩者必然從同一個地方被存取 —— 寫成兩個變數只會製造「board 開得起來、連結打不開」這種只有症狀沒有訊息的分歧。發佈位址 `DEVENV_HTTP_BIND` 預設 `0.0.0.0`(與 paperclip/buzz/hermes 一致); 要收窄就設 `127.0.0.1` 或 tailnet IP。**改了要 recreate paperclip 容器**(docker 的 port 發佈在建立容器時固定)。
