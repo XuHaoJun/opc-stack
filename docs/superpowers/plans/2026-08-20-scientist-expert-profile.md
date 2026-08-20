@@ -783,7 +783,7 @@ Expected: `docker compose exec hermes ls -l /keys/scientist.nsec` 顯示檔案�
 
 Run: `scripts/test-scientist.sh`
 
-Expected: `result: 16 pass, 0 fail`。
+Expected: `result: 17 pass, 0 fail`。
 
 「scientist is a relay member」這項需要 relay 上**至少有一個 channel**；若 relay 是全新的、還沒有人建過 channel，這項會 FAIL 而其他全 PASS —— 那是環境狀態不是 bug，用 Buzz 桌面端建一個 channel 後重跑。
 
@@ -1140,7 +1140,93 @@ Run: `scripts/test-scientist.sh`
 
 Expected: 4 個 Paperclip 檢查與 `research` 那項 FAIL，「byte-identical」PASS。`result: 23 pass, 5 fail`。
 
-- [ ] **Step 3: bootstrap 建 Scientist agent**
+- [ ] **Step 3: 先抽出共用的 reconcile helper（純重構，行為不變）**
+
+Scientist 的建立/校正流程與 Prototyper 逐字同構（查 id → 缺就建 → 否則比對再 PATCH）。
+先把那段抽成 helper 再加第二個 agent，否則第三、第四個專家進來時這段會有四份。
+
+**這一步是純重構：跑完 bootstrap 的輸出必須與現在完全相同。**
+
+在 `patches/paperclip/opc-paperclip-bootstrap.sh` 的 `proto_desired_config()` 定義**之前**
+插入 helper：
+
+```sh
+# reconcile_agent <display-name> <adapterType> <desired-config-fn>
+#
+# Create when absent; otherwise merge the desired keys over the live
+# adapterConfig and PATCH only on a real difference. The merge (rather than
+# overwrite) is what keeps paperclip's own instructions* keys and anything an
+# operator set on the board — only the keys <desired-config-fn> names are
+# asserted.
+#
+# Reconciling rather than create-only matters: without it a change to the
+# image only reaches agents created after that point, so the long-lived stack
+# silently keeps the config it was born with and nothing surfaces the gap.
+reconcile_agent() {
+    _ra_name="$1"
+    _ra_type="$2"
+    _ra_fn="$3"
+
+    _ra_id="$(api_get "/companies/$company_id/agents" | \
+        jq -r --arg n "$_ra_name" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)"
+
+    if [ -z "$_ra_id" ]; then
+        _ra_id="$(printf '{}' | "$_ra_fn" \
+            | jq -c --arg n "$_ra_name" --arg t "$_ra_type" \
+                  '{name:$n, adapterType:$t, adapterConfig:.}' \
+            | api_post_raw "/companies/$company_id/agents" | jq -r '.id // empty')"
+        if [ -n "$_ra_id" ]; then
+            echo "[pc-bootstrap] created agent: $_ra_name ($_ra_id)"
+        else
+            echo "[pc-bootstrap] $_ra_name creation failed" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    _ra_cfg="$(api_get "/companies/$company_id/agents" \
+        | jq -c --arg n "$_ra_name" '.[]? | select(.name == $n) | .adapterConfig // {}' | head -1)"
+    _ra_want="$(printf '%s' "$_ra_cfg" | "$_ra_fn")"
+    if [ "$(printf '%s' "$_ra_cfg" | jq -cS .)" = "$(printf '%s' "$_ra_want" | jq -cS .)" ]; then
+        echo "[pc-bootstrap] agent exists: $_ra_name (config current)"
+        return 0
+    fi
+
+    # Verified on the response, not on curl's exit: api_patch_raw ends in
+    # `|| true`, so an `&&` here would report success for every failure —
+    # the bug that left two skills stale on the board for several commits
+    # while bootstrap printed "skill updated" every boot.
+    if jq -nc --argjson c "$_ra_want" '{adapterConfig:$c}' \
+         | api_patch_raw "/agents/$_ra_id" | jq -e '.id? // empty' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] agent $_ra_name: adapterConfig reconciled"
+    else
+        echo "[pc-bootstrap] WARNING could not reconcile $_ra_name adapterConfig" >&2
+    fi
+}
+```
+
+接著把 Prototyper 的整段（從 `proto_id="$(api_get ...` 到它對應的收尾 `fi`）換成一行：
+
+```sh
+reconcile_agent "$PROTOTYPER_NAME" claude_local proto_desired_config
+```
+
+`proto_desired_config()` 本身**不要動**。刪掉的區塊裡沒有任何東西被後面用到
+（`proto_id` 只在該區塊內部使用，結尾的 `echo ... done.` 不引用它）—— 動手前
+再 `grep -n proto_id patches/paperclip/opc-paperclip-bootstrap.sh` 確認一次。
+
+- [ ] **Step 4: 驗證重構沒有改變行為**
+
+```bash
+scripts/prepare.sh
+docker compose up --force-recreate paperclip-bootstrap
+```
+
+Expected: 輸出裡有 `[pc-bootstrap] agent exists: Prototyper (config current)`，
+且**沒有** `reconciled` 或 `WARNING`。若出現 `reconciled`，表示 helper 產生的 desired
+config 與舊路徑不一致 —— 那是重構改變了行為，停下來比對 `jq -cS` 的兩邊，不要繼續。
+
+- [ ] **Step 5: 用 helper 加上 Scientist agent**
 
 在 `patches/paperclip/opc-paperclip-bootstrap.sh` 頂端 `PROTOTYPER_NAME=` 那行之後插入：
 
@@ -1175,36 +1261,11 @@ sci_desired_config() { # live adapterConfig on stdin → desired on stdout
 if [ -z "$SCIENTIST_KEY" ]; then
     echo "[pc-bootstrap] WARNING HERMES_SCIENTIST_API_KEY empty — skipping Scientist agent" >&2
 else
-    sci_id="$(api_get "/companies/$company_id/agents" | \
-        jq -r --arg n "$SCIENTIST_NAME" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)"
-    if [ -z "$sci_id" ]; then
-        sci_id="$(printf '{}' | sci_desired_config \
-            | jq -c --arg n "$SCIENTIST_NAME" '{name:$n, adapterType:"hermes_gateway", adapterConfig:.}' \
-            | api_post_raw "/companies/$company_id/agents" | jq -r '.id // empty')"
-        [ -n "$sci_id" ] && echo "[pc-bootstrap] created agent: $SCIENTIST_NAME ($sci_id)" \
-                         || echo "[pc-bootstrap] scientist creation failed" >&2
-    else
-        sci_cfg="$(api_get "/companies/$company_id/agents" \
-            | jq -c --arg n "$SCIENTIST_NAME" '.[]? | select(.name == $n) | .adapterConfig // {}' | head -1)"
-        sci_want="$(printf '%s' "$sci_cfg" | sci_desired_config)"
-        if [ "$(printf '%s' "$sci_cfg" | jq -cS .)" != "$(printf '%s' "$sci_want" | jq -cS .)" ]; then
-            # Verified on the response, not on curl's exit: api_patch_raw ends
-            # in `|| true`, so an `&&` here would report success for every
-            # failure — the bug that left two skills stale for several commits.
-            if jq -nc --argjson c "$sci_want" '{adapterConfig:$c}' \
-                 | api_patch_raw "/agents/$sci_id" | jq -e '.id? // empty' >/dev/null 2>&1; then
-                echo "[pc-bootstrap] agent $SCIENTIST_NAME: adapterConfig reconciled"
-            else
-                echo "[pc-bootstrap] WARNING could not reconcile $SCIENTIST_NAME adapterConfig" >&2
-            fi
-        else
-            echo "[pc-bootstrap] agent exists: $SCIENTIST_NAME (config current)"
-        fi
-    fi
+    reconcile_agent "$SCIENTIST_NAME" hermes_gateway sci_desired_config
 fi
 ```
 
-- [ ] **Step 4: compose 把金鑰傳給 bootstrap**
+- [ ] **Step 6: compose 把金鑰傳給 bootstrap**
 
 在 `docker-compose.yml` 的 `paperclip-bootstrap` 服務 `environment:` 區塊，`PAPERCLIP_EXECUTOR_AGENT_NAME:` 那行之後插入：
 
@@ -1215,7 +1276,7 @@ fi
       HERMES_SCIENTIST_API_KEY: ${HERMES_SCIENTIST_API_KEY:?set in .env}
 ```
 
-- [ ] **Step 5: lane 表加一列（兩份都要）**
+- [ ] **Step 7: lane 表加一列（兩份都要）**
 
 在 `patches/hermes/skills/paperclip-api/SKILL.md` 的 lane 表，`| `prototype` | `Prototyper` | ...` 那列之後插入：
 
@@ -1232,7 +1293,7 @@ fi
 的結果。
 ```
 
-- [ ] **Step 6: 同步第二份**
+- [ ] **Step 8: 同步第二份**
 
 ```bash
 cp patches/hermes/skills/paperclip-api/SKILL.md patches/buzz/skills/paperclip-api/SKILL.md
@@ -1240,7 +1301,7 @@ cp patches/hermes/skills/paperclip-api/SKILL.md patches/buzz/skills/paperclip-ap
 
 （兩份必須逐字相同；`scripts/prepare.sh` 的 drift guard 會擋 build。）
 
-- [ ] **Step 7: 重建並重跑 bootstrap**
+- [ ] **Step 9: 重建並重跑 bootstrap**
 
 ```bash
 scripts/prepare.sh
@@ -1250,13 +1311,13 @@ docker compose up --force-recreate paperclip-bootstrap
 
 Expected: `prepare.sh` 印 `SAME  paperclip-api skill`；bootstrap 印 `created agent: Scientist` 或 `agent exists: Scientist`。
 
-- [ ] **Step 8: 跑驗證**
+- [ ] **Step 10: 跑驗證**
 
 Run: `scripts/test-scientist.sh`
 
 Expected: `result: 28 pass, 0 fail`。
 
-- [ ] **Step 9: 端到端指派一張票**
+- [ ] **Step 11: 端到端指派一張票**
 
 在 Paperclip board (http://localhost:3100) 開一張 issue，指派給 `Scientist`，狀態設成 `todo`（**不能是 `backlog`** —— `issue-assignment-wakeup.ts` 只在 `status != "backlog"` 時喚醒）。內容用一個小的可驗證問題，例如「量一下這個 stack 裡 ripgrep 對 1GB 文字的吞吐量，回報方法與數字」。
 
@@ -1267,7 +1328,7 @@ Expected:
 
 若 run 起不來，先看 paperclip 的 log：401 表示 `apiKey` 對不上 profile `.env`；404 表示 `apiBaseUrl` 的 profile 名錯了。
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 12: Commit**
 
 ```bash
 git add patches/paperclip/opc-paperclip-bootstrap.sh patches/buzz/skills/paperclip-api/SKILL.md patches/hermes/skills/paperclip-api/SKILL.md docker-compose.yml scripts/test-scientist.sh
@@ -1548,6 +1609,7 @@ echo "── idempotence: re-running a producer must not duplicate ──"
 has "keys: only generates what is absent"    patches/buzz/generate-keys.sh       'already present'
 has "cron: guarded by job name"              patches/hermes/hermes-entrypoint.sh 'grep -q "experiment-queue"'
 has "board agent: reconciles, not create-only" patches/paperclip/opc-paperclip-bootstrap.sh 'adapterConfig reconciled'
+has "agent reconcile is one shared helper"   patches/paperclip/opc-paperclip-bootstrap.sh 'reconcile_agent()'
 has "tencentdb: get before create"           patches/tencentdb-agent-memory/MemoryCore/opc-tencentdb-provision.sh 'already exists'
 
 echo
@@ -1563,7 +1625,7 @@ chmod +x scripts/audit-bootstrap.sh
 
 Run: `scripts/audit-bootstrap.sh`
 
-Expected: `result: 16 pass, 0 fail`。任何一項 FAIL 都代表那份狀態在乾淨機器上不會自己
+Expected: `result: 17 pass, 0 fail`。任何一項 FAIL 都代表那份狀態在乾淨機器上不會自己
 出現 —— 回去把它補成 one-shot 或 entrypoint 的一部分，**不要**寫 migration script。
 
 - [ ] **Step 3: 把科學家納入 setup.sh 建議的驗證**
@@ -1616,35 +1678,19 @@ scripts/test-connectivity.sh && scripts/test-scientist.sh
 `paperclip-bootstrap` 是 reconcile 而非 create-only。
 ```
 
-- [ ] **Step 5: 乾淨機器演練（破壞性 —— 先問過人再做）**
+- [x] **Step 5: 乾淨機器演練（破壞性）—— 使用者決定跳過**
 
-⚠️ **這一步會刪掉所有資料**: `down -v` 之後 Buzz community 與全部對話、Paperclip 的
-issue 與 project、TencentDB 的記憶、prototype 目錄與 devenv 租約**全部重建**。
-AGENTS.md 的不變量 5 說這條路徑應該一次到位，而這正是在驗證那句話 —— 但驗證的代價
-是真實資料。**執行前必須取得使用者對「現在可以清掉」的明確同意**，不要自行判斷。
+原本要做 `docker compose down -v` + `scripts/setup.sh`，驗證乾淨機器零手動步驟。
+**使用者選擇跳過**，因為代價是清掉 Buzz community 與全部對話、Paperclip 的 issue 與
+project、TencentDB 記憶、prototype 目錄與 devenv 租約。
 
-同意之後：
+**要誠實記下這件事的後果**: 「開箱即用」在本次實作中**只被靜態證明**（Step 1 的
+`audit-bootstrap.sh` 逐項確認每份狀態都有自動產生者、沒有 race、產生者冪等），
+**沒有被動態證明**。audit 抓得到「忘了寫產生者」，抓不到「產生者在乾淨環境下會失敗」
+（例如某個 one-shot 隱含依賴一份只在既有 volume 上存在的檔案）。
 
-```bash
-docker compose down -v
-scripts/setup.sh
-```
-
-`setup.sh` 跑完後（第一次 build + mise seed 可能要數分鐘）：
-
-```bash
-scripts/test-connectivity.sh && scripts/test-scientist.sh
-```
-
-Expected: `24 pass, 0 fail` 與 `31 pass, 0 fail`，**中間沒有任何手動步驟**。
-
-其中三項需要環境條件而非程式碼，若 FAIL 先確認是不是這個原因：
-
-| 檢查 | 需要的前置 |
-|---|---|
-| `scientist is a relay member` | relay 上至少要有一個 channel —— 全新的 relay 還沒有人建過，用 Buzz 桌面端建一個再重跑 |
-| `the lease actually connects` | hermes image 沒有 psql，`docker compose exec hermes nix-add nixpkgs#postgresql` |
-| `Scientist agent exists on the board` | `paperclip-bootstrap` 要先 exit 0，看 `docker compose logs paperclip-bootstrap` |
+下次真的需要 `down -v` 時（換機器、或不變量 5 的其他理由），順手跑一次
+`scripts/test-connectivity.sh && scripts/test-scientist.sh` 就補上了這個證明。
 
 - [ ] **Step 6: Commit**
 
@@ -1679,7 +1725,7 @@ MSG
 實作完成後這兩條都要綠：
 
 ```bash
-scripts/audit-bootstrap.sh     # 16 pass, 0 fail  — 每份狀態都有自動產生者
+scripts/audit-bootstrap.sh     # 17 pass, 0 fail  — 每份狀態都有自動產生者
 scripts/test-connectivity.sh   # 24 pass, 0 fail  — 既有功能沒被弄壞 + 科學家路由活著
 scripts/test-scientist.sh      # 31 pass, 0 fail  — 科學家 lane 從 volume 到 board
 ```
@@ -1688,4 +1734,4 @@ scripts/test-scientist.sh      # 31 pass, 0 fail  — 科學家 lane 從 volume 
 
 1. **Buzz 發文者是 `scientist` 不是 `hermes`**（Task 3 Step 11）—— 這是「不共用參謀長身分」那條硬需求唯一的真實檢驗。
 2. **從 board 指派一張 issue 會叫醒科學家，dashboard 切 profile 看得到那次 session**（Task 5 Step 9）—— 這是整條鏈路的端到端證明。
-3. **`down -v` + `setup.sh` 之後兩條 gate 都綠，中間零手動步驟**（Task 7 Step 5）—— 這是「開箱即用」唯一算數的證明。**破壞性，執行前要拿到明確同意。**
+3. ~~`down -v` + `setup.sh` 演練~~ —— **使用者決定跳過**（破壞性）。所以「開箱即用」只有 `audit-bootstrap.sh` 的靜態保證，沒有動態驗證；差別與補救見 Task 7 Step 5。
