@@ -664,6 +664,23 @@ PYEOF
         fi
     fi
 
+    # Standing devenv lease, provisioned by the devenv-expert-leases one-shot.
+    # Merged rather than seeded-once: the lease is re-derived from
+    # DEVENV_SECRET_SALT on every provision (that is what makes it idempotent),
+    # so a salt rotation must be able to reach an existing profile.
+    _lease="/keys/devenv-${_p#agt-}.env"
+    if [ -f "$_lease" ]; then
+        while IFS= read -r _line; do
+            case "$_line" in
+                ''|'#'*) continue ;;
+            esac
+            _k="${_line%%=*}"
+            sed -i "/^${_k}=/d" "$_ph/.env"
+            printf '%s\n' "$_line" >> "$_ph/.env"
+        done < "$_lease"
+        echo "[hermes] $_p: devenv lease merged into profile .env"
+    fi
+
     echo "[hermes] expert profile ready: $_p"
 }
 

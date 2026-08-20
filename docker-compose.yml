@@ -417,6 +417,8 @@ services:
       # a relay problem rather than a missing credential.
       buzz-keys:
         condition: service_completed_successfully
+      devenv-expert-leases:
+        condition: service_completed_successfully
     command: ["gateway", "run"]
     environment:
       HERMES_UID: "10000"
@@ -719,6 +721,49 @@ services:
       # human runs it via docker exec (agent runs get PAPERCLIP_API_KEY
       # injected; interactive shells do not).
       - paperclip-data:/paperclip
+
+  # Standing devenv lease for the expert agents. Runs in the paperclip image
+  # because that is where the devenv CLI lives — deliberately not copied into
+  # the hermes image: devenv is a generic resource-lease tool and should not
+  # grow a second, drifting implementation. Output lands on the shared keys
+  # volume; the hermes entrypoint folds it into the profile's .env.
+  #
+  # There is no automatic reclamation anywhere in this stack (invariant 6b);
+  # release it by hand with `devenv release scientist` if the expert is retired.
+  devenv-expert-leases:
+    image: ${IMAGE_PREFIX:-opc}/paperclip:local
+    restart: "no"
+    depends_on:
+      devenv-pg:
+        condition: service_healthy
+      devenv-valkey:
+        condition: service_healthy
+      paperclip:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        devenv provision scientist --env-file /keys/devenv-scientist.env
+        chmod 600 /keys/devenv-scientist.env
+        echo "[devenv-expert-leases] scientist lease written"
+    environment:
+      DEVENV_OWNER: scientist
+      # Same admin-connection env the paperclip service uses (line ~625
+      # below) — compose does not let one service inherit another's
+      # `environment:` block, so the devenv CLI needs its own copy of every
+      # variable it reads to reach devenv-pg/devenv-valkey and to re-derive
+      # the per-tenant password from DEVENV_SECRET_SALT.
+      DEVENV_PG_HOST: devenv-pg
+      DEVENV_PG_PORT: "5432"
+      DEVENV_PG_ADMIN_USER: postgres
+      DEVENV_PG_ADMIN_PASSWORD: ${DEVENV_PG_PASSWORD:-devenv}
+      DEVENV_VALKEY_HOST: devenv-valkey
+      DEVENV_VALKEY_PORT: "6379"
+      DEVENV_VALKEY_PASSWORD: ${DEVENV_VALKEY_PASSWORD:-devenv}
+      DEVENV_VALKEY_DATABASES: "64"
+      DEVENV_SECRET_SALT: ${DEVENV_SECRET_SALT:-opc-devenv-default-salt}
+    volumes:
+      - opc-keys:/keys
 
   # ══════════════════════════ devenv (agent 開發資源) ══════════════════════════
   # Shared backends that Paperclip agents lease per-tenant via the `devenv` CLI

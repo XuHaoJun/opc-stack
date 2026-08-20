@@ -9,7 +9,7 @@ Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-
 - **`patches/nix-seed/`** = 第一個不屬 submodule 的 build context (compose service `nix-seed`, one-shot)。pin nix 2.35.2 + nixpkgs `8be7bd0c83f1`, 建 `/nix-seed` (cp -al hardlink) 含 11 工具 (ripgrep jq fd htop bat just mise gh procps iproute2 lsof — 後三個是 ps/pkill/ss/lsof, 沒有它們連「誰在跑」「誰佔著 port」都查不了)。各 build service `depends_on nix-seed` + `FROM ${NIX_SEED_IMAGE} AS nix-seed` / `COPY --from=nix-seed` 取用 (BuildKit 不支援 `--from` 變數展開, 故用 stage alias)。改 seed 工具清單 = 改這個 Dockerfile, seed 只重裝 1 次。
 - **prototype lane** (`prototype` CLI, paperclip image): 一個 prototype = 一個 Paperclip project + `/prototypes/<name>` (自己的 git) + 一個 devenv 租約 + 一個掛在 **project workspace** 上的 runtime service。服務掛 project 層而非 execution workspace,所以沒有 issue 在跑時宣告仍在,**preview URL 跨 session 不變**。`prototype create` 冪等,同時是「建立」與「用名字接續」的路徑。設計見 `docs/superpowers/specs/2026-08-18-devenv-http-preview-design.md`。
 - **devenv** (`docker-compose.yml` 的 `devenv-pg` / `devenv-valkey`): paperclip agent 的開發資源租約。agent 跑 `devenv provision <key>` 拿到獨立的 postgres DB (pgvector) + valkey ACL user, 寫進 workspace `.env` 的 `DATABASE_URL`/`VALKEY_URL`。刻意不給 agent docker (不變量 6); 設計見 `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md`。
-- 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
+- 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉; **專家 agent 的宿主** — multiplex 服務 `hermes-profiles` volume 上的每個 profile, 目前有 `agt-scientist`) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
 - LLM: OpenCode Go (`https://opencode.ai/zen/go/v1`)。`.env` 填 `OPENAI_API_KEY` 一個 key 全棧通用;Hermes custom provider runtime 讀 `OPENAI_API_KEY` + `OPENAI_BASE_URL`。shared gateway/dashboard/Paperclip/TencentDB 的 model 用 `OPENAI_MODEL`（預設 deepseek-v4-flash）,frontdoor relay 用 `BUZZ_AGENT_MODEL`（預設 deepseek-v4-pro）;模型選擇以 `config.yaml` 為 source of truth。
 
 ## 運作模型 (為什麼派工長這樣)
@@ -120,6 +120,19 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
    `--yes`** — 那個旗標會讓這條規則變成一行 script 就能繞過。閒置 7 天只停 process,
    不動資料。
 7. **`upstream/` 是 submodule** — 直接改它 = 改壞版控。改動一律放 `patches/`。升版後 (新 tag checkout) patches 可能不兼容, 升版前 review upstream changelog。
+8. **專家 agent 住在 `hermes-profiles` volume, 而 `hermes` 容器不得掛 `frontdoor-hermes`。**
+   兩顆 volume 分開不是整理癖: `frontdoor-hermes` 根目錄有參謀長的 `.agent.nsec`
+   (600 uid 10000), 而專家跑在**同一個 uid**, hermes 的 cross-profile guard 又不涵蓋
+   terminal tool (`agent/file_safety.py:443`, 上游原話「不是 security boundary」)。
+   整顆掛進去 = 一行 `cat` 就拿到參謀長的 Buzz 身分, 之後它發的文都掛在參謀長名下。
+   dashboard 兩顆都掛是刻意的 —— 它只讀不跑, 那是「一次登入看到全部 agent」的來源
+   (`list_profiles()` 列舉 `$HERMES_HOME/profiles`)。
+   **專家之間不隔離** (同容器同 uid), 這是換 8 倍記憶體的顯式取捨: 每專家一容器是
+   ~118MB × N (Python heap 是 RssAnon, 行程間不共享), multiplex 是 ~148MB + ~9MB × N。
+   要對某個專家硬隔離, 用上游 `container_boot.py` 的 per-profile s6 slot, 資料不用搬。
+   **dashboard 容器的 `command` argv[0] 必須是 `dashboard`** —— upstream 用
+   `/proc/1/cmdline` 判斷要不要跳過 profile reconcile, 判錯就是兩個容器搶
+   `logs/gateways/<profile>/lock` 的 s6-log restart storm。
 
 ## 已知坑 (踩過)
 
@@ -198,3 +211,5 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - `scripts/` — setup / prepare / upgrade / test-connectivity; `host-sync.sh` (通用 host→volume 鏡像 CLI) + `host-sync-worker.sh` (容器側 engine, 唯一邏輯) + `hooks/` (per-source 轉換, ssh/gitconfig/claude-cred) + `sync-gh-creds.sh` / `sync-claude-creds.sh` (場景薄 wrapper); compose `host-sync` (gh) 與 `host-sync-claude` (Claude cred) 兩個 one-shot 每次 up 自動跑
 - `upstream/<proj>/opc/` — prepare.sh 產物, 勿手改
 - `acp-smoke-test.mjs` — omp ACP handshake 驗證 script (在 paperclip 容器內跑)
+- `patches/hermes/profiles/<name>/SOUL.md` — 專家 agent 的身分。**不是** `patches/hermes/SOUL.md` 的副本: 那份帶著「你不是實作者」, 而專家的工作就是自己動手, 套上去會切斷探索迴圈
+- `scripts/test-scientist.sh` — 專家 lane 的端到端 gate (volume → gateway → 身分 → 記憶 → board)

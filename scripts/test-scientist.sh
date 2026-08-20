@@ -224,6 +224,14 @@ check "lane table lists research in both skill copies" \
 check "the two skill copies are byte-identical" \
     cmp -s patches/buzz/skills/paperclip-api/SKILL.md patches/hermes/skills/paperclip-api/SKILL.md
 
+echo "── devenv lease ──"
+check "profile .env carries DATABASE_URL" \
+    docker compose exec -T hermes sh -c "grep -q '^DATABASE_URL=postgres' /opt/data/profiles/$PROFILE/.env"
+check "profile .env carries VALKEY_URL" \
+    docker compose exec -T hermes sh -c "grep -q '^VALKEY_URL=' /opt/data/profiles/$PROFILE/.env"
+check "the lease actually connects" \
+    docker compose exec -T -u 10000 hermes sh -c "psql \"\$(sed -n 's/^DATABASE_URL=//p' /opt/data/profiles/$PROFILE/.env)\" -tAc 'select 1'"
+
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,
 # against its live /proc/1-derived argv — not docker-compose.yml. Reverting
