@@ -430,6 +430,7 @@ services:
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:
       - hermes-data:/opt/data
+      - hermes-profiles:/opt/data/profiles
       - opc-nix:/nix
       - hermes-mise:/opt/mise
       - hermes-omp:/root/.omp
@@ -453,9 +454,14 @@ services:
   hermes-dashboard:
     image: ${IMAGE_PREFIX:-opc}/hermes:local
     restart: unless-stopped
-    # s6 main program; the supervised `dashboard` service does the real work
-    # (same slot the gateway container uses for its own dashboard).
-    command: ["sleep", "infinity"]
+    # argv[0] MUST be `dashboard`: container_boot._is_dashboard_container()
+    # reads /proc/1/cmdline to decide whether to skip per-profile gateway
+    # reconciliation. With the old `sleep infinity` it is not detected, and
+    # once profiles exist on the shared volume both this container and the
+    # gateway flock() logs/gateways/<profile>/lock — "Resource busy" plus an
+    # s6-log restart storm. Upstream deliberately keys this off argv rather
+    # than an operator flag, because a forgotten flag reintroduces the storm.
+    command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
     depends_on:
       nix-daemon:
         condition: service_healthy
@@ -463,7 +469,10 @@ services:
         condition: service_completed_successfully
     environment:
       HERMES_HOME: /opt/data
-      HERMES_DASHBOARD: "1"
+      # The dashboard is now the container's main program (see `command`),
+      # so the supervised s6 dashboard service must NOT also start — two
+      # dashboards would race for 9119.
+      HERMES_DASHBOARD: "0"
       HERMES_DASHBOARD_HOST: 0.0.0.0
       HERMES_DASHBOARD_PORT: "9119"
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USERNAME:?set in .env}
@@ -490,6 +499,11 @@ services:
       - "${HERMES_DASHBOARD_PORT:-9119}:9119"
     volumes:
       - frontdoor-hermes:/opt/data
+      # Read/observe the expert profiles the `hermes` gateway runs. Nested
+      # under the frontdoor home on purpose: list_profiles() enumerates
+      # $HERMES_HOME/profiles, so this is what puts the experts in the
+      # dashboard's global profile switcher.
+      - hermes-profiles:/opt/data/profiles
       - opc-nix:/nix
       - hermes-omp:/root/.omp
       - opc-keys:/keys:ro
@@ -833,6 +847,16 @@ volumes:
   buzz-git:
   frontdoor-hermes:
   hermes-data:
+  # Expert agent profiles (scientist, and future market-research etc.).
+  # Deliberately NOT frontdoor-hermes: that volume's root holds the chief of
+  # staff's .agent.nsec (600 uid 10000) and the experts run as the same uid,
+  # while hermes's cross-profile guard does not cover the terminal tool
+  # (agent/file_safety.py:443). Mounting it whole would hand every expert the
+  # chief of staff's Buzz identity. Mounted at /opt/data/profiles in the
+  # gateway (which runs them) and in the dashboard (which observes them) —
+  # `hermes profile list` enumerates $HERMES_HOME/profiles, so one dashboard
+  # login covers default (chief of staff) plus every expert.
+  hermes-profiles:
   paperclip-data:
   buzz-mise:
   frontdoor-mise:
