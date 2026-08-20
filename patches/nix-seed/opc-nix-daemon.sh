@@ -25,9 +25,19 @@ OPC_BIN=/nix/var/nix/opc-bin
 # Must match the `nixagents` group baked into every service image. Compared
 # NUMERICALLY across the shared volume — the name is irrelevant there.
 NIXAGENTS_GID=3000
-# Must stay equal to the rev the Dockerfile seeds from, so the self-heal below
-# reinstates exactly what a clean machine got.
+# Must stay equal to the rev the Dockerfile seeds from — but that only
+# guarantees a match on the paths the self-heal actually touches: an empty
+# profile, or a tool that is missing outright. `nix profile add` dedups by
+# package NAME, so a volume that already has e.g. `rg` from a bare, unpinned
+# `nixpkgs#ripgrep` keeps that unstable build indefinitely; this pin never
+# replaces an existing entry, it only decides what gets installed when
+# something is absent.
 NIXPKGS=github:NixOS/nixpkgs/8be7bd0c83f1
+
+# Single source of truth for what the seed contains: "<bin on disk>:<nixpkgs
+# attr>". Both the detection below and the heal's install list derive from
+# this — add a tool here once, not in two places that can drift apart.
+SEED_TOOLS="rg:ripgrep jq:jq fd:fd htop:htop bat:bat just:just mise:mise gh:gh ps:procps ss:iproute2 lsof:lsof psql:postgresql"
 
 export NIX_SSL_CERT_FILE="${NIX_SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
@@ -53,21 +63,32 @@ printf 'experimental-features = nix-command flakes\n' > /nix/etc/nix/nix.conf
 # which against ONE shared store would mean four concurrent writers to the
 # same profile. Detection reads the profile path directly rather than
 # `command -v` so a shadowing entry on PATH cannot fake a tool's presence.
-# Add every NEW seed tool to this condition or existing volumes never get it.
-if [ ! -e "$ROOT_PROFILE/bin/rg" ] || [ ! -e "$ROOT_PROFILE/bin/mise" ] \
-    || [ ! -e "$ROOT_PROFILE/bin/just" ] || [ ! -e "$ROOT_PROFILE/bin/gh" ] \
-    || [ ! -e "$ROOT_PROFILE/bin/ps" ] || [ ! -e "$ROOT_PROFILE/bin/ss" ] \
-    || [ ! -e "$ROOT_PROFILE/bin/psql" ]; then
+# Add every NEW seed tool to SEED_TOOLS above (only) or existing volumes
+# never get it — this loop and the heal below both walk that one list.
+_missing=0
+for _pair in $SEED_TOOLS; do
+    _bin="${_pair%%:*}"
+    if [ ! -e "$ROOT_PROFILE/bin/$_bin" ]; then
+        _missing=1
+        break
+    fi
+done
+
+if [ "$_missing" -eq 1 ]; then
     echo "[nix-daemon] seed tools missing from system profile; re-adding"
     # Same pinned rev as the Dockerfile's seed install. Bare `nixpkgs#` would
     # resolve through the flake registry to whatever unstable is today, so the
     # heal would (a) need to fetch and build a second copy of tools the store
     # already has and (b) hand an existing volume different versions from the
-    # ones a clean machine gets.
-    HOME=/root nix profile add --profile "$ROOT_PROFILE" \
-        "$NIXPKGS#ripgrep" "$NIXPKGS#jq" "$NIXPKGS#fd" "$NIXPKGS#htop" "$NIXPKGS#bat" \
-        "$NIXPKGS#just" "$NIXPKGS#mise" "$NIXPKGS#gh" \
-        "$NIXPKGS#procps" "$NIXPKGS#iproute2" "$NIXPKGS#lsof" "$NIXPKGS#postgresql" || true
+    # ones a clean machine gets. `nix profile add` is a no-op for any package
+    # already present under this same pinned rev, so re-adding the whole list
+    # even when only one tool is missing costs nothing extra.
+    _attrs=""
+    for _pair in $SEED_TOOLS; do
+        _attrs="$_attrs $NIXPKGS#${_pair#*:}"
+    done
+    # shellcheck disable=SC2086
+    HOME=/root nix profile add --profile "$ROOT_PROFILE" $_attrs || true
 fi
 
 # ── 4. Shared agent profile ──────────────────────────────────────────────

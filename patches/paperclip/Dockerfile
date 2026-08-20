@@ -15,7 +15,7 @@
 # Declared globally so FROM ${NIX_SEED_IMAGE} expands; the `nix-seed` stage
 # below materializes it for COPY --from (which cannot expand variables).
 ARG NIX_SEED_IMAGE=opc/nix-seed:local
-# Shared seed (nix + 8 tools) built once in patches/nix-seed (compose service
+# Shared seed (nix + 12 tools) built once in patches/nix-seed (compose service
 # `nix-seed`); a tool-list change rebuilds only that image. Seed image alias:
 # COPY --from cannot expand variables (BuildKit), so the global
 # NIX_SEED_IMAGE ARG (compose passes the IMAGE_PREFIX-qualified name) is
@@ -164,7 +164,7 @@ RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
     && ln -sf /usr/local/lib/devenv/devenv /usr/local/bin/devenv \
     && ln -sf /usr/local/lib/prototype/prototype /usr/local/bin/prototype
 
-# Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
+# Shared seed (nix + 12 tools) from the nix-seed stage (see stage alias
 # above); a tool-list change rebuilds only the nix-seed image.
 # `nixagents` (gid 3000) is how an unprivileged agent gets write access to
 # the shared nix profile on the opc-nix volume. The GID must be identical

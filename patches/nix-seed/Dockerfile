@@ -56,12 +56,19 @@ RUN groupadd -r nixbld \
         github:NixOS/nixpkgs/8be7bd0c83f1#procps \
         github:NixOS/nixpkgs/8be7bd0c83f1#iproute2 \
         github:NixOS/nixpkgs/8be7bd0c83f1#lsof \
-        # postgresql is here for its CLIENT (psql/pg_isready): a devenv lease
-        # is only real if something can connect with it, and that check has to
-        # work on a clean machine from scripts/setup.sh with no `nix-add` by
-        # hand. nixpkgs has no client-only split, so the server binaries come
-        # along (~150MB closure, most of it icu4c, paid once in the shared
-        # store). Nothing starts a postgres here — devenv-pg is the server.
+        # postgresql is here for its CLIENT (psql/pg_isready): every devenv
+        # tenant — the prototype lane, and now the scientist expert — holds a
+        # postgres lease, and operators are told to point a SQL client at it
+        # (AGENTS.md: "devenv list (或 SQL client 連 127.0.0.1:5433)"). A
+        # client belongs in the seed for that reason alone, independent of
+        # any test that happens to exercise it today. nixpkgs has no
+        # client-only split, so the server binaries come along too (measured
+        # closure ~166MB on disk, no single dependency dominates it — icu4c
+        # is ~40MB of that, postgresql itself ~26MB, the rest is curl/openssl/
+        # glibc-adjacent libs). That cost lands in the shared `opc-nix` volume
+        # AND in every service image, since `COPY --from=nix-seed /nix-seed
+        # /nix-seed` bakes the same seed into each image's layers. Nothing
+        # starts a postgres here — devenv-pg is the server.
         github:NixOS/nixpkgs/8be7bd0c83f1#postgresql \
     && cp -al /nix /nix-seed
 

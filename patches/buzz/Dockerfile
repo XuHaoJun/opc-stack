@@ -168,7 +168,7 @@ RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/frontdoor-entrypoint.sh /usr/local/bin/opc-generate-keys.sh \
              /usr/local/bin/opc-add-member.sh /usr/local/libexec/hermes
 
-# Shared seed (nix + 9 tools) built once in patches/nix-seed (compose
+# Shared seed (nix + 12 tools) built once in patches/nix-seed (compose
 # service `nix-seed`); a tool-list change rebuilds only that image.
 # `nixagents` (gid 3000) is how an unprivileged agent gets write access to
 # the shared nix profile on the opc-nix volume. The GID must be identical

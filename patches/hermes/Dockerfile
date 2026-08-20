@@ -57,7 +57,7 @@ RUN apt-get -o Acquire::Retries=3 update && \
 
 FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
 FROM node:26-bookworm-slim@sha256:9e6f9357d371591e32ab6f2d8a26d63bdd0d17c29eee3f4f3e7e454d9634bf73 AS node_source
-# Shared seed (nix + 8 tools) built once in patches/nix-seed (compose service
+# Shared seed (nix + 12 tools) built once in patches/nix-seed (compose service
 # `nix-seed`); a tool-list change rebuilds only that image. Seed image alias:
 # COPY --from cannot expand variables (BuildKit), so the global
 # NIX_SEED_IMAGE ARG (compose passes the IMAGE_PREFIX-qualified name) is
@@ -242,7 +242,7 @@ COPY opc/skills/paperclip-api/ /opt/hermes/skills/paperclip-api/
 # migrates it — this repo lost a seeded system_prompt that way).
 COPY opc/profiles/ /opt/hermes/profiles/
 
-# Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
+# Shared seed (nix + 12 tools) from the nix-seed stage (see stage alias
 # above); a tool-list change rebuilds only the nix-seed image.
 # `nixagents` (gid 3000) is how an unprivileged agent gets write access to
 # the shared nix profile on the opc-nix volume. The GID must be identical

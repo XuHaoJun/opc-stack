@@ -734,8 +734,8 @@ services:
   # ALWAYS exits 0. `hermes` waits on this one-shot completing (it must, so a
   # clean setup.sh has the lease on disk before the profile .env is seeded),
   # which means any non-zero exit here would take the whole agent runtime down:
-  # exhausted valkey slots (`devenv` exits 3), a rotated DEVENV_SECRET_SALT, a
-  # wrong admin password, a backend that came up unhealthy. That inverts the
+  # exhausted valkey slots (`devenv` exits 3), a rotated DEVENV_SECRET_SALT, or a
+  # wrong admin password. That inverts the
   # stance this stack already took for the same subsystem in
   # patches/paperclip/opc-devenv-seed.sh — a devenv problem must surface when
   # the resource is USED, not as the runtime failing to start. So a failed
