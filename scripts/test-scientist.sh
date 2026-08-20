@@ -177,14 +177,46 @@ else
 fi
 
 echo "── paperclip ──"
+SCIENTIST_AGENT="${PAPERCLIP_SCIENTIST_AGENT_NAME:-Scientist}"
 PC_KEY="$(docker compose exec -T hermes cat /keys/paperclip-api.key 2>/dev/null | tr -d '\r\n')"
-pc_agents() {
-    docker compose exec -T hermes sh -c "curl -fsS -H 'Authorization: Bearer $PC_KEY' \$PAPERCLIP_API_URL/api/companies/\$(curl -fsS -H 'Authorization: Bearer $PC_KEY' \$PAPERCLIP_API_URL/api/companies | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][\"id\"])')/agents"
+_pc_agents_json="$(docker compose exec -T hermes sh -c "curl -fsS -H 'Authorization: Bearer $PC_KEY' \$PAPERCLIP_API_URL/api/companies/\$(curl -fsS -H 'Authorization: Bearer $PC_KEY' \$PAPERCLIP_API_URL/api/companies | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][\"id\"])')/agents" 2>&1)"
+
+# Emit ONLY the Scientist's own record, as compact JSON.
+#
+# The first version of this block grepped the WHOLE agents list, so the four
+# checks below each only proved "some agent on this board has this property" —
+# four different agents could have satisfied them and every check would still
+# be green. Scoping to one object turns each check back into a statement about
+# the Scientist. When the agent is absent (or the fetch failed) the filter
+# prints nothing, `checkout` finds no substring, and all of them go red — the
+# fetch error text is never a match for any of the wanted substrings.
+pc_scientist() {
+    printf '%s' "$_pc_agents_json" | python3 -c '
+import json, sys
+want = sys.argv[1]
+try:
+    agents = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for a in agents:
+    if a.get("name") == want:
+        print(json.dumps(a, separators=(",", ":")))
+        break
+' "$SCIENTIST_AGENT"
 }
-checkout "Scientist agent exists on the board" '"Scientist"' pc_agents
-checkout "Scientist uses the hermes_gateway adapter" 'hermes_gateway' pc_agents
-checkout "Scientist points at its own profile route" '/p/agt-scientist' pc_agents
-checkout "Scientist keeps one continuous session" '"sessionKeyStrategy":"agent"' pc_agents
+checkout "Scientist agent exists on the board" "\"name\":\"$SCIENTIST_AGENT\"" pc_scientist
+checkout "Scientist uses the hermes_gateway adapter" '"adapterType":"hermes_gateway"' pc_scientist
+checkout "Scientist points at its own profile route" "/p/$PROFILE" pc_scientist
+checkout "Scientist keeps one continuous session" '"sessionKeyStrategy":"agent"' pc_scientist
+# dangerouslyAllowInsecureRemoteHttp is load-bearing, not decoration: the
+# gateway adapter refuses plain http to any non-loopback host, and "hermes" is
+# a compose DNS name — drop this flag and EVERY Scientist run fails closed with
+# hermes_gateway_plain_http_remote_denied (transport-security.ts
+# isRemotePlainHttp + execute.ts). Nothing else in this gate notices its
+# absence, because a config missing it still has the right adapter, route and
+# session strategy.
+checkout "Scientist is allowed to reach the gateway over compose-internal http" \
+    '"dangerouslyAllowInsecureRemoteHttp":true' pc_scientist
 
 echo "── routing skill ──"
 check "lane table lists research in both skill copies" \

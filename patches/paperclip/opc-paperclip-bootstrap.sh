@@ -10,6 +10,7 @@
 #      export PAPERCLIP_API_KEY from it — no manual .env step).
 #   5. Vendored skills (/opt/opc-skills/*) → company skill library.
 #   6. Prototyper agent (omp, scoped to the prototype/prototype-workspace/devenv skills).
+#   7. Scientist agent (hermes_gateway adapter → the gateway's agt-scientist profile).
 #
 # Re-run reconciles missing pieces only. The key file is the source of truth:
 # if it exists, the key is not re-created (the token is only returned once)
@@ -238,36 +239,7 @@ if [ -d "$SKILLS_SRC" ]; then
     done
 fi
 
-# ── 6. Prototyper agent (omp; scoped skills) ──
-# HOME is deliberately NOT overridden: omp reads its model config from
-# $HOME/.omp, so pointing HOME at the Claude credential home would break it.
-# Skills are per-agent — the executor agent declares no paperclipSkillSync and
-# therefore sees none of this.
-#
-# Everything the Prototyper needs lives in the desired config below, so a
-# fresh `up` produces the same agent a hand-tuned board would. Fields NOT
-# named here are paperclip's own defaults and need no assertion: heartbeat
-# `{enabled:false, maxConcurrentRuns:20}`, permissions
-# `{canCreateAgents:false, canCreateSkills:true}`, the managed AGENTS.md
-# instructions bundle (paperclip writes instructions* on first run), the
-# company membership and the `tasks:assign` grant (both minted at create).
-PROTOTYPER_SKILLS='["prototype","prototype-workspace","devenv","container-tools"]'
-PROTOTYPER_DEVENV_OWNER="${PAPERCLIP_PROTOTYPER_DEVENV_OWNER:-prototyper}"
-
-# Desired adapterConfig expressed as a merge over whatever is already on the
-# record, so reconciliation never clobbers keys we do not own: paperclip's
-# instructions* keys, and anything an operator set on the board.
-#
-# DEVENV_OWNER is the friendly label devenv stamps on leases. It is written
-# in the canonical `{type:"plain"}` binding form because the API rewrites bare
-# strings into it anyway (secrets.ts `canonicalizeBinding`) — writing the same
-# shape the server persists keeps the diff below stable instead of patching
-# every boot. Note it does not currently reach the agent process: every local
-# adapter's env loop does `if (typeof value !== "string") continue`, and the
-# API can no longer persist a string. So devenv falls back to
-# `agent:$PAPERCLIP_AGENT_ID`; this key is intent + board-visible
-# documentation until upstream reads plain bindings.
-# reconcile_agent <display-name> <adapterType> <desired-config-fn>
+# ── reconcile_agent <display-name> <adapterType> <desired-config-fn> ──
 #
 # Create when absent; otherwise merge the desired keys over the live
 # adapterConfig and PATCH only on a real difference. The merge (rather than
@@ -278,6 +250,13 @@ PROTOTYPER_DEVENV_OWNER="${PAPERCLIP_PROTOTYPER_DEVENV_OWNER:-prototyper}"
 # Reconciling rather than create-only matters: without it a change to the
 # image only reaches agents created after that point, so the long-lived stack
 # silently keeps the config it was born with and nothing surfaces the gap.
+#
+# Returns 1 when creation fails — and every call site must swallow that with
+# `|| true`. This script runs under `set -e` as a one-shot that BOTH hermes and
+# frontdoor wait on with `service_completed_successfully`, so letting one
+# agent's failure propagate would abort the bootstrap: no further agents, and
+# the whole stack stuck waiting on a dependency that will never complete. A
+# per-agent failure must stay a loud line on stderr, not a stack outage.
 reconcile_agent() {
     _ra_name="$1"
     _ra_type="$2"
@@ -320,6 +299,31 @@ reconcile_agent() {
     fi
 }
 
+# ── 6. Prototyper agent (omp; scoped skills) ──
+# HOME is deliberately NOT overridden: omp reads its model config from
+# $HOME/.omp, so pointing HOME at the Claude credential home would break it.
+# Skills are per-agent — the executor agent declares no paperclipSkillSync and
+# therefore sees none of this.
+#
+# Everything the Prototyper needs lives in the desired config below, so a
+# fresh `up` produces the same agent a hand-tuned board would. Fields NOT
+# named here are paperclip's own defaults and need no assertion: heartbeat
+# `{enabled:false, maxConcurrentRuns:20}`, permissions
+# `{canCreateAgents:false, canCreateSkills:true}`, the managed AGENTS.md
+# instructions bundle (paperclip writes instructions* on first run), the
+# company membership and the `tasks:assign` grant (both minted at create).
+PROTOTYPER_SKILLS='["prototype","prototype-workspace","devenv","container-tools"]'
+PROTOTYPER_DEVENV_OWNER="${PAPERCLIP_PROTOTYPER_DEVENV_OWNER:-prototyper}"
+
+# DEVENV_OWNER is the friendly label devenv stamps on leases. It is written
+# in the canonical `{type:"plain"}` binding form because the API rewrites bare
+# strings into it anyway (secrets.ts `canonicalizeBinding`) — writing the same
+# shape the server persists keeps the diff stable instead of patching
+# every boot. Note it does not currently reach the agent process: every local
+# adapter's env loop does `if (typeof value !== "string") continue`, and the
+# API can no longer persist a string. So devenv falls back to
+# `agent:$PAPERCLIP_AGENT_ID`; this key is intent + board-visible
+# documentation until upstream reads plain bindings.
 proto_desired_config() { # live adapterConfig on stdin → desired on stdout
     jq -c --argjson skills "$PROTOTYPER_SKILLS" --arg owner "$PROTOTYPER_DEVENV_OWNER" '
           .engine = "acp"
@@ -329,7 +333,7 @@ proto_desired_config() { # live adapterConfig on stdin → desired on stdout
     '
 }
 
-reconcile_agent "$PROTOTYPER_NAME" claude_local proto_desired_config
+reconcile_agent "$PROTOTYPER_NAME" claude_local proto_desired_config || true
 
 # ── 7. Scientist agent (remote hermes profile) ──
 # Unlike the two local agents above, this one runs somewhere else: the hermes
@@ -344,6 +348,28 @@ reconcile_agent "$PROTOTYPER_NAME" claude_local proto_desired_config
 SCIENTIST_BASE="${HERMES_SCIENTIST_BASE_URL:-http://hermes:8642/p/agt-scientist}"
 SCIENTIST_KEY="${HERMES_SCIENTIST_API_KEY:-}"
 
+# apiKey is a schema SECRET field for hermes_gateway (its config-schema marks
+# `meta.secret`, and secrets.ts FALLBACK_ADAPTER_SCHEMA_SECRET_FIELDS lists it
+# even when the schema is unavailable). A plain string sent for such a field is
+# NOT stored as sent: normalizeSchemaSecretFieldForPersistence mints a brand-new
+# managed secret named `hermes_gateway.apikey.<random-uuid>` and persists a
+# `{type:"secret_ref"}` binding pointing at it. So what we send can never equal
+# what we read back — a naive assert-and-compare PATCHes on EVERY boot and mints
+# another orphaned secret every time (seven accumulated before this was caught),
+# and `agent exists: … (config current)` can never print. Same canonicalization
+# trap as DEVENV_OWNER above, one layer deeper.
+#
+# There is no read path for a company secret's value (routes/secrets.ts exposes
+# create/rotate/patch/usage, never the plaintext), so "did the key change?"
+# cannot be answered by comparing values. Carry a one-way digest of the desired
+# key in the config instead: when the live record already holds a secret_ref AND
+# the stored digest matches this key, leave apiKey untouched so desired == live
+# and nothing is patched. When the digest differs (key rotated in .env), or
+# apiKey is absent, or it is still a plain string, assert the key — one PATCH
+# re-mints it and stamps the new digest, and the next boot is quiet again.
+# The digest is a truncated sha256, not the credential.
+SCIENTIST_KEY_FP="$(printf '%s' "$SCIENTIST_KEY" | sha256sum | cut -c1-16)"
+
 sci_desired_config() { # live adapterConfig on stdin → desired on stdout
     # dangerouslyAllowInsecureRemoteHttp: paperclip's hermes_gateway adapter
     # (transport-security.ts isRemotePlainHttp) refuses plain http to any
@@ -354,18 +380,26 @@ sci_desired_config() { # live adapterConfig on stdin → desired on stdout
     # network (every other inter-service hop in this stack is plain http on
     # a private docker network too), so this is the same trust boundary the
     # rest of the stack already relies on, not a new one.
-    jq -c --arg base "$SCIENTIST_BASE" --arg key "$SCIENTIST_KEY" '
-          .apiBaseUrl = $base
-        | .apiKey = $key
+    jq -c --arg base "$SCIENTIST_BASE" --arg key "$SCIENTIST_KEY" --arg fp "$SCIENTIST_KEY_FP" '
+          (((.apiKeyFingerprint // "") == $fp) and ((.apiKey | type) == "object")) as $key_current
+        | .apiBaseUrl = $base
         | .sessionKeyStrategy = "agent"
         | .dangerouslyAllowInsecureRemoteHttp = true
+        | .apiKeyFingerprint = $fp
+        | if $key_current then . else .apiKey = $key end
     '
 }
 
+# Unreachable via compose: docker-compose.yml passes
+# `${HERMES_SCIENTIST_API_KEY:?set in .env}`, and `:?` already aborts `up` on an
+# unset OR empty value. Kept for direct invocation of this script (a hand-run,
+# or `docker compose exec paperclip opc-paperclip-bootstrap.sh`), where nothing
+# upstream of here checks — an empty key would otherwise create an agent that
+# fails every run with hermes_gateway_api_key_missing.
 if [ -z "$SCIENTIST_KEY" ]; then
     echo "[pc-bootstrap] WARNING HERMES_SCIENTIST_API_KEY empty — skipping Scientist agent" >&2
 else
-    reconcile_agent "$SCIENTIST_NAME" hermes_gateway sci_desired_config
+    reconcile_agent "$SCIENTIST_NAME" hermes_gateway sci_desired_config || true
 fi
 
 echo "[pc-bootstrap] done. admin=$ADMIN_EMAIL company=$company_id agent=$AGENT_NAME"
