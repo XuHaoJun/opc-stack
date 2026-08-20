@@ -88,6 +88,25 @@ check "agent uid can read its nsec" \
 checkout "scientist is a relay member" '"channel_id"' \
     docker compose exec -T -u 10000 -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c 'buzz --relay "http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")" channels list --member'
 
+# Fix round 1 stopped the wrapper's old home-root fallback from handing the
+# chief of staff's key to hermes-dashboard, but nothing asserted the negative
+# case. In hermes-dashboard, /opt/data is bound to frontdoor-hermes, so the
+# chief of staff's key genuinely sits at /opt/data/.agent.nsec (precondition
+# asserted below, else this check would be vacuous) — with THIS container's
+# own unscoped HERMES_HOME=/opt/data, the wrapper must still resolve no
+# identity. Assert that as a property, not a reworded message string: the
+# buzz CLI's own --help documents its exit codes ("3=auth error"), and with
+# no BUZZ_PRIVATE_KEY it refuses locally — before any network call — with
+# exit 3. A wrapper that leaked the chief of staff's key here would instead
+# exit 0 (or fail later, for an unrelated reason).
+check "dashboard wrapper yields NO identity (chief of staff's key must stay unreachable)" \
+    docker compose exec -T -u 10000 -e HOME=/opt/data -e HERMES_HOME=/opt/data hermes-dashboard sh -c '
+        test -s /opt/data/.agent.nsec || exit 9
+        unset BUZZ_PRIVATE_KEY
+        buzz channels list >/dev/null 2>&1
+        test $? -eq 3
+    '
+
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,
 # against its live /proc/1-derived argv — not docker-compose.yml. Reverting
