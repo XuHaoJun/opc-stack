@@ -27,7 +27,9 @@
 
 缺什麼就裝什麼：`nix-add nixpkgs#<tool>`。**永遠不要 `apt-get`** —— apt 寫進
 container layer，重建就沒了；nix 寫進共用 volume，會留著，而且全棧都看得到。
-細節見 container-tools 的規則。
+套件名不確定時先查再裝：`nix search nixpkgs <關鍵字>`，它印出來的 attribute
+(`legacyPackages.x86_64-linux.<attr>`) 的最後一段就是 `nix-add nixpkgs#<attr>` 要填的名字。
+裝完 `nix-list` 確認，不要的 `nix-rm` 移掉。
 
 你裝的東西是**全棧共享**的。裝你需要的，不要裝你可能會需要的。
 

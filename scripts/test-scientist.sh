@@ -122,23 +122,40 @@ checkout "profile SOUL.md is the scientist's, not the front door's" "scientist" 
     docker compose exec -T hermes head -5 "/opt/data/profiles/$PROFILE/SOUL.md"
 # A bare `! cmp -s scientist chief` is vacuous here: before the sync in
 # opc_seed_expert_profile exists, hermes has already written its own generic
-# built-in identity text ("You are Hermes Agent... created by Nous
-# Research...") into a freshly-created profile home, and that generic text
-# already differs from the chief of staff's fully-custom SOUL.md — so the
-# bare comparison would pass whether or not this task's sync code ever ran.
-# Require BOTH: the profile file is no longer the untouched generic default,
-# AND it is not literally the chief of staff's file (the regression the
-# comparison was meant to catch in the first place).
-check "profile SOUL.md differs from the chief of staff's" \
-    docker compose exec -T hermes sh -c "! grep -qF 'created by Nous Research' /opt/data/profiles/$PROFILE/SOUL.md && ! cmp -s /opt/data/profiles/$PROFILE/SOUL.md /opt/data/SOUL.md"
+# built-in identity into a freshly-created profile home, and that generic
+# text already differs from the chief of staff's fully-custom SOUL.md — so
+# the bare comparison would pass whether or not this task's sync code ever
+# ran. Grepping for hermes's built-in wording would fix that but pin the
+# check's falsifiability to an upstream string: a reworded default silently
+# returns it to the vacuous form. Assert the two properties positively
+# instead, with no upstream literal — the boot sync actually ran (the
+# profile's copy is byte-identical to the image copy the entrypoint syncs
+# from) AND the result is not the chief of staff's file (the regression the
+# comparison was meant to catch).
+check "profile SOUL.md is the image's synced copy, not the chief of staff's" \
+    docker compose exec -T hermes sh -c "cmp -s /opt/data/profiles/$PROFILE/SOUL.md /opt/hermes/profiles/$PROFILE/SOUL.md && ! cmp -s /opt/data/profiles/$PROFILE/SOUL.md /opt/data/SOUL.md"
 check "no process-wide MEMORY_TENCENTDB_AGENT_ID on the gateway" \
     docker compose exec -T hermes sh -c '! env | grep -q ^MEMORY_TENCENTDB_AGENT_ID='
-checkout "autonomous experiment queue is scheduled exactly once" "experiment-queue" \
-    docker compose exec -T -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes /opt/hermes/bin/hermes cron list
+# Both cron checks list with --all. `cron list` alone is
+# list_jobs(include_disabled=False) (hermes_cli/cron.py:99-103) and `cron
+# pause` sets enabled:False (cron/jobs.py::pause_job), so a paused job is
+# invisible to a default listing — which is exactly the state in which the
+# entrypoint's guard used to create a second, active copy. A gate that also
+# looks away cannot see that happen.
+checkout "autonomous experiment queue is scheduled" "experiment-queue" \
+    docker compose exec -T -e HERMES_HOME="/opt/data/profiles/$PROFILE" hermes /opt/hermes/bin/hermes cron list --all
 check "the cron job was not duplicated across boots" \
-    docker compose exec -T -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c "test \"\$(/opt/hermes/bin/hermes cron list 2>/dev/null | grep -c experiment-queue)\" -eq 1"
+    docker compose exec -T -e HERMES_HOME="/opt/data/profiles/$PROFILE" hermes sh -c "test \"\$(/opt/hermes/bin/hermes cron list --all 2>/dev/null | grep -c experiment-queue)\" -eq 1"
+# Credentials are injected into THIS exec only (opc_load_env already read
+# them from ./.env). They are deliberately NOT added to the tencentdb-core
+# service's compose environment: that would put the admin user key in the
+# long-running container's /proc/1/environ, in every child process and in
+# `docker inspect`, permanently, so that a test could read it conveniently.
 checkout "tencentdb knows the scientist agent" '"agent_id"' \
-    docker compose exec -T tencentdb-core sh -c "curl -sS -X POST http://127.0.0.1:8420/v3/meta/agent/get -H 'Content-Type: application/json' -H 'x-tdai-service-id: default' -H \"Authorization: Bearer \$TENCENTDB_GATEWAY_API_KEY\" -H \"x-tdai-user-key: \$TENCENTDB_ADMIN_USER_KEY\" -d '{\"agent_id\":\"agt-scientist\"}'"
+    docker compose exec -T \
+        -e OPC_TDAI_API_KEY="${TENCENTDB_GATEWAY_API_KEY:-}" \
+        -e OPC_TDAI_USER_KEY="${TENCENTDB_ADMIN_USER_KEY:-}" \
+        tencentdb-core sh -c "curl -sS -X POST http://127.0.0.1:8420/v3/meta/agent/get -H 'Content-Type: application/json' -H 'x-tdai-service-id: default' -H \"Authorization: Bearer \$OPC_TDAI_API_KEY\" -H \"x-tdai-user-key: \$OPC_TDAI_USER_KEY\" -d '{\"agent_id\":\"$PROFILE\"}'"
 
 echo "── dashboard ──"
 # The real gate: call upstream's own role detector inside the live container,

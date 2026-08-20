@@ -24,10 +24,16 @@ TEAM_ID="${TENCENTDB_TEAM_ID:-opc}"
 TEAM_NAME="${TENCENTDB_TEAM_NAME:-OPC}"
 AGENT_ID="${TENCENTDB_AGENT_ID:-agt-hermes-front-door}"
 AGENT_NAME="${TENCENTDB_AGENT_NAME:-Hermes Front Door}"
-# Additional agents to register, one `id:name` pair per whitespace-separated
-# entry. Every id MUST start with `agt`: the Memory Hub panel parses
-# chat_memory-{team}-{agent} asset ids with lastIndexOf('-agt'), and an id
-# without that prefix leaves the panel silently empty.
+# Additional agents to register: `id:name` entries separated by a COMMA (or a
+# newline) — NOT whitespace. Names are human-readable and routinely contain
+# spaces (the default agent above is literally "Hermes Front Door"), so
+# whitespace-splitting `agt-market:Market Research` yields two entries,
+# `agt-market:Market` and `Research` — and the second registers an agent whose
+# id is `Research`, with no `agt` prefix at all. Every id MUST start with
+# `agt`: the Memory Hub panel parses chat_memory-{team}-{agent} asset ids with
+# lastIndexOf('-agt'), and an id without that prefix leaves the panel silently
+# empty. That invariant is enforced in ensure_agent() below rather than left
+# to this comment.
 EXTRA_AGENTS="${TENCENTDB_EXTRA_AGENTS:-agt-scientist:Scientist}"
 
 meta() { # <path> <json-body> → envelope via stdout
@@ -85,6 +91,16 @@ fi
 ensure_agent() { # <agent_id> <agent_name>
   _aid="$1"
   _aname="$2"
+  case "$_aid" in
+    agt*) ;;
+    *)
+      echo "[tencentdb-provision] FAILED: agent id '${_aid}' does not start with 'agt' — the Memory Hub panel parses chat_memory-{team}-{agent} with lastIndexOf('-agt') and would render nothing for it; refusing to register it"
+      exit 1 ;;
+  esac
+  if [ -z "$_aname" ]; then
+    echo "[tencentdb-provision] FAILED: agent '${_aid}' has an empty name"
+    exit 1
+  fi
   CODE="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$GATEWAY/v3/meta/agent/get" \
     -H 'Content-Type: application/json' -H 'x-tdai-service-id: default' \
     -H "Authorization: Bearer ${API_KEY}" -H "x-tdai-user-key: ${USER_KEY}" \
@@ -98,9 +114,34 @@ ensure_agent() { # <agent_id> <agent_name>
 }
 
 ensure_agent "$AGENT_ID" "$AGENT_NAME"
-for _pair in $EXTRA_AGENTS; do
-  [ -n "$_pair" ] || continue
-  ensure_agent "${_pair%%:*}" "${_pair#*:}"
+
+# Split on comma/newline only (see EXTRA_AGENTS above), with globbing off:
+# unquoted word-splitting also pathname-expands, so an entry containing `*`
+# or `?` would silently become whatever happens to match in the CWD.
+_old_ifs="$IFS"
+set -f
+IFS=',
+'
+for _entry in $EXTRA_AGENTS; do
+  set +f
+  IFS="$_old_ifs"
+  # Trim surrounding whitespace so `a:A, b:B` works as it reads.
+  _entry="$(printf '%s' "$_entry" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [ -n "$_entry" ]; then
+    case "$_entry" in
+      *:*) ;;
+      *)
+        echo "[tencentdb-provision] FAILED: TENCENTDB_EXTRA_AGENTS entry '${_entry}' has no ':' — expected comma-separated 'agt-<id>:<Display Name>' pairs"
+        exit 1 ;;
+    esac
+    ensure_agent "$(printf '%s' "${_entry%%:*}" | sed -e 's/[[:space:]]*$//')" \
+                 "$(printf '%s' "${_entry#*:}" | sed -e 's/^[[:space:]]*//')"
+  fi
+  set -f
+  IFS=',
+'
 done
+set +f
+IFS="$_old_ifs"
 
 echo "[tencentdb-provision] done"

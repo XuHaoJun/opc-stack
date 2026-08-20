@@ -533,6 +533,21 @@ YAML
         chmod 600 "$_ph/.paperclip-api.key"
     fi
 
+    # Hand the profile to the runtime uid BEFORE calling hermes below. The
+    # `hermes` on PATH is a privilege-drop shim (/opt/hermes/bin/hermes:
+    # root -> s6-setuidgid 10000), so every file this entrypoint just wrote as
+    # root — .env above all — must already be uid-aligned or the CLI dies
+    # before it parses its own arguments. The entrypoint's global
+    # `chown -R "$HH"` runs at the very end, too late for this call.
+    #
+    # This was invisible until the WARNING below started carrying its cause:
+    # on a COLD boot (empty profile dir) `cron create` died with
+    # `PermissionError: [Errno 13] ... profiles/<p>/.env` inside
+    # python-dotenv, the old `>/dev/null 2>&1` swallowed it, and the job then
+    # quietly appeared only on the SECOND boot — after the previous boot's
+    # trailing chown had made .env readable.
+    chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$_ph" 2>/dev/null || true
+
     # Autonomous experiment queue. Idempotent by job name: `cron create` would
     # otherwise add a duplicate on every boot, and duplicates are invisible
     # until the agent starts waking up twice as often for no stated reason.
@@ -540,20 +555,80 @@ YAML
     # The prompt deliberately does NOT say "start an experiment": an empty
     # notebook should produce silence, not invented work. Filing is capped at
     # backlog, which wakes nobody (issue-assignment-wakeup.ts).
+    #
+    # The guard MUST list with --all. `cron list` without it calls
+    # list_jobs(include_disabled=False) (hermes_cli/cron.py:99-103), and
+    # `cron pause` sets enabled:False (cron/jobs.py::pause_job) — so an
+    # operator who pauses experiment-queue (the obvious way to stop the loop
+    # for a while) makes a bare listing miss it here, and the next boot
+    # creates a SECOND, active copy: the pause silently undone, with two
+    # Monday runs and nothing on the board to say why.
     if [ -x /opt/hermes/bin/hermes ]; then
-        if ! HERMES_HOME="$_ph" /opt/hermes/bin/hermes cron list 2>/dev/null | grep -q "experiment-queue"; then
-            HERMES_HOME="$_ph" /opt/hermes/bin/hermes cron create '0 9 * * 1' \
+        if ! HERMES_HOME="$_ph" /opt/hermes/bin/hermes cron list --all 2>/dev/null | grep -q "experiment-queue"; then
+            # Capture the failure text: a bare >/dev/null 2>&1 leaves the
+            # WARNING below saying only "could not", with the cause thrown
+            # away exactly when it is needed.
+            if _cron_out="$(HERMES_HOME="$_ph" /opt/hermes/bin/hermes cron create '0 9 * * 1' \
                 'Review your experiment notebook (memories/). Is there an open question worth an experiment this week? If yes, run it and report what you found — method and numbers, including anything that did not work. If there is nothing worth doing, say so and stop; do not invent work. If a finding is worth someone else acting on, file it as a Paperclip issue at status=backlog.' \
-                --name experiment-queue >/dev/null 2>&1 \
-                && echo "[hermes] $_p: seeded cron job experiment-queue" \
-                || echo "[hermes] WARNING $_p: could not seed cron job experiment-queue" >&2
+                --name experiment-queue 2>&1)"; then
+                echo "[hermes] $_p: seeded cron job experiment-queue"
+            else
+                echo "[hermes] WARNING $_p: could not seed cron job experiment-queue — output follows" >&2
+                printf '%s\n' "$_cron_out" | sed 's/^/[hermes]   /' >&2
+            fi
         fi
     fi
 
     echo "[hermes] expert profile ready: $_p"
 }
 
-opc_seed_expert_profile agt-scientist "${HERMES_SCIENTIST_API_KEY:-}"
+# Expert-profile seeding belongs to the GATEWAY container alone. This image
+# runs in two containers (`hermes` and `hermes-dashboard`) with the SAME
+# entrypoint and the SAME hermes-profiles volume mounted at
+# $HERMES_HOME/profiles, and `docker compose up` starts them in parallel with
+# no ordering between them. Every write below is therefore a two-writer race
+# on one directory; the cron seed is the sharpest case, because
+# cron.jobs.create_job does not reject a duplicate name — both containers can
+# list (nothing), both create, and the expert then wakes up twice every
+# Monday with nothing on the board or in the gate to say why. The dashboard is
+# an observer: it reads what the gateway seeds, and must not write here at all.
+#
+# Role comes from the container's command, not a flag, for the same reason
+# upstream keys its own reconciliation skip off it
+# (container_boot._is_dashboard_container, which reads /proc/1/cmdline and
+# checks argv[0] == "dashboard" after peeling the launcher prefix): a flag can
+# be forgotten in a hand-written manifest, reintroducing the race. At
+# entrypoint time PID 1 IS this script and the s6 wrapper has not been exec'd
+# yet, so /proc/1/cmdline carries no main-wrapper.sh token to peel — read the
+# same fact from "$@" instead (compose's `command:`, or the image CMD), and
+# mirror upstream's peeling so a wrapped argv resolves identically.
+opc_is_dashboard_container() { # <container command argv...>
+    _has_wrapper=0
+    for _a in "$@"; do
+        case "$_a" in *main-wrapper.sh) _has_wrapper=1 ;; esac
+    done
+    if [ "$_has_wrapper" = 1 ]; then
+        while [ "$#" -gt 0 ]; do
+            _a="$1"; shift
+            case "$_a" in *main-wrapper.sh) break ;; esac
+        done
+    elif [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "init" ]; then
+        shift
+    fi
+    if [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "entrypoint-dispatch.sh" ]; then
+        shift
+    fi
+    if [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "hermes" ]; then
+        shift
+    fi
+    [ "${1:-}" = "dashboard" ]
+}
+
+if opc_is_dashboard_container "$@"; then
+    echo "[hermes] dashboard container — skipping expert profile seeding (the gateway container owns the shared profiles volume)"
+else
+    opc_seed_expert_profile agt-scientist "${HERMES_SCIENTIST_API_KEY:-}"
+fi
 
 # Single-owner home: everything under $HERMES_HOME must belong to the hermes
 # runtime uid (10000) — the dashboard/gateway services run as that user, and
