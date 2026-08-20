@@ -67,11 +67,23 @@ echo "── HTTP endpoints (host → published ports) ──"
 check "buzz relay REST  :${BUZZ_PORT:-3000}/_readiness" http_ok "http://127.0.0.1:${BUZZ_PORT:-3000}/_readiness" 200
 check "hermes dashboard :${HERMES_DASHBOARD_PORT:-9119}/" http_ok "http://127.0.0.1:${HERMES_DASHBOARD_PORT:-9119}/" 200 401 302
 check "hermes API       :${HERMES_API_PORT:-8642}/" http_ok "http://127.0.0.1:${HERMES_API_PORT:-8642}/" 200 401 403 404
-# Expert agent profiles are served on the same port under /p/<name>. A 404
-# here means the profile directory never got seeded; a 401 means it exists
-# but has no usable per-profile API_SERVER_KEY (the guard is fail-closed).
+# Expert agent profiles are served on the same port under /p/<name>.
+#
+# The 200 below is NOT self-standing: with multiplex OFF the /p/<name> prefix
+# is ignored entirely (api_server._resolve_request_profile) and /v1/health is
+# registered unconditionally, so it answers 200 for any prefix whatsoever —
+# it would pass on a stack with no profiles at all. The row after it is the
+# discriminator: an UNKNOWN profile must 404. That only happens when the
+# prefix is actually resolved against the loaded profile set, which is
+# precisely what GATEWAY_MULTIPLEX_PROFILES=1 plus a seeded
+# /opt/data/profiles/<name> buys. Turn multiplex off, or lose the profile
+# directory, and the 404 becomes a 200 and this goes red.
+# (scripts/test-scientist.sh asserts the credential half — the profile route
+# accepts the profile's own key and rejects the default profile's.)
 check "hermes scientist :${HERMES_API_PORT:-8642}/p/agt-scientist/" http_ok \
   "http://127.0.0.1:${HERMES_API_PORT:-8642}/p/agt-scientist/v1/health" 200
+check "hermes unknown profile :${HERMES_API_PORT:-8642}/p/<none>/ -> 404" http_ok \
+  "http://127.0.0.1:${HERMES_API_PORT:-8642}/p/no-such-expert/v1/health" 404
 check "paperclip health :${PAPERCLIP_PORT:-3100}/api/health" http_ok "http://127.0.0.1:${PAPERCLIP_PORT:-3100}/api/health" 200
 check "tencentdb core   :${TENCENTDB_CORE_PORT:-8420}/health" http_ok "http://127.0.0.1:${TENCENTDB_CORE_PORT:-8420}/health" 200
 check "tencentdb panel  :${TENCENTDB_PANEL_PORT:-8125}/" http_ok "http://127.0.0.1:${TENCENTDB_PANEL_PORT:-8125}/" 200 302

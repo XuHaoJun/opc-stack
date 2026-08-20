@@ -128,8 +128,25 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
    (600 uid 10000), 而專家跑在**同一個 uid**, hermes 的 cross-profile guard 又不涵蓋
    terminal tool (`agent/file_safety.py:427`, 上游原話「Soft guard, NOT a security boundary: the agent runs as the same OS user」)。
    整顆掛進去 = 一行 `cat` 就拿到參謀長的 Buzz 身分, 之後它發的文都掛在參謀長名下。
-   dashboard 兩顆都掛是刻意的 —— 它只讀不跑, 那是「一次登入看到全部 agent」的來源
+   dashboard 兩顆都掛是刻意的 —— 那是「一次登入看到全部 agent」的來源
    (`list_profiles()` 列舉 `$HERMES_HOME/profiles`)。
+   **但 dashboard 不是「只讀不跑」——它會跑 agent, 而且那條路徑拿得到參謀長的 key。**
+   `/chat` 頁面在 xterm.js PTY 裡跑一個真的 hermes
+   (`upstream/hermes/hermes_cli/web_server.py:2508`), 並且支援 per-request 的
+   `HERMES_HOME` override (`:17438` 一帶的 profile scoping)。那個容器同時掛
+   `frontdoor-hermes`(根目錄有參謀長的 `.agent.nsec`) 與 `hermes-profiles`, 又以
+   uid 10000 跑 —— 所以**人**在 dashboard 上選 `agt-scientist` 然後開 Chat, 拿到的
+   shell 讀得到那把 key。buzz wrapper 的 profile guard 擋不住這條: wrapper 尊重
+   已經設好的 `BUZZ_PRIVATE_KEY`, 而 shell 裡本來就能 `cat`。
+   **這是已知且接受的代價, 不是漏洞回報。** 兩個限定條件是它可以被接受的原因:
+   (1) 這條路徑**由人發起**, 不是 agent 自主 —— 專家 agent 自己跑在 `hermes` 容器,
+   那裡**沒有** `frontdoor-hermes`(本不變量的第一句), 所以自主執行永遠碰不到;
+   (2) 能開 dashboard 的人已經有 `HERMES_DASHBOARD_BASIC_AUTH_*`, 也就是已經是
+   operator。**不要為此拿掉 dashboard 的 `frontdoor-hermes` 掛載** —— 那會毀掉
+   「一次登入看到全部 agent(含參謀長)」這個使用者明確選擇的性質; 要換掉這個取捨
+   是使用者的決定。真正被機器守住的是 `hermes` 容器那半邊, 由
+   `scripts/test-scientist.sh` 的兩條結構檢查釘住 (不掛 `frontdoor-hermes`、
+   uid 10000 讀不到 `/keys/agent.nsec`)。
    **專家之間不隔離** (同容器同 uid), 這是換 8 倍記憶體的顯式取捨: 每專家一容器是
    ~118MB × N (Python heap 是 RssAnon, 行程間不共享), multiplex 是 ~148MB + ~9MB × N
    (量測見 `docs/superpowers/specs/2026-08-20-scientist-expert-profile-design.md` §4.6)。
@@ -190,6 +207,9 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - **指派會叫醒 agent, 不需要排程 heartbeat** (`issue-assignment-wakeup.ts`), 唯一的前置條件是 `issue.status !== "backlog"`。另外 `heartbeatEnabled` **不是欄位** — 相關的只有 agent 的 `status` (`idle` vs `paused`)。回完沒給 disposition 的 issue 會**反覆喚醒** agent。
 - **`opc-paperclip-bootstrap.sh` 的 skill/agent 安裝必須 reconcile 而非 create-only**: 改 `patches/` 裡的 skill 或 `desiredSkills` 之後, 若安裝器只在缺席時建立, 變更永遠到不了跑著的 stack — 檔案說一套、agent 讀另一套, 而且沒有任何地方會顯示這個落差。目前 SKILL.md 內容與 Prototyper 的**整份 `adapterConfig`** (engine / agentCommand / `paperclipSkillSync.desiredSkills` / `env.DEVENV_OWNER`) 都會逐次比對更新 —— 比對是**合併而非覆寫**, 沒被列名的 key (paperclip 自己寫的 `instructions*`、operator 在 board 上加的東西) 原樣保留。Prototyper 其餘欄位刻意不主張, 因為它們就是 paperclip 的建立預設: `heartbeat {enabled:false, maxConcurrentRuns:20}`、`modelProfiles.cheap {enabled:false}`、`permissions {canCreateAgents:false, canCreateSkills:true}`、managed AGENTS.md instructions bundle、company membership 與 `tasks:assign` grant (後兩者在 create 當下鑄出)。**skill 內容要走 `PATCH /companies/<c>/skills/<id>/files` 帶 `path:SKILL.md`, 不能走 skill 本身的 PATCH** —— `updateSkill` 收下 `markdown` 然後靜靜丟掉 (它只寫 name/description/categories/sharing), 回你 **200** 而 board 上還是舊字; `updateFile` 才會真的寫檔 + 寫 markdown 欄 + 依 frontmatter 重算 name/description + 切一版。devenv 與 prototype-workspace 就這樣在 board 上停在舊版好幾個 commit, 而 bootstrap 每次都印「skill updated」—— 因為 `api_patch_raw` 結尾是 `|| true`, `&&` 永遠成立。現在改成驗回應裡有 `.path` 才算成功。
 - **Paperclip 的 GitHub skill import 只抓 `SKILL.md`** — 會 pin commit SHA 也會做 trust level 檢查, 但 sibling 檔案 (mattpocock prototype 的 `LOGIC.md`/`UI.md`) 不會跟著進來, 匯進去的 skill 兩條分支都是斷的。所以第三方 skill 一律 **vendor 到 `patches/paperclip/skills/<slug>/`** (附 `SOURCE` 記 repo+SHA), 由 `opc-paperclip-bootstrap.sh` 建成 local skill; 更新跑 `scripts/refresh-vendored-skills.sh`。注意 `GET /skills/:id/files` 的 inventory 會落後 (新增檔案後仍只列 SKILL.md), 以磁碟 `/paperclip/instances/default/skills/<companyId>/<slug>/` 與 run 時物化的 bundle 為準。
+- **profile `config.yaml` 的 reconcile 是「逐行精確比對」, 所以 dashboard 寫回的一個尾註就會多出一整塊**: `hermes-entrypoint.sh` 收斂 `platforms.api_server.enabled: false` 的方式是找那一行 `platforms:`(以及其下的 `api_server:`)。dashboard 可編輯這個檔, 而 YAML dumper / 人手都可能把它寫成 `platforms:  # managed` —— 精確比對就對不上, reconcile 於是**在檔尾再 append 一整個 `platforms:` block**。YAML 後者覆蓋前者, 所以「看起來」還在, 但症狀出現在別的地方: 那個 profile **啟動 0 個 secondary adapter**(`gateway/run.py` 的 secondary-profile loader 在 per-profile adapter 迴圈**之前**就丟 `SecondaryPortBindingConfigError`), 而 warning 只提 api_server, 完全不提「你有兩個 platforms key」。檢查方式: `grep -c '^platforms:' /opt/data/profiles/<p>/config.yaml` 必須是 1。真正的修法是讓 reconcile 認得註解/空白變體, 目前只有這條紀錄。
+- **`devenv` CLI 不會建 control schema, 建它的是 `opc-devenv-seed.sh`**: 兩個呼叫者 —— paperclip entrypoint, 以及 `devenv-expert-leases` one-shot(自己套 schema, 見它上方的註解)。這條之所以值得寫下來, 是因為 schema 不在時的**原始訊息會指錯方向**: `devenv_valkey_db_alloc` 的 registry 讀取回空字串, CLI 就喊 `no free valkey database id (cap N) — run 'devenv list' and release one`, 讀起來像槽位用罄, 於是人去 release 無辜的租約。現在 `provision`/`list` 開頭都先跑 `devenv_require_control_schema`, 缺 schema 就以 exit 4 明講。
+
 - **devenv 回收是手動的** (`devenv release <key>`), 沒有任何自動 gc/排程。累積靠 `devenv_usage` view 看 (按 postgres 磁碟大小遞減 — valkey 槽位用罄會自己以 exit 3 喊, 磁碟不會)。valkey 租戶隔離靠 9.1+ 的 `db=<dbid>` ACL op, **9.0.x 沒有這個功能**, 升降版本前先確認。per-tenant 密碼是從 `DEVENV_SECRET_SALT` 推導而非儲存 (這是 provision 冪等的原因), **改 salt 會讓所有已發出的 `.env` 失效**。agent 身分優先序 `DEVENV_OWNER` → `agent:$PAPERCLIP_AGENT_ID` → `user@hostname`; **`env.DEVENV_OWNER` 目前不可能到達 agent 行程** — 不是設錯而是無路可走: API 的 `secrets.ts canonicalizeBinding` 會把裸字串一律改寫成 `{"type":"plain",value}` 存檔, 而每個 local adapter 組 child env 時都是 `if (typeof value !== "string") continue` (`adapters/process/execute.ts`、`adapter-claude-local/server/execute.ts`), 兩邊對不上。bootstrap 仍寫這個 key (它是意圖, 也在 board 上看得見), 但實際落到 `agent:$PAPERCLIP_AGENT_ID` —— `PAPERCLIP_AGENT_ID` 才是每次 run 一定有的。
 - **devenv-pg 是 pg18, volume 要掛 `/var/lib/postgresql` 而非其下的 `data`** — 沿用 pg17 的掛法 image 會拒絕啟動。
 - **Claude cred 只鏡像 `.credentials.json` 一個檔** (`host-sync-claude` one-shot → `opc-prototyper-home` volume, 掛 paperclip `/agent-homes/prototyper`)。**這個 home 目前沒有被接上任何東西** — 原設計是拿 prototyper 的 `adapterConfig.env.HOME` 指過去, 但 `env.*` 送不到子行程 (見 devenv 那條), 而 agent 子行程實際繼承的是 paperclip server 的 `HOME=/paperclip`。正常路徑 (omp + `OPENAI_API_KEY`) 不受影響; 只有真的要改用 `claude` CLI 時才需要處理, 而那要動 compose 層的 HOME, 是全體 agent 共用的決定, 不是 per-agent 設定。host 的 `settings.json`(含 hook)、`plugins/`、`skills/`、`projects/`、`history.jsonl` 一律不進容器 — 容器內的 claude 是乾淨的。**OAuth refresh token 是單次使用**: 容器端刷新會讓 host 那份失效 (反之亦然), 壞了跑 `scripts/sync-claude-creds.sh` 重同步。`.env` 的 `ANTHROPIC_API_KEY` 若有值會蓋掉 OAuth (改用 API 計費), 想吃訂閱就留空。
@@ -214,6 +234,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - `patches/nix-seed/` — nix seed build context (nix 2.35.2 + 12 工具, `cp -al` 成 `/nix-seed`); compose `nix-seed` 是 one-shot, 消費者 = 各 service Dockerfile 的 `COPY --from=nix-seed`
 - `patches/{buzz,hermes}/SOUL.md` — agent 身分 + 「不自己實作」規則 (兩份必須相同; 唯一對所有 lane 都生效的位置)
 - `patches/<proj>/opc-mise-seed.sh` — 每 project 一份, entrypoint source 的 mise bootstrap (空 volume 自動裝 node/rust/omp)
+- `patches/hermes/opc-env-value.sh` — 唯一的 `.env` 讀取器。entrypoint `source` 它拿 `opc_env_value` 函式, `scripts/test-scientist.sh` 在容器裡把**同一個檔**當 CLI 執行 (`opc-env-value.sh <file> <name>`)。寫的人與驗的人用同一份 parser, 否則 gate 會對著跟 gateway 不同的值變綠
 - `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
 - `patches/paperclip/skills/<slug>/` — vendor 的第三方 skill (SKILL.md + sibling 檔 + `SOURCE` 記 repo/SHA); image 內落在 `/opt/opc-skills/`, bootstrap 裝進 company library
 - `patches/paperclip/templates/_layers/<name>/apply.sh` — 選配的 layer (`prototype layer add`)。**layer 之間必須獨立** — 需要知道另一個 layer 存在的 layer 是設計失敗, 它會讓測試從線性變成組合爆炸。用 script 而非複製檔案, 是因為 tailwind/shadcn 有自己的 installer, 複製快照等於凍結我們控制不了的版本

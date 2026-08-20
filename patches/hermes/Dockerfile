@@ -220,7 +220,10 @@ COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
 COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/hermes-entrypoint.sh /usr/local/bin/hermes-entrypoint.sh
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh /usr/local/bin/opc-gh-seed.sh /usr/local/bin/hermes-entrypoint.sh
+# Sourced by the entrypoint AND executed as a CLI by scripts/test-scientist.sh
+# (one .env parser, two consumers — see the file's header).
+COPY opc/opc-env-value.sh /usr/local/bin/opc-env-value.sh
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh /usr/local/bin/opc-gh-seed.sh /usr/local/bin/hermes-entrypoint.sh /usr/local/bin/opc-env-value.sh
 
 # memory_tencentdb MemoryProvider (TencentDB Knowledge Plane, PRD v10.1) —
 # seeded into $HERMES_HOME/plugins/ at boot by hermes-entrypoint.sh.

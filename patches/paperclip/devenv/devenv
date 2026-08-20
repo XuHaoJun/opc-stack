@@ -78,6 +78,20 @@ devenv_derive_password() {
     printf '%s|%s|%s' "$DEVENV_SECRET_SALT" "$1" "$2" | sha256sum | cut -c1-32
 }
 
+# The control registry (database devenv_control + table devenv_tenant) is
+# created by opc-devenv-seed.sh, never by this CLI. When it is absent, every
+# command below reaches it through a different door and each door tells a
+# different, wrong story: `provision` dies on the INSERT with psql's raw
+# "database ... does not exist", and if the database exists but the table does
+# not, devenv_valkey_db_alloc's registry read comes back empty and the CLI
+# reports `no free valkey database id (cap N) — run 'devenv list' and release
+# one`. That reads as slot exhaustion and sends the operator to release leases
+# that are not the problem. Ask once, up front, and name the real cause.
+devenv_require_control_schema() {
+    devenv_psql_control -tAc 'SELECT 1 FROM devenv_tenant LIMIT 1' >/dev/null 2>&1 && return 0
+    die "devenv control schema not ready — database '$DEVENV_CONTROL_DB' or table devenv_tenant is missing on $DEVENV_PG_HOST:$DEVENV_PG_PORT. It is created by opc-devenv-seed.sh (paperclip's entrypoint, and the devenv-expert-leases one-shot). This is NOT resource exhaustion; releasing leases will not help." 4
+}
+
 devenv_registry_get() {
     devenv_psql_control -tAc \
         "SELECT COALESCE($2::text,'') FROM devenv_tenant WHERE key = '$1'" 2>/dev/null || true
@@ -207,6 +221,7 @@ cmd_provision() {
     [ -n "$providers" ] || die "--with listed no providers" 2
 
     postgres_probe || die "devenv-pg unreachable at $DEVENV_PG_HOST:$DEVENV_PG_PORT" 4
+    devenv_require_control_schema
     case " $providers " in *" valkey "*)
         valkey_probe || die "devenv-valkey unreachable at $DEVENV_VALKEY_HOST:$DEVENV_VALKEY_PORT" 4 ;;
     esac
@@ -300,6 +315,7 @@ cmd_mark_exposed() {
 
 cmd_list() {
     postgres_probe || die "devenv-pg unreachable at $DEVENV_PG_HOST:$DEVENV_PG_PORT" 4
+    devenv_require_control_schema
     # Same view the humans query from a SQL client — one definition, no drift.
     devenv_psql_control -c \
         "SELECT key, created_by, pg_size, valkey_db,

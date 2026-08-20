@@ -11,7 +11,32 @@
 #
 # Never fatal: devenv is an optional lane. An unreachable backend means
 # `devenv` reports exit code 4 when used, not that paperclip fails to start.
+#
+# Split into two entry points on purpose. `opc_devenv_seed_schema` is the
+# database+schema half and is ALSO called by the `devenv-expert-leases`
+# compose one-shot (same image, same file) before it provisions: that one-shot
+# used to depend on this entrypoint having already run, which on a clean
+# machine it has not — the nix/mise/gh/claude seeds above the call site take
+# minutes on an empty *-mise volume, so the one-shot raced them and lost,
+# every time, silently and permanently (it exits 0 by design, so no later
+# `docker compose up` re-runs it). Making the schema the one-shot's own
+# responsibility removes the race without making the gateway wait on
+# paperclip's health. Both callers run the same idempotent SQL.
 opc_devenv_seed() {
+    opc_devenv_seed_schema
+
+    # `|| true` is load-bearing, not decoration: the entrypoint runs under
+    # `set -e` and this whole file's contract is "never fatal — devenv is an
+    # optional lane". A warning-only diagnostic must not be able to crash-loop
+    # paperclip, which is exactly what happened when the check below had a bug.
+    #
+    # Not part of opc_devenv_seed_schema: the port pool is read from the
+    # paperclip container's own DEVENV_HTTP_* env and its own network
+    # namespace, neither of which the one-shot has.
+    opc_devenv_check_port_pool || true
+}
+
+opc_devenv_seed_schema() {
     _dv_host="${DEVENV_PG_HOST:-devenv-pg}"
     _dv_port="${DEVENV_PG_PORT:-5432}"
     _dv_user="${DEVENV_PG_ADMIN_USER:-postgres}"
@@ -38,27 +63,37 @@ opc_devenv_seed() {
         return 0
     fi
 
+    # `|| re-check` rather than `|| give up`: this function now has two
+    # callers (the entrypoint and the devenv-expert-leases one-shot) and
+    # nothing orders them, so on a warm boot both can reach this point at the
+    # same instant. The loser of a CREATE DATABASE race gets "already exists",
+    # which is success as far as the caller's goal is concerned — treat it as
+    # such by asking pg again instead of reporting a failure that isn't one.
     if ! _dv_psql -d postgres -tAc \
         "SELECT 1 FROM pg_database WHERE datname = '$_dv_db'" | grep -q 1; then
-        _dv_psql -d postgres -c "CREATE DATABASE $_dv_db" >/dev/null || {
-            echo "[devenv-seed] CREATE DATABASE $_dv_db failed" >&2; return 0; }
+        if ! _dv_psql -d postgres -c "CREATE DATABASE $_dv_db" >/dev/null 2>&1; then
+            if ! _dv_psql -d postgres -tAc \
+                "SELECT 1 FROM pg_database WHERE datname = '$_dv_db'" | grep -q 1; then
+                echo "[devenv-seed] CREATE DATABASE $_dv_db failed" >&2
+                return 0
+            fi
+        fi
     fi
 
     # Tenant roles must not read the registry: PUBLIC gets CONNECT on new
     # databases by default, so revoke it explicitly.
     _dv_psql -d postgres -c "REVOKE CONNECT ON DATABASE $_dv_db FROM PUBLIC" >/dev/null 2>&1 || true
 
-    if _dv_psql -d "$_dv_db" -v ON_ERROR_STOP=1 -f "$_dv_sql" >/dev/null; then
+    # Same two-writer reasoning as the CREATE DATABASE above: the SQL is
+    # idempotent but concurrent `CREATE TABLE IF NOT EXISTS` / `DROP VIEW` can
+    # still collide on pg's catalog. One retry turns that into a non-event.
+    if _dv_psql -d "$_dv_db" -v ON_ERROR_STOP=1 -f "$_dv_sql" >/dev/null 2>&1 \
+        || _dv_psql -d "$_dv_db" -v ON_ERROR_STOP=1 -f "$_dv_sql" >/dev/null; then
         echo "[devenv-seed] $_dv_db schema ready (devenv_tenant + devenv_usage)"
     else
         echo "[devenv-seed] schema apply failed — devenv will not work" >&2
+        return 0
     fi
-
-    # `|| true` is load-bearing, not decoration: the entrypoint runs under
-    # `set -e` and this whole file's contract is "never fatal — devenv is an
-    # optional lane". A warning-only diagnostic must not be able to crash-loop
-    # paperclip, which is exactly what happened when the check below had a bug.
-    opc_devenv_check_port_pool || true
 }
 
 # Two ways the preview-port pool gets silently misconfigured. Both are warnings

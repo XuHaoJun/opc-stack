@@ -524,6 +524,20 @@ services:
         condition: service_healthy
       host-sync:
         condition: service_completed_successfully
+      # Same three key producers the gateway waits for, for the same reason:
+      # this container runs the SAME entrypoint, whose wait_for_keys blocks
+      # ~180s on /keys/paperclip-api.key, /keys/tencentdb-admin-user-id and
+      # /keys/scientist.nsec. Without these edges a clean boot spends that
+      # wait on every restart until all three land — and before wait_for_keys
+      # was made non-fatal it was a ~180s crash-loop, not just a wait. The
+      # dashboard reads the first two for its /chat PTY; it never writes any
+      # of them.
+      buzz-keys:
+        condition: service_completed_successfully
+      paperclip-bootstrap:
+        condition: service_completed_successfully
+      tencentdb-bootstrap:
+        condition: service_completed_successfully
     environment:
       HERMES_HOME: /opt/data
       # The dashboard is now the container's main program (see `command`),
@@ -743,9 +757,35 @@ services:
   # VALKEY_URL in its profile .env) and the three `── devenv lease ──` checks
   # in scripts/test-scientist.sh are the detector for that state.
   #
-  # `paperclip: service_started`, not service_healthy: all this needs is the
-  # image's devenv CLI reaching devenv-pg/devenv-valkey directly. A board that
-  # is slow to become healthy is not a reason to hold the gateway's start.
+  # This one-shot applies the devenv control schema ITSELF before it
+  # provisions, by sourcing the same /usr/local/bin/opc-devenv-seed.sh the
+  # paperclip entrypoint uses (same image, same idempotent SQL, no second
+  # copy). That is a fix, not tidiness: the schema used to be created only by
+  # paperclip's ENTRYPOINT, which reaches its devenv seed only AFTER the nix /
+  # mise / gh / claude seeds — minutes on a clean machine's empty *-mise
+  # volume (invariant 4). So on the open-box path this container ran first,
+  # `devenv provision` found no schema, the one-shot exited 0 by design, and
+  # the scientist booted with no DATABASE_URL/VALKEY_URL — permanently, since
+  # compose does not re-run a one-shot whose container exited 0.
+  #
+  # Two alternatives were weighed and rejected:
+  #   * `paperclip: service_healthy` — it would order correctly (the seed runs
+  #     before the exec, so health implies the schema), but it makes the
+  #     gateway wait for the BOARD's full boot, and worse, a paperclip that is
+  #     unhealthy for an unrelated reason means this one-shot never runs at
+  #     all and `hermes` (which waits on it with
+  #     service_completed_successfully) never starts. That is a STRONGER
+  #     version of the coupling the exit-0 behaviour deliberately removed.
+  #   * retry-until-the-schema-appears with a bounded timeout — correct, but
+  #     it parks the gateway's start behind another container's slowest boot
+  #     for minutes, and still degrades on the pathological case.
+  # Applying the schema here costs one psql round trip and depends on nothing
+  # but devenv-pg, which this service already waits for.
+  #
+  # `paperclip: service_started`, not service_healthy: the edge is kept only
+  # so `docker compose up devenv-expert-leases` on its own is guaranteed to
+  # have the paperclip image built. Nothing here waits on the board being
+  # ready, and nothing here depends on paperclip's entrypoint any more.
   devenv-expert-leases:
     image: ${IMAGE_PREFIX:-opc}/paperclip:local
     restart: "no"
@@ -763,6 +803,13 @@ services:
         # tenant DATABASE_URL/VALKEY_URL, passwords and all, and
         # `docker compose logs` keeps them for the life of the container.
         # The lease belongs in the 600 file, nowhere else.
+        #
+        # Create the control database + devenv_tenant schema first: `devenv`
+        # never creates it (patches/paperclip/devenv/devenv), and waiting for
+        # paperclip's entrypoint to get there is the race described above.
+        # Idempotent and never fatal — see opc-devenv-seed.sh.
+        . /usr/local/bin/opc-devenv-seed.sh
+        opc_devenv_seed_schema || true
         _rc=0
         _out="$$(devenv provision scientist --env-file /keys/devenv-scientist.env 2>&1)" || _rc=$$?
         if [ "$$_rc" -eq 0 ]; then
@@ -772,9 +819,26 @@ services:
         else
             echo "[devenv-expert-leases] WARNING: devenv provision scientist failed (exit $$_rc)." >&2
             echo "[devenv-expert-leases] WARNING: the scientist keeps whatever lease it already had; a first" >&2
-            echo "[devenv-expert-leases] WARNING: boot leaves it with no DATABASE_URL/VALKEY_URL. Diagnose with" >&2
-            echo "[devenv-expert-leases] WARNING: 'scripts/test-scientist.sh' (the devenv lease block) and re-run" >&2
-            echo "[devenv-expert-leases] WARNING: 'docker compose up devenv-expert-leases'. Provisioner output:" >&2
+            echo "[devenv-expert-leases] WARNING: boot leaves it with no DATABASE_URL/VALKEY_URL." >&2
+            # Name the cause instead of letting the reader inherit whichever
+            # message the provisioner happened to reach first. The schema is
+            # applied a few lines above, so a failure here is NOT the old
+            # "control schema missing" race (which surfaced as devenv's
+            # `no free valkey database id … release one` — an exhaustion
+            # message for a missing table). Exit 3 now really is exhaustion,
+            # exit 4 really is an unreachable/unusable backend.
+            case "$$_rc" in
+              3) echo "[devenv-expert-leases] WARNING: exit 3 = a resource pool is genuinely exhausted (valkey db ids" >&2
+                 echo "[devenv-expert-leases] WARNING: or preview ports). Run 'docker compose exec paperclip devenv list'" >&2
+                 echo "[devenv-expert-leases] WARNING: and release a lease." >&2 ;;
+              4) echo "[devenv-expert-leases] WARNING: exit 4 = devenv-pg/devenv-valkey unreachable, the admin credential is" >&2
+                 echo "[devenv-expert-leases] WARNING: wrong, or the devenv_control schema could not be created (the" >&2
+                 echo "[devenv-expert-leases] WARNING: [devenv-seed] lines above this one say which)." >&2 ;;
+              *) echo "[devenv-expert-leases] WARNING: see the provisioner output below for the cause." >&2 ;;
+            esac
+            echo "[devenv-expert-leases] WARNING: Detector: 'scripts/test-scientist.sh' (the devenv lease block)." >&2
+            echo "[devenv-expert-leases] WARNING: Retry with 'docker compose up devenv-expert-leases' (idempotent)." >&2
+            echo "[devenv-expert-leases] WARNING: Provisioner output:" >&2
             # Redact rather than drop: an error can legitimately quote a URL,
             # and the password is the only part that must not be logged.
             printf '%s\n' "$$_out" | sed 's#\(://[^:/@]*\):[^@]*@#\1:***@#g; s/^/[devenv-expert-leases]   /' >&2
@@ -995,7 +1059,7 @@ volumes:
   # Deliberately NOT frontdoor-hermes: that volume's root holds the chief of
   # staff's .agent.nsec (600 uid 10000) and the experts run as the same uid,
   # while hermes's cross-profile guard does not cover the terminal tool
-  # (agent/file_safety.py:443). Mounting it whole would hand every expert the
+  # (agent/file_safety.py:427). Mounting it whole would hand every expert the
   # chief of staff's Buzz identity. Mounted at /opt/data/profiles in the
   # gateway (which runs them) and in the dashboard (which observes them) —
   # `hermes profile list` enumerates $HERMES_HOME/profiles, so one dashboard

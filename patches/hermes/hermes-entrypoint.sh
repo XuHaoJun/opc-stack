@@ -39,10 +39,28 @@ wait_for_keys() {
         done
         [ -z "$missing" ] && { echo "[hermes] key files ready after $((n * 2))s"; return 0; }
     done
-    echo "[hermes] WARNING: key files still missing after 180s:$missing — paperclip/memory integrations unavailable; a missing scientist.nsec additionally leaves the expert profile with no Buzz identity (buzz reports \"no buzz identity\" and quietly does not send)"
+    echo "[hermes] WARNING: key files still missing after 180s:$missing — booting anyway; paperclip/memory integrations unavailable until the one-shot writes them; a missing scientist.nsec additionally leaves the expert profile with no Buzz identity (buzz reports \"no buzz identity\" and quietly does not send). Re-run the bootstrap one-shot and restart this container."
     return 1
 }
-wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id /keys/scientist.nsec
+# `|| true` is the whole point of the WARNING above. Without it the non-zero
+# return kills the entrypoint under `set -eu`, so the message ("integrations
+# unavailable", i.e. we carry on degraded) described behaviour the code did
+# not have: the container died and restart-looped every ~180s instead. Both
+# containers running this entrypoint should degrade rather than die, for
+# different reasons:
+#   * `hermes` (gateway) — every downstream consumer of these keys already has
+#     a warning-only path (opc_seed_expert_profile warns and continues on a
+#     missing nsec, a rejected API key, a failed cron seed, an empty lease),
+#     and the branch's stated position is that an integration failure degrades
+#     the expert instead of stopping the agent runtime (invariant 8, and the
+#     exit-0 rule for devenv-expert-leases). A boot-time hard stop would be the
+#     one place that contradicts it.
+#   * `hermes-dashboard` — it does not seed profiles at all; it only needs
+#     PAPERCLIP_API_KEY / MEMORY_TENCENTDB_USER_ID for the /chat PTY. Dying
+#     there costs the operator the one UI that would show what is wrong.
+# The return value stays non-zero because it is real information (the log
+# line above is the report); it just must not be fatal.
+wait_for_keys /keys/paperclip-api.key /keys/tencentdb-admin-user-id /keys/scientist.nsec || true
 
 # Paperclip board API key written by the paperclip-bootstrap one-shot: the
 # keys volume is the single source of truth (no .env variable anymore).
@@ -207,68 +225,11 @@ opc_key_is_usable() { # <value>
     return 0
 }
 
-# Read one value out of a .env the way hermes parses it (config.py load_env +
-# _parse_env_value, and agent/secret_scope.py::_strip_inline_comment for the
-# comment handling): comments skipped, an `export ` prefix stripped, last
-# assignment wins, an inline `# ...` comment stripped, surrounding quotes
-# removed. Comparing raw file text instead would treat a dashboard-written
-# `API_SERVER_KEY="…"` as different from the identical unquoted value and
-# rewrite + log "refreshed" on every single boot; not stripping the inline
-# comment the way upstream does causes the same spurious one-time rewrite for
-# `KEY=abc # note` (self-healing on the next boot, but the log then lies
-# about why it fired).
-#
-# Inline-comment rule mirrors _strip_inline_comment exactly: for a value
-# starting with a quote, scan for the matching close quote (backslash-escape
-# aware for double quotes only, since the writer emits \"/\\ escapes); if
-# what follows the close quote, after leading whitespace, starts with `#`,
-# keep only through the close quote — otherwise leave the value untouched
-# (lenient, not a parse error). For an unquoted value, truncate at the first
-# `#` that is preceded by whitespace, so `foo#bar` is kept whole but
-# `foo # bar` becomes `foo`, and a value that itself starts with `#` is kept.
-opc_env_value() { # <env-file> <name>
-    [ -f "$1" ] || return 0
-    awk -v want="$2" '
-        BEGIN { sq = sprintf("%c", 39); dq = sprintf("%c", 34) }
-        {
-            line = $0
-            sub(/^[ \t]+/, "", line); sub(/[ \t\r]+$/, "", line)
-            if (line ~ /^#/ || index(line, "=") == 0) next
-            sub(/^export[ \t]+/, "", line)
-            k = substr(line, 1, index(line, "=") - 1)
-            gsub(/^[ \t]+|[ \t]+$/, "", k)
-            if (k != want) next
-            v = substr(line, index(line, "=") + 1)
-            gsub(/^[ \t]+|[ \t]+$/, "", v)
-            n = length(v)
-            q = substr(v, 1, 1)
-            if (n >= 1 && (q == dq || q == sq)) {
-                i = 2; closed = 0; closeidx = 0
-                while (i <= n) {
-                    ch = substr(v, i, 1)
-                    if (q == dq && ch == "\\") { i += 2 }
-                    else if (ch == q) { closed = 1; closeidx = i; break }
-                    else { i++ }
-                }
-                if (closed) {
-                    rest = substr(v, closeidx + 1)
-                    gsub(/^[ \t]+/, "", rest)
-                    if (substr(rest, 1, 1) == "#") v = substr(v, 1, closeidx)
-                    # else: non-comment trailing junk — leave v untouched
-                }
-                # else: unterminated quote — leave v untouched
-            } else if (match(v, /[ \t]+#/) > 0) {
-                v = substr(v, 1, RSTART - 1)
-            }
-            n = length(v)
-            if (n >= 2 && ((substr(v, 1, 1) == dq && substr(v, n, 1) == dq) || \
-                           (substr(v, 1, 1) == sq && substr(v, n, 1) == sq)))
-                v = substr(v, 2, n - 2)
-            out = v; found = 1
-        }
-        END { if (found) print out }
-    ' "$1" 2>/dev/null
-}
+# opc_env_value <env-file> <name> — read one value out of a .env the way
+# hermes itself parses it. Lives in its own file because scripts/test-scientist.sh
+# executes the same file as a CLI to read a profile's API_SERVER_KEY back out
+# of the running container; see the header of opc-env-value.sh.
+. /usr/local/bin/opc-env-value.sh
 
 # The agent replies/posts by running the buzz CLI, but hermes scrubs
 # BUZZ_PRIVATE_KEY from tool subprocess env (GHSA-rhgp-j443-p4rf: provider
@@ -350,6 +311,14 @@ opc_seed_expert_profile() { # <profile-name> <api-key-value>
     _p="$1"
     _key="$2"
     _ph="$HH/profiles/$_p"
+    # Every warning-only path below appends to this list, and the final line
+    # prints it. Before that, the function ended with an unconditional
+    # "expert profile ready: $_p" that ran after a missing nsec, a rejected
+    # API key, a failed cron seed and an empty lease — four different broken
+    # profiles all reporting ready. scripts/test-scientist.sh also greps for
+    # that exact string as the dashboard role gate's negative signal, so the
+    # wording of the healthy case must not change.
+    _degraded=""
     # The expert's key basename is DERIVED from the profile name below
     # (agt-<expert> -> /keys/<expert>.nsec). Exactly one name must never be
     # derivable that way: agt-agent resolves to /keys/agent.nsec — the chief
@@ -374,6 +343,7 @@ opc_seed_expert_profile() { # <profile-name> <api-key-value>
         else
             echo "[hermes] WARNING profile $_p: API key rejected by hermes's own rule (needs >=16 chars after stripping and must not be a placeholder such as changeme / your-api-key / placeholder) — NOT writing it; the gateway will 401 every request for it" >&2
         fi
+        _degraded="$_degraded no-api-key"
     fi
 
     # Per-profile secrets. Under multiplex the secret scope is authoritative
@@ -454,8 +424,13 @@ YAML
     # platform on any profile whose API_SERVER_KEY resolves as usable — which
     # this profile's does, deliberately, since a usable per-profile key is
     # what makes the /p/<profile>/ credential isolation work — unless the
-    # profile's own config.yaml names `enabled` explicitly
-    # (config.py:1515,1712). Without the explicit `false`, gateway/run.py's
+    # profile's own config.yaml names `enabled` explicitly. The decision is
+    # gateway/config.py:2212-2227 — `_has_usable_api_server_key(...)` gates
+    # the block, then `extra.pop("_enabled_explicit")` decides whether to
+    # force `enabled = True`. (gateway/config.py:1515 and :1712 only STAMP
+    # that marker while loading config.yaml; neither line force-enables
+    # anything, which is what the earlier citation here implied.)
+    # Without the explicit `false`, gateway/run.py's
     # secondary-profile loader raises SecondaryPortBindingConfigError BEFORE
     # the per-profile adapter loop runs, so this profile starts ZERO secondary
     # adapters — any platform it gains later is silently dead behind a warning
@@ -562,6 +537,21 @@ PYEOF
     # other global) is doing this, and which one is unknown. Do not "fix"
     # this comment from source reading alone.
     #
+    # Candidate ELIMINATED (measured 2026-08-21, read-only, in the live
+    # gateway container): agent/secret_scope.py:126-131 `_is_global_env`
+    # returns True for a name in `_GLOBAL_ENV_EXACT` or under
+    # `_GLOBAL_ENV_PREFIXES`, and `get_secret` reads such a name straight from
+    # os.environ REGARDLESS of multiplex — which would have explained a
+    # process-wide value winning for both profiles. It does not apply here:
+    #   $ docker compose exec -T hermes /opt/hermes/.venv/bin/python3 -c \
+    #       'from agent.secret_scope import _is_global_env as g; \
+    #        print([(n, g(n)) for n in ("OPENAI_API_KEY","OPENAI_BASE_URL",
+    #        "OPENAI_MODEL","API_SERVER_KEY","ANTHROPIC_API_KEY")])'
+    #   → every one of them False (prefixes are only HERMES_KANBAN_,
+    #     HERMES_TELEGRAM_, TERMINAL_).
+    # So the provider key does NOT take the global path, and this is not the
+    # mechanism. Still unknown.
+    #
     # The operational rule holds regardless of the cause, so keep following
     # it: do not give two profiles different values under the same variable
     # name; an expert that needs its own provider key must use a distinct
@@ -608,6 +598,7 @@ PYEOF
         echo "[hermes] $_p: buzz identity mirrored from $_nsec_src"
     else
         echo "[hermes] WARNING $_p: no $_nsec_src — the expert cannot post to Buzz" >&2
+        _degraded="$_degraded no-buzz-identity"
     fi
 
     # Same problem, same fix, for the board key: the expert files its own
@@ -660,6 +651,7 @@ PYEOF
             else
                 echo "[hermes] WARNING $_p: could not seed cron job experiment-queue — output follows" >&2
                 printf '%s\n' "$_cron_out" | sed 's/^/[hermes]   /' >&2
+                _degraded="$_degraded no-experiment-queue"
             fi
         fi
     fi
@@ -700,10 +692,22 @@ PYEOF
             echo "[hermes] $_p: devenv lease merged into profile .env ($_merged keys)"
         else
             echo "[hermes] WARNING $_p: $_lease has no assignments — no devenv lease merged" >&2
+            _degraded="$_degraded no-devenv-lease"
         fi
+    else
+        # Silence here used to be indistinguishable from a merged lease. The
+        # file is written by the devenv-expert-leases one-shot; its absence is
+        # exactly the open-box failure C1 fixed, so say so rather than letting
+        # the "ready" line below cover it.
+        echo "[hermes] WARNING $_p: no $_lease — no DATABASE_URL/VALKEY_URL for this expert (devenv-expert-leases one-shot did not produce a lease)" >&2
+        _degraded="$_degraded no-devenv-lease"
     fi
 
-    echo "[hermes] expert profile ready: $_p"
+    if [ -z "$_degraded" ]; then
+        echo "[hermes] expert profile ready: $_p"
+    else
+        echo "[hermes] WARNING expert profile DEGRADED: $_p —$_degraded (see the WARNINGs above; scripts/test-scientist.sh names the failing row)" >&2
+    fi
 }
 
 # Expert-profile seeding belongs to the GATEWAY container alone. This image

@@ -61,8 +61,17 @@ checkout "multiplex is on" "GATEWAY_MULTIPLEX_PROFILES=1" \
 # that route already 200s as the default profile and the check would pass
 # before any of this is implemented. What distinguishes a real profile route
 # is WHOSE credential it accepts, so assert that instead.
+#
+# The key is read with /usr/local/bin/opc-env-value.sh — the SAME parser the
+# entrypoint uses to write and reconcile that file (it sources the identical
+# file; see its header). The two `sed -n 's/^API_SERVER_KEY=//p'` calls this
+# replaced were not just duplicated, they disagreed with each other (one had
+# `head -1`, one did not) and with the writer: a duplicate assignment, an
+# `export ` prefix, quotes or an inline comment — all of which the writer
+# handles and the dashboard can introduce — would have made the gate read a
+# different value from the gateway.
 check "profile route serves 200 with the PROFILE's own key" \
-    docker compose exec -T hermes sh -c "k=\$(sed -n 's/^API_SERVER_KEY=//p' /opt/data/profiles/$PROFILE/.env 2>/dev/null); test -n \"\$k\" && test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$k\" http://127.0.0.1:8642/p/$PROFILE/v1/models)\" = 200"
+    docker compose exec -T hermes sh -c "k=\$(opc-env-value.sh /opt/data/profiles/$PROFILE/.env API_SERVER_KEY); test -n \"\$k\" && test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$k\" http://127.0.0.1:8642/p/$PROFILE/v1/models)\" = 200"
 check "profile route REJECTS the default profile's key" \
     docker compose exec -T hermes sh -c "test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$API_SERVER_KEY\" http://127.0.0.1:8642/p/$PROFILE/v1/models)\" = 401"
 check "unknown profile -> 404" \
@@ -70,11 +79,54 @@ check "unknown profile -> 404" \
 check "profile home exists" \
     docker compose exec -T hermes test -f "/opt/data/profiles/$PROFILE/config.yaml"
 check "profile .env carries an API_SERVER_KEY >=16 chars" \
-    docker compose exec -T hermes sh -c "test \"\$(sed -n 's/^API_SERVER_KEY=//p' /opt/data/profiles/$PROFILE/.env | head -1 | wc -c)\" -ge 17"
+    docker compose exec -T hermes sh -c "test \"\$(opc-env-value.sh /opt/data/profiles/$PROFILE/.env API_SERVER_KEY | wc -c)\" -ge 17"
 checkout "dashboard switcher lists the profile" "$PROFILE" \
     docker compose exec -T -u 10000 -e HOME=/opt/data -e HERMES_HOME=/opt/data hermes-dashboard /opt/hermes/bin/hermes profile list
 
 echo "── buzz identity ──"
+# ── the branch's headline property, asserted structurally ──────────────────
+#
+# Everything else in this file checks that the expert HAS its own identity.
+# These two check the thing that makes that identity meaningful: an expert can
+# never reach the chief of staff's. Both are structural facts about the
+# gateway container, not behaviours of any one code path, which is why they
+# belong here rather than being inferred from the wrapper checks below:
+# `.agent.nsec` comparisons on line ~85 run as ROOT (they say the mirrored
+# file differs, not that the agent uid could not fetch the original), and the
+# wrapper check further down covers only hermes-dashboard.
+#
+# (1) The gateway must not mount frontdoor-hermes. That volume's ROOT holds
+# the chief of staff's .agent.nsec, the experts run as the same uid, and
+# hermes's cross-profile guard explicitly is not a security boundary
+# (agent/file_safety.py:427) — one `cat` from any expert's terminal tool and
+# every subsequent Buzz post is signed by the chief of staff. Read from the
+# live container's mount list, not from docker-compose.yml: a mount added by
+# an override file, or by hand, is just as fatal and would not appear there.
+no_frontdoor_home_mount() { # <service>
+    _cid="$(docker compose ps -q "$1" 2>/dev/null)"
+    [ -n "$_cid" ] || return 1
+    _mounts="$(docker inspect --format '{{range .Mounts}}{{.Name}}{{"\n"}}{{end}}' "$_cid" 2>/dev/null)"
+    # Precondition, so the check can never pass on an empty inspect: the
+    # container must report at least one named volume.
+    [ -n "$(printf '%s' "$_mounts" | tr -d '[:space:]')" ] || return 1
+    ! printf '%s\n' "$_mounts" | grep -q 'frontdoor-hermes$'
+}
+check "hermes does NOT mount frontdoor-hermes (chief of staff's home)" \
+    no_frontdoor_home_mount hermes
+
+# (2) Even the /keys copy must be out of reach. /keys is mounted read-only in
+# the gateway and its files are 600 root, so uid 10000 — the uid every expert
+# and every terminal child runs as — cannot read /keys/agent.nsec. Asserted by
+# running the SAME command twice, once as root and once as 10000: root must
+# succeed (otherwise the negative half would pass on a missing file, a typo in
+# the path, or a broken exec) and 10000 must fail.
+agent_nsec_unreadable_by_runtime_uid() {
+    docker compose exec -T           hermes sh -c 'cat /keys/agent.nsec >/dev/null 2>&1' || return 1
+    ! docker compose exec -T -u 10000 hermes sh -c 'cat /keys/agent.nsec >/dev/null 2>&1'
+}
+check "uid 10000 in hermes cannot read /keys/agent.nsec" \
+    agent_nsec_unreadable_by_runtime_uid
+
 check "scientist keypair exists" \
     docker compose exec -T hermes sh -c 'test -s /keys/scientist.nsec && test -s /keys/scientist.pub'
 check "buzz CLI present in the hermes image" \
@@ -238,9 +290,16 @@ echo "── dashboard ──"
 # `command` back to `sleep infinity` makes _read_container_argv() find
 # "sleep"/"infinity" after the main-wrapper.sh token instead of "dashboard",
 # so _is_dashboard_container() returns False and this check goes red. See
-# upstream/hermes/hermes_cli/container_boot.py:298-371 (_strip_container_argv_prefix
-# peels the s6/main-wrapper.sh launcher prefix and an optional leading
-# `hermes`, then _is_dashboard_container requires args[0] == "dashboard").
+# upstream/hermes/hermes_cli/container_boot.py at v2026.8.16:
+# _read_container_argv 252-296 reads /proc/1/cmdline,
+# _strip_container_argv_prefix 298-342 peels the s6/main-wrapper.sh launcher
+# prefix and an optional leading `hermes`, and _is_dashboard_container 353-371
+# requires args[0] == "dashboard". (The previous span 298-371 also swallowed
+# _is_legacy_gateway_run_request at 345-351, which is not part of this path.)
+# These are PRIVATE functions and /opt/hermes/.venv/bin/python3 is a baked
+# path — a hermes upgrade can break this row without anything in the
+# scientist lane having changed; see the hermes entry in
+# .claude/skills/upgrade-opc-stack/references/risk-checklist.md §4.
 checkout "dashboard container argv resolves to dashboard role" "True" \
     docker compose exec -T hermes-dashboard /opt/hermes/.venv/bin/python3 -c \
     'from hermes_cli.container_boot import _read_container_argv, _is_dashboard_container as f; print(f(_read_container_argv()))'

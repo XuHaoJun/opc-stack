@@ -69,6 +69,21 @@ memorized — this table is the starting hint list.
   migrations run automatically on boot; check new migrations in the diff.
   After a fresh-volume rebuild the community is NEW → re-run add-member
   (`buzz-bootstrap` one-shot handles it on first boot).
+- **hermes** — `scripts/test-scientist.sh` reaches INTO hermes internals and
+  will break on an upgrade that moves them, with a red gate that looks like a
+  scientist-lane regression rather than an upgrade artifact. Three couplings,
+  all in that one script: it imports the PRIVATE functions
+  `hermes_cli.container_boot._read_container_argv` (lines 252-296 at
+  `v2026.8.16`) and `_is_dashboard_container` (353-371; the helper they share,
+  `_strip_container_argv_prefix`, is 298-342), and it invokes them through the
+  hard-coded interpreter path `/opt/hermes/.venv/bin/python3`. A rename, a
+  signature change, or a venv relocation breaks the "dashboard container argv
+  resolves to dashboard role" row. `patches/hermes/hermes-entrypoint.sh`'s own
+  `opc_is_dashboard_container` MIRRORS that upstream logic in shell — re-read
+  the upstream functions after the bump and re-sync the shell copy, or the
+  gateway/dashboard two-writer race on `hermes-profiles` comes back (its
+  symptom is an s6-log restart storm on
+  `logs/gateways/<profile>/lock`, not a failing test).
 - **hermes** — Kanban must stay OFF (`agent.disabled_toolsets: [kanban]` +
   dispatcher off in the seeded config.yaml; Paperclip is the only work
   plane). New versions may change config schema → verify the entrypoint's
