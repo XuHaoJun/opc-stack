@@ -35,8 +35,24 @@ images, and brings the stack up. `test-connectivity.sh` probes every
 service endpoint and the frontdoor→relay link without ever calling an LLM.
 
 > Note: after `docker compose down -v`, relay/agent keys, community,
-> tencentdb admin, and paperclip bootstrap are all recreated automatically by
-> the one-shot bootstrap containers. Fresh installs need no manual signing.
+> tencentdb admin, and paperclip bootstrap are *intended* to be recreated
+> automatically by the one-shot bootstrap containers, with no manual signing
+> on a fresh install.
+>
+> **Evidence level: statically audited, not rehearsed.** `scripts/audit-bootstrap.sh`
+> checks that every piece of that state has an unattended, idempotent producer
+> declared in `docker-compose.yml` or an entrypoint, and that nothing races it.
+> It is a grep suite over the source, not a run. The rehearsal that would
+> actually prove the claim — `docker compose down -v` followed by
+> `scripts/setup.sh` on an empty machine — is destructive (it erases the live
+> Buzz community, board, memories, prototypes and devenv leases) and has been
+> deliberately skipped, so the audit is currently the *only* evidence. A green
+> audit cannot catch: a producer that exists but is never invoked; one that is
+> invoked, exits 0 and did nothing; one that writes the wrong *value*;
+> `patches/` → `upstream/` drift (the audit reads `patches/`, the images build
+> from `upstream/<proj>/opc/`, refreshed only by `scripts/prepare.sh`); or an
+> ordering edge nobody wrote a row for. If you do have a machine you can
+> destroy, running that rehearsal is what upgrades this from evidence to proof.
 
 > **Known limit:** `scripts/setup.sh` warns but does not stop if
 > `BUZZ_RELAY_URL` is still the `ws://localhost:3000` default — a clean
@@ -325,7 +341,14 @@ docker compose exec frontdoor hermes --version
 
 ## 既有安裝: 啟用科學家 lane
 
-乾淨機器**不需要這段** —— `scripts/setup.sh` 會一次到位。這段是給目前那台**已經在跑**
+乾淨機器**應該不需要這段** —— 設計上 `scripts/setup.sh` 一次到位, 而這件事目前是
+**靜態稽核過的, 不是排練過的**: `scripts/audit-bootstrap.sh` 逐條確認每一份科學家狀態
+都有 compose one-shot 或 entrypoint 當非互動、冪等的產生者, 且沒有東西跟它搶 —— 但它
+是對原始碼 grep, 不是真的跑一次。真正的證明 (`docker compose down -v` + `scripts/setup.sh`)
+會毀掉現在這台的 community/board/memory/prototype/租約, 已明確跳過。所以: 稽核綠燈
+**抓不到**「產生者存在但根本沒被呼叫」「跑了、exit 0、什麼都沒做」「產生的值是錯的」
+「`patches/` 沒 `prepare.sh` 進 `upstream/`」以及「沒人寫成一條 row 的順序邊」。
+這段是給目前那台**已經在跑**
 的 stack 的一次性手動調整 (`AGENTS.md`「部署假設」: 不為單一機器建立升級路徑)。需要它
 的原因只有一個: compose 的 one-shot 在容器已存在且 exit 0 時不會重跑 ——
 `buzz-keys` / `buzz-bootstrap` / `tencentdb-bootstrap` / `paperclip-bootstrap` 這四個
@@ -338,6 +361,15 @@ grep -q '^HERMES_SCIENTIST_API_KEY=' .env || \
   printf 'HERMES_SCIENTIST_API_KEY=%s\n' "$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)" >> .env
 
 # 2. 重建 image 並套用 compose 改動 (也會建立新服務 devenv-expert-leases)
+#
+#    ⚠ 這一步到 3a 之間 hermes 會 crash-loop, 大約 180 秒一輪 —— 是預期的, 不用管。
+#    原因: hermes entrypoint 開頭的 `wait_for_keys /keys/paperclip-api.key
+#    /keys/tencentdb-admin-user-id /keys/scientist.nsec`
+#    (patches/hermes/hermes-entrypoint.sh:45) 等不到就 `return 1`, 而 entrypoint 跑在
+#    `set -eu` 下且這個呼叫沒有 `|| true`, 所以整個 entrypoint 直接結束、容器重啟。
+#    此時 scientist.nsec 還不存在 (3a 才會產生它), 於是它等滿 180s → 印 WARNING →
+#    退出 → 再等 180s。3a 一落地, 下一輪就會過。日誌看起來很嚇人但沒有壞任何東西;
+#    真的想避開就把這一步的 hermes 留到 3a 之後再 `docker compose up -d hermes`。
 scripts/prepare.sh && docker compose up -d --build
 
 # 3a. 科學家鑰匙先重跑。buzz-bootstrap 在 compose 裡只 depends_on buzz (已經
@@ -360,6 +392,13 @@ docker compose restart hermes
 # 5. 驗證
 scripts/test-connectivity.sh && scripts/test-scientist.sh
 ```
+
+`test-scientist.sh` 的「is a relay member」那條紅掉、其餘全綠時, 先看 `.env` 的
+`BUZZ_RELAY_URL`: 還停在 `ws://localhost:3000` 預設值的安裝**一定**會紅在這一條, 而
+測試本身不會指出原因。科學家是從 `hermes` 容器簽進 Buzz 的, 那個容器不與 relay 共享
+network namespace, `localhost` 在它裡面指向自己。見上面 Quickstart 的
+「Known limit: `BUZZ_RELAY_URL`」—— 改成本機的 LAN/tailnet IP 後重建
+`buzz` / `frontdoor` / `hermes` (relay 只認一個 canonical host, 見不變量 1)。
 
 四個既有的 one-shot 都是冪等的, 重跑幾次都不會產生重複資料: `buzz-keys` 只補缺的鑰匙
 (既有的 relay/agent 身分不動, 所以 community 與成員關係不受影響)、`buzz-bootstrap` 每次
