@@ -22,7 +22,12 @@
 # the dashboard's managed-files view resolves every entry under /opt/data
 # and 403s anything escaping it ("Path outside managed files root").
 export HOME="${HERMES_HOME:-/opt/data}"
-# --clear-groups (not --init-groups): the buzz image has no passwd entry for
-# uid 10000, and setpriv's initgroups lookup refuses unknown users.
-exec setpriv --reuid="$HERMES_UID" --regid="$HERMES_GID" --clear-groups \
+# Explicit numeric --groups (not --init-groups): the buzz image has no passwd
+# entry for uid 10000, and setpriv's initgroups lookup refuses unknown users.
+# It was --clear-groups until agents needed to install nix packages: gid 3000
+# (`nixagents`) is what grants write access to the shared nix profile on the
+# opc-nix volume, and --clear-groups would drop exactly that. Numeric because
+# the volume is shared across images and the kernel compares the number.
+: "${NIXAGENTS_GID:=3000}"
+exec setpriv --reuid="$HERMES_UID" --regid="$HERMES_GID" --groups "$NIXAGENTS_GID" \
     /opt/hermes-venv/bin/hermes "$@"

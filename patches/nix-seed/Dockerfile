@@ -1,9 +1,14 @@
 # syntax=docker/dockerfile:1.7
 #
 # OPC shared nix seed — the ONE place nix gets installed. Produces
-# /nix-seed (nix 2.35.2 + 8 pinned tools) which the buzz/hermes/paperclip
+# /nix-seed (nix 2.35.2 + 11 pinned tools) which the buzz/hermes/paperclip
 # images COPY in. Tool-list changes rebuild ONLY this image; service images
 # just re-COPY the layer (seconds).
+#
+# This image also runs the `nix-daemon` service (see opc-nix-daemon.sh): one
+# multi-user daemon owning the single shared `opc-nix` volume, so unprivileged
+# agents in EVERY container can install packages. Single-user nix (root-only
+# writes) is why they could not before.
 #
 # omp is NOT here — its bun2nix derivation fails to build in image builds
 # (bun isolated-linker EPERM, 334 packages; llm-agents.nix at any rev).
@@ -25,14 +30,18 @@ RUN apt-get update \
 # ~/.config/nix/nix.conf and /etc/nix/nix.conf (NOT /nix/etc/nix/nix.conf —
 # that one is only for the runtime volume seed via NIX_USER_CONF_FILES).
 RUN groupadd -r nixbld \
-    && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \
-    && gpasswd -a nixbld1 nixbld \
+    && for i in $(seq 1 8); do \
+        useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin "nixbld$i" \
+        && gpasswd -a "nixbld$i" nixbld; \
+       done \
+    && groupadd -g 3000 nixagents \
     && mkdir -m 0755 /nix \
     && HOME=/root sh -c 'curl -fsSL https://releases.nixos.org/nix/nix-2.35.2/install -o /tmp/nix-install.sh \
         && sh /tmp/nix-install.sh --no-daemon --yes \
         && rm -f /tmp/nix-install.sh' \
     && mkdir -p /nix/etc/nix /etc/nix /root/.config/nix \
-    && printf 'experimental-features = nix-command flakes\nsandbox = false\naccept-flake-config = true\n' | tee /nix/etc/nix/nix.conf /etc/nix/nix.conf /root/.config/nix/nix.conf >/dev/null \
+    && printf 'experimental-features = nix-command flakes\n' > /nix/etc/nix/nix.conf \
+    && printf 'experimental-features = nix-command flakes\nsandbox = false\naccept-flake-config = true\nbuild-users-group = nixbld\nmax-jobs = auto\ntrusted-users = root\n' | tee /etc/nix/nix.conf /root/.config/nix/nix.conf >/dev/null \
     && HOME=/root PATH="/nix/var/nix/profiles/default/bin:$PATH" \
         nix --extra-experimental-features 'nix-command flakes' \
         profile install --profile /nix/var/nix/profiles/per-user/root/profile \
@@ -48,5 +57,14 @@ RUN groupadd -r nixbld \
         github:NixOS/nixpkgs/8be7bd0c83f1#iproute2 \
         github:NixOS/nixpkgs/8be7bd0c83f1#lsof \
     && cp -al /nix /nix-seed
+
+# Two roles, one image:
+#   `nix-seed`   (CMD true)                 — one-shot; exists so service
+#                                             images can COPY --from the layer.
+#   `nix-daemon` (opc-nix-daemon.sh)        — long-running; owns the shared
+#                                             opc-nix volume and serves every
+#                                             other container over the socket.
+COPY opc-nix-daemon.sh /usr/local/bin/opc-nix-daemon.sh
+RUN chmod 0755 /usr/local/bin/opc-nix-daemon.sh
 
 CMD ["true"]

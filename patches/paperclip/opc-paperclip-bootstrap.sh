@@ -250,7 +250,7 @@ fi
 # `{canCreateAgents:false, canCreateSkills:true}`, the managed AGENTS.md
 # instructions bundle (paperclip writes instructions* on first run), the
 # company membership and the `tasks:assign` grant (both minted at create).
-PROTOTYPER_SKILLS='["prototype","prototype-workspace","devenv"]'
+PROTOTYPER_SKILLS='["prototype","prototype-workspace","devenv","container-tools"]'
 PROTOTYPER_DEVENV_OWNER="${PAPERCLIP_PROTOTYPER_DEVENV_OWNER:-prototyper}"
 
 # Desired adapterConfig expressed as a merge over whatever is already on the

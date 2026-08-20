@@ -8,6 +8,26 @@ set -eu
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
+# Repair an escaped .nix-profile in the agent's home before anything reads it.
+# The ACP agent's HOME is $HERMES_HOME (/opt/data), which hermes-dashboard
+# also serves as its managed-files root. A bare `nix profile add` (instead of
+# the nix-add wrapper) leaves ~/.nix-profile resolving all the way into
+# /nix/store, and the Files page builds its listing in a list comprehension
+# with no per-entry guard (web_server.py:2562-2567), 403-ing any entry that
+# resolves outside the root (:2425) — so ONE such symlink kills the whole
+# directory listing. The wrapper avoids creating it; this makes the mistake
+# survive only until the next restart instead of forever.
+_np="${HERMES_HOME:-/opt/data}/.nix-profile"
+if [ -L "$_np" ]; then
+    _np_real="$(readlink -f "$_np" 2>/dev/null || true)"
+    case "$_np_real" in
+        "${HERMES_HOME:-/opt/data}"/*) : ;;
+        *) echo "[frontdoor] removing escaped .nix-profile -> ${_np_real:-?} (breaks dashboard Files page)"
+           rm -f "$_np" ;;
+    esac
+fi
+unset _np _np_real
+
 # Mise toolchains: node@lts + rust@stable + omp on the *-mise volume.
 . /usr/local/bin/opc-mise-seed.sh
 opc_mise_seed

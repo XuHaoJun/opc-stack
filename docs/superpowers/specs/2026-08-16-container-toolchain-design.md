@@ -186,6 +186,14 @@ opc_mise_seed
 
 ## 6. 權限與安全性
 
+> **2026-08-20 修訂**: 本節「daemon 用戶不可寫 → daemon 無法改 toolchain」已被
+> `2026-08-20-agent-nix-self-install-design.md` 取代。nix 從 single-user 改為
+> multi-user 後, agent 可以安裝到**共用 agent profile**, 但**系統 profile 仍然
+> 只有 root 能寫**且在 PATH 更前面 —— 原本要守的「不影響本體」因此保留, 只是
+> 邊界從「agent 完全不能裝」收緊成「agent 不能改系統層」。`/opt/mise` 的唯讀
+> 限制不變。
+
+
 - `/opt/mise` root 擁有、目錄 755; daemon 用戶 (hermes uid 10000、node uid 1000) 可讀可執行, 不可寫 → daemon 無法改 toolchain, 符合「不影響本體」。
 - docker exec 預設 root → 可 `mise install` 新版本。
 - 維持既有隔離不變量: 無 host mount、無 privileged。

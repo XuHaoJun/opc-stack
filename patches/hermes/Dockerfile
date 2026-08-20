@@ -231,15 +231,42 @@ COPY opc/skills/paperclip-api/ /opt/hermes/skills/paperclip-api/
 
 # Shared seed (nix + 8 tools) from the nix-seed stage (see stage alias
 # above); a tool-list change rebuilds only the nix-seed image.
+# `nixagents` (gid 3000) is how an unprivileged agent gets write access to
+# the shared nix profile on the opc-nix volume. The GID must be identical
+# across every image: the volume is shared, so the kernel compares the
+# NUMBER, not the name. Unifying the runtime UIDs instead was rejected —
+# paperclip's uid 1000 belongs to the upstream node base image, and the
+# existing home volumes are owned by the current uids (invariant 3b).
 RUN groupadd -r nixbld \
     && useradd -r -g nixbld -d /var/empty -s /usr/sbin/nologin nixbld1 \
     && gpasswd -a nixbld1 nixbld \
+    && groupadd -g 3000 nixagents \
+    && usermod -aG nixagents hermes \
     && mkdir -m 0755 /nix
 COPY --from=nix-seed /nix-seed /nix-seed
-ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/default/bin:${PATH}:/opt/mise/shims" \
-    NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root" \
+# PATH order is load-bearing. The seed (system) profile stays FIRST so an
+# agent cannot shadow a system tool: nix-seed self-heal checks the system
+# profile by path, but everything else on the stack resolves through PATH.
+# The shared agent profile follows it — installed once, present in every
+# container — and /nix/var/nix/opc-bin carries the nix-add/nix-rm/nix-list
+# wrappers the daemon publishes onto the volume.
+ENV PATH="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/opc-agents/profile/bin:/nix/var/nix/opc-bin:/nix/var/nix/profiles/default/bin:${PATH}:/opt/mise/shims" \
+    NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root /nix/var/nix/profiles/opc-agents/profile" \
     NIX_USER_CONF_FILES="/nix/etc/nix/nix.conf" \
     NIX_SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+
+# Login shells re-derive PATH from /etc/profile and drop the ENV above — a
+# pre-existing gap (`bash -lc 'jq --version'` already failed here) that now
+# also hides nix-add. profile.d puts the same entries back, idempotently.
+RUN printf '%s\n' \
+    '_opc="/nix/var/nix/profiles/per-user/root/profile/bin:/nix/var/nix/profiles/opc-agents/profile/bin:/nix/var/nix/opc-bin:/nix/var/nix/profiles/default/bin"' \
+    'case ":$PATH:" in' \
+    '    *":/nix/var/nix/opc-bin:"*) ;;' \
+    '    *) PATH="$_opc:$PATH:/opt/mise/shims" ;;' \
+    'esac' \
+    'export PATH' \
+    'unset _opc' \
+    > /etc/profile.d/opc-nix.sh
 
 # mise-managed toolchains (node/rust/omp) live on the persistent *-mise volume
 # (opc-mise-seed.sh); PATH tail keeps the baked node 26 authoritative, and

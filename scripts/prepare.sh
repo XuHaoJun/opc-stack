@@ -63,6 +63,17 @@ check_identical "agent SOUL.md" \
   patches/buzz/SOUL.md \
   patches/hermes/SOUL.md
 
+# Three copies here, same reasoning: every image sources the identical client
+# wiring for the ONE shared nix store. A copy that drifts gets a different
+# PATH order or a stale profile path, and the symptom is "the tool I installed
+# is not there" in one container only — the least diagnosable shape there is.
+check_identical "nix client seed (buzz/hermes)" \
+  patches/buzz/nix-seed.sh \
+  patches/hermes/nix-seed.sh
+check_identical "nix client seed (hermes/paperclip)" \
+  patches/hermes/nix-seed.sh \
+  patches/paperclip/nix-seed.sh
+
 apply_patch buzz
 apply_patch hermes
 apply_patch paperclip

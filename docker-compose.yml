@@ -66,6 +66,38 @@ services:
     restart: "no"
     command: ["true"]
 
+  # The stack's single multi-user nix-daemon (same image, long-running role).
+  # Nix assumes one daemon per store and there is now exactly one store — the
+  # shared `opc-nix` volume — so this service owns it: seeding, system-profile
+  # self-heal, the group-writable shared agent profile, and the nix-add /
+  # nix-rm / nix-list wrappers (see patches/nix-seed/opc-nix-daemon.sh).
+  #
+  # Every other container just mounts opc-nix and finds the socket on it: a
+  # unix socket on a shared volume is reachable across containers, which is
+  # what lets ONE daemon serve all of them. Agents therefore install as their
+  # unprivileged runtime user (previously impossible — nix was single-user, so
+  # only root could write the store).
+  #
+  # Losing this service degrades gracefully: already-installed tools keep
+  # working (PATH points at store paths), only new installs fail.
+  nix-daemon:
+    image: ${IMAGE_PREFIX:-opc}/nix-seed:local
+    restart: unless-stopped
+    depends_on:
+      nix-seed:
+        condition: service_completed_successfully
+    command: ["/usr/local/bin/opc-nix-daemon.sh"]
+    volumes:
+      - opc-nix:/nix
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /nix/var/nix/daemon-socket/socket"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      # First boot copies the seed into an empty volume before the socket
+      # appears; that is minutes on a cold disk, not seconds.
+      start_period: 300s
+
   # Mirrors declared host config sources into a named volume on every `up`
   # (generic host-config-sync mechanism; see docs/superpowers/specs/
   # 2026-08-17-host-config-sync-design.md). This instance syncs GitHub
@@ -141,6 +173,8 @@ services:
     init: true
     restart: unless-stopped
     depends_on:
+      nix-daemon:
+        condition: service_healthy
       buzz-db:
         condition: service_healthy
       buzz-redis:
@@ -180,7 +214,7 @@ services:
       - "${BUZZ_PORT:-3000}:3000"
     volumes:
       - buzz-git:/data/git
-      - buzz-nix:/nix
+      - opc-nix:/nix
       - buzz-mise:/opt/mise
       - opc-keys:/keys:ro
       - buzz-omp:/root/.omp
@@ -228,6 +262,8 @@ services:
     init: true
     restart: unless-stopped
     depends_on:
+      nix-daemon:
+        condition: service_healthy
       buzz:
         condition: service_healthy
       buzz-bootstrap:
@@ -324,7 +360,7 @@ services:
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
     volumes:
       - frontdoor-hermes:/opt/data
-      - frontdoor-nix:/nix
+      - opc-nix:/nix
       - frontdoor-mise:/opt/mise
       - opc-keys:/keys:ro
       - opc-gh-creds:/creds
@@ -339,6 +375,8 @@ services:
     image: ${IMAGE_PREFIX:-opc}/hermes:local
     restart: unless-stopped
     depends_on:
+      nix-daemon:
+        condition: service_healthy
       nix-seed:
         condition: service_completed_successfully
       # GitHub credentials for the gateway's paperclip/gh dev flow (same
@@ -392,7 +430,7 @@ services:
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:
       - hermes-data:/opt/data
-      - hermes-nix:/nix
+      - opc-nix:/nix
       - hermes-mise:/opt/mise
       - hermes-omp:/root/.omp
       - opc-keys:/keys:ro
@@ -419,6 +457,8 @@ services:
     # (same slot the gateway container uses for its own dashboard).
     command: ["sleep", "infinity"]
     depends_on:
+      nix-daemon:
+        condition: service_healthy
       host-sync:
         condition: service_completed_successfully
     environment:
@@ -450,7 +490,7 @@ services:
       - "${HERMES_DASHBOARD_PORT:-9119}:9119"
     volumes:
       - frontdoor-hermes:/opt/data
-      - hermes-nix:/nix
+      - opc-nix:/nix
       - hermes-omp:/root/.omp
       - opc-keys:/keys:ro
       - opc-gh-creds:/creds
@@ -472,6 +512,8 @@ services:
     init: true
     restart: unless-stopped
     depends_on:
+      nix-daemon:
+        condition: service_healthy
       nix-seed:
         condition: service_completed_successfully
       # GitHub credentials for the executor agent's dev flow (git push / gh
@@ -559,7 +601,7 @@ services:
       - "${DEVENV_HTTP_BIND:-0.0.0.0}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}"
     volumes:
       - paperclip-data:/paperclip
-      - paperclip-nix:/nix
+      - opc-nix:/nix
       - paperclip-mise:/opt/mise
       - opc-gh-creds:/creds
       # HOME for the prototyper agent (adapterConfig env.HOME). Holds only
@@ -776,6 +818,10 @@ services:
 
 volumes:
   opc-keys:
+  # Single shared nix store + daemon socket + shared agent profile.
+  # Replaced the per-service buzz/frontdoor/hermes/paperclip -nix volumes so a
+  # tool installed in one container is present in all of them.
+  opc-nix:
   opc-gh-creds:
   opc-prototypes:
   opc-prototyper-home:
@@ -785,13 +831,9 @@ volumes:
   buzz-redisdata:
   buzz-miniodata:
   buzz-git:
-  buzz-nix:
   frontdoor-hermes:
-  frontdoor-nix:
   hermes-data:
-  hermes-nix:
   paperclip-data:
-  paperclip-nix:
   buzz-mise:
   frontdoor-mise:
   hermes-mise:

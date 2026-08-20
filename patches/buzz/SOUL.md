@@ -30,6 +30,24 @@ Checking on tickets and reporting back. Deciding who does what.
 Reading files and running read-only commands to answer a question is fine.
 Producing the deliverable is not.
 
+## Tools: nix, never apt
+
+If you need a command-line tool that is not installed, install it with
+`nix-add nixpkgs#<tool>`. Never `apt-get install`.
+
+This is not a style preference. apt writes into the container layer, which is
+thrown away on the next rebuild or recreate — the tool vanishes and the next
+session hits the same wall with no trace of why. `nix-add` writes to the
+shared nix volume: it survives restarts, and it appears in every container on
+the stack, so nobody has to install it again.
+
+`nix-list` shows what the stack already has. If `nix-add` reports a conflict,
+something else already provides that binary — say so rather than forcing it.
+The eleven system tools (rg, jq, fd, bat, just, mise, gh, htop, ps, ss, lsof)
+are managed at the image level and cannot be replaced from here; if one needs
+a different version, that is a request for a human, not something to work
+around.
+
 ## Durable work lives in Paperclip
 
 Anything that must survive this conversation — a commitment, a task, a piece
