@@ -257,6 +257,18 @@ fi
 # agent's failure propagate would abort the bootstrap: no further agents, and
 # the whole stack stuck waiting on a dependency that will never complete. A
 # per-agent failure must stay a loud line on stderr, not a stack outage.
+#
+# Scope of that `|| true`, stated precisely: POSIX suspends `set -e` for the
+# entire dynamic extent of a function invoked as part of an AND-OR list, not
+# just for the explicit `return 1` above. So every command that runs inside
+# reconcile_agent for THIS call — the api_get lookups, the jq comparisons,
+# the api_post_raw/api_patch_raw calls — is non-fatal for this invocation,
+# not only the return path. That is fine here: every step that can fail
+# already checks its own result explicitly (the `[ -n "$_ra_id" ]` guards,
+# the `jq -e` verification on the PATCH response) and prints a WARNING/failed
+# line rather than depending on `set -e` to notice — so widening `|| true`'s
+# reach to the whole function does not hide a failure this code relies on
+# `set -e` to catch, because it never relied on that in the first place.
 reconcile_agent() {
     _ra_name="$1"
     _ra_type="$2"
@@ -368,7 +380,44 @@ SCIENTIST_KEY="${HERMES_SCIENTIST_API_KEY:-}"
 # apiKey is absent, or it is still a plain string, assert the key — one PATCH
 # re-mints it and stamps the new digest, and the next boot is quiet again.
 # The digest is a truncated sha256, not the credential.
+#
+# This runs at top level, outside reconcile_agent's `|| true` isolation (it
+# has to: the empty-key guard a few lines down also needs it). Verified safe
+# under `set -e` regardless: this script's shell is dash (no `pipefail`
+# anywhere, and POSIX sh has no such option at all), so a pipeline's exit
+# status is that of its LAST command only. A missing sha256sum would make
+# that stage exit 127, but `cut` still runs on the now-empty stream and exits
+# 0 — confirmed with `sh -c 'set -e; printf x | nonexistent_cmd | cut -c1-16;
+# echo ok'`, which prints `ok` rather than aborting. The assignment succeeds
+# with an empty fingerprint, sci_desired_config's `$fp` comparison then never
+# matches a real digest, and the worst case is one extra (harmless) PATCH per
+# boot — not the stack-outage shape Finding 2's `|| true` exists to prevent.
+# /usr/bin/sha256sum is present in this image today, so this is a fallback
+# behaviour, not a live defect.
 SCIENTIST_KEY_FP="$(printf '%s' "$SCIENTIST_KEY" | sha256sum | cut -c1-16)"
+
+# Fingerprint-plus-type is not enough to call the key "current": it never
+# checks that the secret_ref actually resolves. A secret row can disappear
+# out from under a config that still points at it — `DELETE /api/secrets/:id`
+# has no reference guard, and nine unreferenced `hermes_gateway.apikey.*`
+# rows exist today precisely because deletion is unconstrained — or a
+# rotation PATCH can land the new fingerprint while the secret write itself
+# fails. Either way the live record looks superficially fine (right
+# fingerprint, `apiKey` is an object) while pointing at nothing, every
+# Scientist run then fails on an unresolvable reference, and bootstrap prints
+# "config current" forever — the exact silent-divergence class this whole
+# reconcile exists to close. So membership in the live secret set is part of
+# "current", not just shape and fingerprint. Fetched once per boot (cheap,
+# read-only); `[]` on any fetch hiccup makes every secret_ref look dangling,
+# which just re-asserts the key — the safe direction to fail in.
+#
+# The trailing `|| true` is load-bearing under `set -e`, same reasoning as
+# Finding 3 above: without it, a jq failure on unexpected/empty input (e.g.
+# api_get's own curl failing) would make this top-level assignment abort the
+# whole bootstrap — the pipeline's exit status is jq's (its last command),
+# and this line runs outside reconcile_agent's isolation.
+SCIENTIST_SECRET_IDS="$(api_get "/companies/$company_id/secrets" | jq -c '[.[]?.id]' 2>/dev/null || true)"
+case "$SCIENTIST_SECRET_IDS" in '['*']') ;; *) SCIENTIST_SECRET_IDS='[]' ;; esac
 
 sci_desired_config() { # live adapterConfig on stdin → desired on stdout
     # dangerouslyAllowInsecureRemoteHttp: paperclip's hermes_gateway adapter
@@ -380,8 +429,20 @@ sci_desired_config() { # live adapterConfig on stdin → desired on stdout
     # network (every other inter-service hop in this stack is plain http on
     # a private docker network too), so this is the same trust boundary the
     # rest of the stack already relies on, not a new one.
-    jq -c --arg base "$SCIENTIST_BASE" --arg key "$SCIENTIST_KEY" --arg fp "$SCIENTIST_KEY_FP" '
-          (((.apiKeyFingerprint // "") == $fp) and ((.apiKey | type) == "object")) as $key_current
+    # `.apiKey.secretId` is captured as `$sid` BEFORE piping into `$ids`: a
+    # filter passed as an argument to a builtin (`index(EXPR)`) is evaluated
+    # against whatever `.` is at that point in the pipeline, which after
+    # `$ids | ...` is `$ids` itself, not the top-level config — writing
+    # `$ids | index(.apiKey.secretId)` fails with "Cannot index array with
+    # string ("apiKey")" because `.` is already the id array by then.
+    jq -c --arg base "$SCIENTIST_BASE" --arg key "$SCIENTIST_KEY" --arg fp "$SCIENTIST_KEY_FP" \
+          --argjson ids "$SCIENTIST_SECRET_IDS" '
+          (.apiKey.secretId // null) as $sid
+        | (((.apiKeyFingerprint // "") == $fp)
+            and ((.apiKey | type) == "object")
+            and ($sid != null)
+            and (($ids | index($sid)) != null)
+          ) as $key_current
         | .apiBaseUrl = $base
         | .sessionKeyStrategy = "agent"
         | .dangerouslyAllowInsecureRemoteHttp = true
