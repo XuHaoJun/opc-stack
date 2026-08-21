@@ -300,6 +300,76 @@ expect_ok "release removes container and row" "gone" \
      r=\$(podenv list 2>/dev/null | grep -c gate-probe || true)
      [ \"\$n\" = 0 ] && [ \"\$r\" = 0 ] && echo gone || echo \"containers=\$n rows=\$r\""
 
+echo "── review findings (task-3-report.md) ──"
+
+# F1a: an ordinary apostrophe in --dedicated must not break the underlying
+# SQL. RED-proved manually pre-fix (see task-3-report.md): the raw INSERT
+# died with `ERROR: syntax error at or near "s"`, exit 1 — outside the
+# documented 0/2/3/4/5 contract, and the apostrophe is ordinary English, not
+# an attack.
+docker compose exec -T -u node paperclip sh -c "rm -f /tmp/f1-quote-gate.env" >/dev/null 2>&1
+check "an apostrophe in --dedicated does not break provision (F1a)" \
+    docker compose exec -T -u node paperclip sh -c \
+    "podenv provision f1-quote-gate --image docker.io/traefik/whoami --port 80 --as F1_QUOTE_GATE --dedicated \"user's cache\" --env-file /tmp/f1-quote-gate.env"
+
+check "the apostrophe renders correctly in podenv list (F1a)" \
+    sh -c "docker compose exec -T -u node paperclip podenv list 2>&1 | grep -q \"dedicated: user's cache\""
+
+check "the apostrophe renders correctly in devenv list (F1a)" \
+    sh -c "docker compose exec -T -u node paperclip devenv list 2>&1 | grep -q \"dedicated: user's cache\""
+
+check "F1a gate lease releases cleanly" \
+    docker compose exec -T -u node paperclip podenv release f1-quote-gate
+
+# F1b: a hostile --image is rejected before it ever reaches podman or the
+# database. RED-proved manually pre-fix (see task-3-report.md): this exact
+# value sailed past argument parsing (there was no charset gate at all),
+# reached podman, and even left a stray row behind (the same failure F3b
+# fixes) once podman rejected the reference.
+expect "a hostile --image is rejected at exit 2, not accepted (F1b)" "2" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1-image-gate --image "evil\$(true)image" --port 80 >/dev/null 2>&1; echo $?'
+
+check "the rejected hostile image never created a row (F1b)" \
+    sh -c '! docker compose exec -T -u node paperclip podenv list 2>&1 | grep -q f1-image-gate'
+
+# F3a: a container that exists but fails to (re)start must be reported as a
+# failure, not printed as success. Set up the exact scenario by hand: create
+# (never start) a container whose entrypoint cannot exec, and register a
+# matching row so `podenv provision` takes the "container already exists"
+# branch. RED-proved manually pre-fix (see task-3-report.md): the identical
+# setup printed "'f3-red' (existing) -> ...", exit 0, and wrote a .env
+# pointing at a container that was never actually running.
+docker compose exec -T -u node paperclip sh -c \
+    'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f3_gate >/dev/null 2>&1
+     podman --remote --url unix:///run/podenv/podman.sock create --name podenv_f3_gate \
+       --label opc.podenv.lease=podenv_f3_gate --label opc.podenv.key=f3-gate \
+       --network=pasta -p 23010:80 docker.io/library/alpine:3.20 /nonexistent-binary' >/dev/null 2>&1
+docker compose exec -T paperclip sh -c \
+    'PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" psql -h "$DEVENV_PG_HOST" -U "$DEVENV_PG_ADMIN_USER" \
+       -d "${DEVENV_CONTROL_DB:-devenv_control}" -v ON_ERROR_STOP=1 -c "
+         DELETE FROM podenv_lease WHERE key = '"'"'f3-gate'"'"';
+         INSERT INTO podenv_lease (key, slug, image, netns, container_port, host_port, env_var, created_by)
+         VALUES ('"'"'f3-gate'"'"', '"'"'podenv_f3_gate'"'"', '"'"'docker.io/library/alpine:3.20'"'"', '"'"'pasta'"'"', 80, 23010, '"'"'F3_GATE_ADDR'"'"', '"'"'test'"'"')"' >/dev/null 2>&1
+
+expect "a failed (re)start is reported as a failure, not success (F3a)" "5" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f3-gate --image docker.io/library/alpine:3.20 --port 80 --as F3_GATE_ADDR --env-file /tmp/f3-gate.env >/dev/null 2>&1; echo $?'
+
+check "the failed start wrote no stale .env entry (F3a)" \
+    sh -c '! docker compose exec -T -u node paperclip cat /tmp/f3-gate.env >/dev/null 2>&1'
+
+# Cleanup: this key's row pre-dated the call (created_now=0), so the fix's
+# rollback trap correctly leaves it in place (F3b: never tear down a
+# pre-existing lease just because a later step had a bad day) — release it
+# by hand instead, same as an operator would.
+check "F3a gate lease and container clean up" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv release f3-gate >/dev/null 2>&1
+     podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f3_gate >/dev/null 2>&1
+     rm -f /tmp/f3-gate.env
+     true'
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

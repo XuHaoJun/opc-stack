@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS podenv_lease (
   -- UNIQUE is sufficient here, unlike devenv's http_port_start: a podenv lease
   -- holds ONE port, not a contiguous block, so there is no "different starts
   -- that still overlap" case and no table lock is needed. The DB is the
-  -- arbiter; concurrent callers race harmlessly and the loser retries.
+  -- arbiter; the CLI's provision retry loop (around this INSERT) is what
+  -- actually makes the loser retry rather than die outside the exit-code
+  -- contract.
   host_port        int  NOT NULL UNIQUE,
   -- The .env variable name this lease writes. Never one of
   -- devenv_reserved_env_names (enforced in the CLI).
