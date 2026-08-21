@@ -227,9 +227,21 @@ cmd_provision() {
     # ban — it is a detour that costs something. The reason is persisted and
     # listed, which is what keeps it from being a rubber stamp: the same
     # reasoning that keeps `prototype destroy` from having a --yes flag.
-    _img_family="$(printf '%s' "$image" | sed 's|.*/||; s|:.*||')"
-    _img_provider="$(devenv_provider_image_families \
-        | sed -n "s|^${_img_family}=||p" | head -1)"
+    # This is a carelessness catch, not a security boundary — anyone can pass
+    # --dedicated, deliberately or not, and that is fine (see the design doc).
+    # But an ACCIDENTAL evasion is worth closing: strip a registry/namespace
+    # prefix, a `@<digest>` suffix (pinning by digest is good practice, so
+    # this must not read as evasion), and a `:<tag>` suffix, then lowercase
+    # (a local tag can be uppercase even though Docker Hub repo names cannot)
+    # before resolving common renamings of the SAME software via
+    # devenv_image_family_alias (shared.sh — one home for this data, same as
+    # the reserved-name list above). The lookup itself is a string compare,
+    # not a sed pattern match — see devenv_provider_for_family's own comment
+    # in shared.sh for why that distinction matters (F2).
+    _img_family="$(printf '%s' "$image" | sed 's|.*/||; s|@.*||; s|:.*||' \
+        | tr '[:upper:]' '[:lower:]')"
+    _img_family="$(devenv_image_family_alias "$_img_family")"
+    _img_provider="$(devenv_provider_for_family "$_img_family")"
     if [ -n "$_img_provider" ] && [ -z "$dedicated" ]; then
         die "devenv already serves '$_img_family' — use it instead:
     devenv provision $key --with $_img_provider

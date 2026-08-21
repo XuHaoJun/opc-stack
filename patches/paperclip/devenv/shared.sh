@@ -50,6 +50,40 @@ redis=valkey
 FAMILIES
 }
 
+# Renamings of the SAME software devenv serves, published under a different
+# repo name — NOT a general alias mechanism. `postgresql` is Bitnami's (and
+# others') name for the exact software devenv-pg is; the caller must lowercase
+# and strip registry/tag/digest before calling this (see podenv's route gate),
+# this only resolves the name itself. valkey/redis need no entry here: once
+# case is normalised, Bitnami's `bitnami/valkey` and `bitnami/redis` already
+# collapse to the same family strings `devenv_provider_image_families` uses.
+#
+# Do NOT add MariaDB, MySQL, Milvus, or anything else devenv does not serve —
+# gating software podenv is meant to carry would be a bug, not thoroughness.
+devenv_image_family_alias() {
+    case "$1" in
+        postgresql) echo postgres ;;
+        *)          echo "$1" ;;
+    esac
+}
+
+# Exact-match lookup into devenv_provider_image_families's `family=provider`
+# lines. A STRING comparison, not a sed/grep pattern match: the family name
+# comes from an --image the caller chose, and interpolating it into a sed
+# PATTERN (as podenv briefly did) puts it in regex position, where `.` is a
+# wildcard — a family literally named `p.stgres` would then false-positive
+# against the `postgres=postgres` line. Prints the provider on a match,
+# nothing on a miss (never dies — callers decide what a miss means).
+devenv_provider_for_family() {
+    _dpf_fam="$1"
+    devenv_provider_image_families | while IFS='=' read -r _dpf_f _dpf_p; do
+        if [ "$_dpf_f" = "$_dpf_fam" ]; then
+            printf '%s\n' "$_dpf_p"
+            break
+        fi
+    done
+}
+
 # Derived, not stored: a re-run must hand back the credential a stale .env
 # already holds, and derivation achieves that without plaintext secrets at rest.
 #

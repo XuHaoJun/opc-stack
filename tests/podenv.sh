@@ -379,11 +379,18 @@ expect "refuses a variable name devenv owns" "refused" \
     'out=$(podenv provision name-clash --image docker.io/traefik/whoami --port 80 \
              --as DATABASE_URL 2>&1); rc=$?
      [ "$rc" = 2 ] && echo "$out" | grep -q "devenv" && echo refused || echo "rc=$rc out=$out"'
+# F3: this must check the MESSAGE too, not just rc=2 — the implementer
+# demonstrated it passing before the guard existed, because a dash
+# redirection permission error in the container's default working directory
+# (--env-file defaults to $PWD/.env, and $PWD here is not node-writable) also
+# exits 2. rc=2 alone cannot distinguish "the guard fired" from "something
+# else failed first"; grepping for "devenv" (as the sibling check above does)
+# can.
 expect "refuses the DEV_PORT_<n> family too" "refused" \
     docker compose exec -T -u node paperclip sh -c \
     'out=$(podenv provision name-clash --image docker.io/traefik/whoami --port 80 \
              --as DEV_PORT_2 2>&1); rc=$?
-     [ "$rc" = 2 ] && echo refused || echo "rc=$rc out=$out"'
+     [ "$rc" = 2 ] && echo "$out" | grep -q "devenv" && echo refused || echo "rc=$rc out=$out"'
 
 # (c) route gate. redis is a family devenv serves, so an unqualified request
 # must be refused and must name the devenv command.
@@ -404,9 +411,60 @@ expect "--memory is refused rather than silently ignored" "refused" \
     docker compose exec -T -u node paperclip sh -c \
     'out=$(podenv provision mem-probe --image docker.io/traefik/whoami --port 80 --memory 128m 2>&1); rc=$?
      [ "$rc" = 2 ] && echo "$out" | grep -q "PODENV_MEM_LIMIT" && echo refused || echo "rc=$rc out=$out"'
+
+# (F1) the family match must survive a registry/namespace prefix, a digest
+# pin, a tag renaming, and case — measured evasions of the pre-fix
+# `sed 's|.*/||; s|:.*||'`. All three refusals below must fire WITHOUT ever
+# reaching podman (the gate sits before podenv_require_runtime), so no
+# --env-file, container, or podenv_lease row is left behind to clean up.
+expect "route gate catches a digest-pinned image (F1)" "refused" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision f1-digest --port 5432 \
+             --image docker.io/library/postgres@sha256:1111111111111111111111111111111111111111111111111111111111111111 2>&1); rc=$?
+     [ "$rc" = 2 ] && echo "$out" | grep -q "devenv already serves" && echo refused || echo "rc=$rc out=$out"'
+expect "route gate catches a renamed image of the SAME software, e.g. bitnami/postgresql (F1)" "refused" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision f1-bitnami --image bitnami/postgresql:16 --port 5432 2>&1); rc=$?
+     [ "$rc" = 2 ] && echo "$out" | grep -q "devenv already serves" && echo refused || echo "rc=$rc out=$out"'
+expect "route gate catches an uppercase local tag (F1)" "refused" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision f1-upper --image POSTGRES:16 --port 5432 2>&1); rc=$?
+     [ "$rc" = 2 ] && echo "$out" | grep -q "devenv already serves" && echo refused || echo "rc=$rc out=$out"'
+
+# (F1 regression guard) the alias set is a SMALL, closed list of renamings of
+# what devenv actually serves — it must never grow to cover software devenv
+# does not carry. mysql/milvus reach podman (a real attempt, not a stub) and
+# are asserted NOT gated; whether podman itself can start them here is
+# irrelevant to this gate, so this only fails "gated" if the route gate's
+# refusal message shows up, not on any downstream podman error.
+expect "route gate does NOT fire for MySQL — devenv does not serve it (F1)" "not-gated" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision f1-neg-mysql --image mysql:5.7 --port 3306 --env-file /tmp/podenv-f1-neg-mysql.env 2>&1); rc=$?
+     if [ "$rc" = 2 ] && echo "$out" | grep -q "devenv already serves"; then echo gated; else echo not-gated; fi'
+expect "route gate does NOT fire for Milvus — devenv does not serve it (F1)" "not-gated" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision f1-neg-milvus --image milvus/milvus:v2.5.0 --port 19530 --env-file /tmp/podenv-f1-neg-milvus.env 2>&1); rc=$?
+     if [ "$rc" = 2 ] && echo "$out" | grep -q "devenv already serves"; then echo gated; else echo not-gated; fi'
+
+# (F2) the lookup must be a string compare, not a sed/grep PATTERN match: a
+# family containing a regex metacharacter (`.` here) must not false-positive
+# against an unrelated family's line just because the pattern happens to
+# match as a wildcard. Pre-fix this printed "devenv already serves
+# 'p.stgres'" — a real image name (`.` is a valid OCI reference character),
+# refused for software devenv has never heard of.
+expect "the family lookup is a string compare, not a regex (F2)" "not-gated" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision f2-metachar --image docker.io/library/p.stgres:1 --port 5432 --env-file /tmp/podenv-f2-metachar.env 2>&1); rc=$?
+     if [ "$rc" = 2 ] && echo "$out" | grep -q "devenv already serves"; then echo gated; else echo not-gated; fi'
+
 # cleanup so re-runs start clean
 docker compose exec -T -u node paperclip sh -c \
-    'podenv release legacy-pg >/dev/null 2>&1; rm -f /tmp/podenv-dedicated.env' >/dev/null 2>&1
+    'podenv release legacy-pg >/dev/null 2>&1
+     podenv release f1-neg-mysql >/dev/null 2>&1
+     podenv release f1-neg-milvus >/dev/null 2>&1
+     podenv release f2-metachar >/dev/null 2>&1
+     rm -f /tmp/podenv-dedicated.env /tmp/podenv-f1-neg-mysql.env \
+           /tmp/podenv-f1-neg-milvus.env /tmp/podenv-f2-metachar.env' >/dev/null 2>&1
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
