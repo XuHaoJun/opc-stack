@@ -109,9 +109,23 @@ check "podenv container is running" \
 check "podman API answers on the socket" \
     docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
     podman --remote --url unix:///run/podenv/podman.sock version
-expect "socket owner uid == paperclip node uid" \
-    "$(docker compose exec -T paperclip id -u node 2>/dev/null | tr -d '\r')" \
-    docker compose exec -T podenv stat -c %u /run/podenv/podman.sock
+# NOT `expect` with a precomputed "want": both sides here come from a command
+# (paperclip's node uid, podenv's socket owner), and if EITHER command fails
+# outright (e.g. paperclip is down), it prints nothing — the same empty
+# string a legitimately-matching value could never be, but indistinguishable
+# from "compared two empty strings and called it a match" once you're only
+# looking at stdout. That's the exact defect class expect_ok was introduced
+# to close, generalized to two commands instead of one: require BOTH exit 0
+# AND agree, not just agree.
+_node_uid="$(docker compose exec -T paperclip id -u node 2>/dev/null)"; _node_rc=$?
+_node_uid="$(printf '%s' "$_node_uid" | tr -d '\r')"
+_sock_uid="$(docker compose exec -T podenv stat -c %u /run/podenv/podman.sock 2>/dev/null)"; _sock_rc=$?
+_sock_uid="$(printf '%s' "$_sock_uid" | tr -d '\r')"
+if [ "$_node_rc" -eq 0 ] && [ "$_sock_rc" -eq 0 ] && [ -n "$_node_uid" ] && [ "$_node_uid" = "$_sock_uid" ]; then
+    pass "socket owner uid == paperclip node uid"
+else
+    fail "socket owner uid == paperclip node uid (want '$_node_uid' [rc=$_node_rc], got '$_sock_uid' [rc=$_sock_rc])"
+fi
 expect_ok "self-test left no diagnosis" "" \
     docker compose exec -T podenv cat /run/podenv/diagnosis
 expect "nested podman run works" "NESTED_OK" \
@@ -155,6 +169,28 @@ check "no zombie processes after nested container runs" \
 # there would make this check green in the wrong place.
 check "mem_limit is actually applied to the podenv container" \
     sh -c 'v=$(docker compose exec -T podenv cat /sys/fs/cgroup/memory.max 2>/dev/null | tr -d "\r"); [ -n "$v" ] && [ "$v" != "max" ]'
+
+echo "── cli ──"
+
+expect "paperclip has a podman client whose version matches the server" "match" \
+    docker compose exec -T -u node paperclip sh -c \
+    'c=$(podman --remote version --format "{{.Client.Version}}" 2>/dev/null)
+     s=$(podman --remote version --format "{{.Server.Version}}" 2>/dev/null)
+     [ -n "$s" ] && [ "$c" = "$s" ] && echo match || echo "client=$c server=$s"'
+check "podenv list works" docker compose exec -T -u node paperclip podenv list
+check "podenv_lease table exists" \
+    docker compose exec -T paperclip sh -c \
+    'PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" psql -h "$DEVENV_PG_HOST" -U "$DEVENV_PG_ADMIN_USER" \
+       -d "${DEVENV_CONTROL_DB:-devenv_control}" -tAc "SELECT 1 FROM podenv_lease LIMIT 1" >/dev/null'
+check "devenv list shows the podenv section" \
+    sh -c 'docker compose exec -T -u node paperclip devenv list 2>&1 | grep -q "podenv leases"'
+expect "bad usage is exit 2" "2" \
+    docker compose exec -T -u node paperclip sh -c 'podenv provision 2>/dev/null; echo $?'
+# The reserved-name list must have exactly one home. If podenv grew its own
+# copy, this drifts silently and two tools write the same .env key.
+expect "reserved env names come from devenv, not a second copy" "DATABASE_URL" \
+    docker compose exec -T -u node paperclip sh -c \
+    '. /usr/local/lib/devenv/shared.sh; devenv_reserved_env_names | grep -x DATABASE_URL'
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"

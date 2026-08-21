@@ -19,6 +19,11 @@ set -eu
 
 DEVENV_LIB="${DEVENV_LIB:-/usr/local/lib/devenv}"
 
+# Truths devenv shares with podenv (env merge, password derivation, owner
+# attribution, the reserved .env names, the provider image families). One
+# file, two CLIs — see shared.sh's header for why.
+. "$DEVENV_LIB/shared.sh"
+
 DEVENV_PG_HOST="${DEVENV_PG_HOST:-devenv-pg}"
 DEVENV_PG_PORT="${DEVENV_PG_PORT:-5432}"
 DEVENV_PG_ADMIN_USER="${DEVENV_PG_ADMIN_USER:-postgres}"
@@ -71,13 +76,6 @@ devenv_valkey_admin() {
 
 # ── helpers shared with providers ────────────────────────────────────────
 
-# Derived, not stored: a re-run must hand back the credential a stale .env
-# already holds, and derivation achieves that without plaintext secrets at rest.
-devenv_derive_password() {
-    [ -n "$DEVENV_SECRET_SALT" ] || die "DEVENV_SECRET_SALT is unset — set it in .env" 4
-    printf '%s|%s|%s' "$DEVENV_SECRET_SALT" "$1" "$2" | sha256sum | cut -c1-32
-}
-
 # The control registry (database devenv_control + table devenv_tenant) is
 # created by opc-devenv-seed.sh, never by this CLI. When it is absent, every
 # command below reaches it through a different door and each door tells a
@@ -113,35 +111,8 @@ devenv_valkey_db_alloc() {
     echo "$_alloc_n"
 }
 
-# Owner attribution, in order of specificity. PAPERCLIP_AGENT_ID is injected
-# by paperclip on every agent run, so leases are attributed automatically —
-# adapterConfig only needs DEVENV_OWNER when you want a friendlier label.
-devenv_owner() {
-    if [ -n "${DEVENV_OWNER:-}" ]; then
-        echo "$DEVENV_OWNER"
-    elif [ -n "${PAPERCLIP_AGENT_ID:-}" ]; then
-        echo "agent:${PAPERCLIP_AGENT_ID}"
-    else
-        echo "$(id -un)@$(hostname)"
-    fi
-}
-
 devenv_slug() {
     echo "devenv_$(echo "$1" | tr '-' '_')"
-}
-
-# Rewrite only the keys devenv owns; anything else in the file is preserved.
-# Both arguments are files so KEY=VALUE lines never go through word splitting.
-devenv_env_merge() {
-    _env_file="$1"; _env_new="$2"
-    _env_tmp="${_env_file}.devenv.$$"
-    : > "$_env_tmp"
-    if [ -f "$_env_file" ]; then
-        _env_drop="$(sed 's/=.*//' "$_env_new" | paste -sd'|' -)"
-        grep -Ev "^(${_env_drop})=" "$_env_file" >> "$_env_tmp" || true
-    fi
-    cat "$_env_new" >> "$_env_tmp"
-    mv "$_env_tmp" "$_env_file"
 }
 
 for _p in "$DEVENV_LIB"/providers/*.sh; do
@@ -328,6 +299,24 @@ cmd_list() {
          FROM devenv_usage"
     # '!' = port leased but `devenv expose` never ran, so nothing is serving it.
     note "  ports '!' = leased but not exposed (run: devenv expose <name> --command ...)"
+
+    # podenv leases live in the same database in their own table (devenv_tenant
+    # is one-column-per-provider; carrying podenv's columns here would make
+    # devenv's schema hold podenv's concepts). Guarded by to_regclass so devenv
+    # keeps working unchanged when podenv is not installed — this is the ONE
+    # line of coupling that buys a single place to look at what is occupied.
+    if [ "$(devenv_psql_control -tAc \
+            "SELECT to_regclass('podenv_lease') IS NOT NULL" 2>/dev/null \
+            | tr -d '[:space:]')" = "t" ]; then
+        echo
+        echo "podenv leases (nested containers):"
+        devenv_psql_control -c \
+            "SELECT key, image, netns, host_port, env_var,
+                    CASE WHEN dedicated_reason IS NULL THEN ''
+                         ELSE 'dedicated: ' || dedicated_reason END AS dedicated,
+                    date_trunc('second', idle) AS idle
+             FROM podenv_usage"
+    fi
 }
 
 case "${1:-}" in

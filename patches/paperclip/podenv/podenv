@@ -1,0 +1,120 @@
+#!/bin/sh
+# podenv — nested container leases for Paperclip agents.
+#
+#   podenv provision <key> --image REF --port N [--as VAR] [--url TEMPLATE]
+#                          [--env K=V] [--password-env NAME]
+#                          [--netns pasta|host] [--dedicated "reason"]
+#                          [--volume HOST:CONTAINER] [--env-file PATH]
+#   podenv release   <key>
+#   podenv list
+#
+# Design notes (including the seven Phase 0 measurements this depends on) live
+# in docs/superpowers/specs/2026-08-22-podenv-nested-container-lease-design.md.
+# Short version: devenv covers shared, multi-tenant, modern backends; podenv
+# covers what devenv cannot — daemons that refuse to share, and very old
+# versions that only exist as an image.
+#
+# USE DEVENV FIRST. If devenv already provides it, this CLI refuses the image
+# and tells you the devenv command instead. That is a mechanism, not advice.
+#
+# Reclamation is manual (`podenv release`). Nothing reclaims automatically —
+# invariant 6b.
+#
+# Exit codes: 0 ok / 2 bad usage / 3 resources exhausted / 4 backend unreachable
+set -eu
+
+PODENV_LIB="${PODENV_LIB:-/usr/local/lib/podenv}"
+DEVENV_LIB="${DEVENV_LIB:-/usr/local/lib/devenv}"
+
+# Shared with devenv: env merge, password derivation, owner, reserved .env
+# names, provider image families. See shared.sh's header.
+. "$DEVENV_LIB/shared.sh"
+
+PODENV_SOCK="${PODENV_SOCK:-/run/podenv/podman.sock}"
+PODENV_DIAG="${PODENV_DIAG:-/run/podenv/diagnosis}"
+PODENV_HOST_NAME="${PODENV_HOST_NAME:-podenv}"
+PODENV_PORT_BASE="${PODENV_PORT_BASE:-23000}"
+PODENV_PORT_COUNT="${PODENV_PORT_COUNT:-16}"
+
+DEVENV_PG_HOST="${DEVENV_PG_HOST:-devenv-pg}"
+DEVENV_PG_PORT="${DEVENV_PG_PORT:-5432}"
+DEVENV_PG_ADMIN_USER="${DEVENV_PG_ADMIN_USER:-postgres}"
+DEVENV_PG_ADMIN_PASSWORD="${DEVENV_PG_ADMIN_PASSWORD:-}"
+DEVENV_CONTROL_DB="${DEVENV_CONTROL_DB:-devenv_control}"
+
+die()  { echo "podenv: $1" >&2; exit "${2:-1}"; }
+note() { echo "$1" >&2; }
+
+podenv_psql() {
+    PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" \
+    PGOPTIONS='-c client_min_messages=warning' psql \
+        -h "$DEVENV_PG_HOST" -p "$DEVENV_PG_PORT" -U "$DEVENV_PG_ADMIN_USER" \
+        -w -q -d "$DEVENV_CONTROL_DB" "$@"
+}
+
+# Three distinct failures, three distinct messages. The raw errors here are
+# actively misleading: podman-remote's "Cannot connect to Podman ... try
+# `podman machine init`" sends the reader to a macOS workflow that does not
+# exist in this stack, and a socket that exists but refuses the connection
+# looks identical to one that is not listening yet.
+podenv_require_runtime() {
+    if [ ! -S "$PODENV_SOCK" ]; then
+        die "no podman socket at $PODENV_SOCK. The podenv compose service is not running (or its volume is not mounted here). Start it: docker compose up -d podenv" 4
+    fi
+    if ! podman --remote --url "unix://$PODENV_SOCK" version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+        _pr_diag=""
+        [ -s "$PODENV_DIAG" ] && _pr_diag=" Runtime host reported: $(cat "$PODENV_DIAG")"
+        die "the podman socket at $PODENV_SOCK exists but will not accept a connection. The access gate is the socket's OWNER uid, which must equal this user's ($(id -u)).${_pr_diag}" 4
+    fi
+    if [ -s "$PODENV_DIAG" ]; then
+        note "podenv: WARNING runtime host self-test: $(cat "$PODENV_DIAG")"
+    fi
+}
+
+podenv_require_control_schema() {
+    [ -n "$DEVENV_PG_ADMIN_PASSWORD" ] \
+        || die "DEVENV_PG_ADMIN_PASSWORD is unset — podenv shares devenv's control database and cannot reach it" 4
+    podenv_psql -tAc 'SELECT 1 FROM podenv_lease LIMIT 1' >/dev/null 2>&1 && return 0
+    die "podenv control schema not ready — table podenv_lease is missing in '$DEVENV_CONTROL_DB' on $DEVENV_PG_HOST:$DEVENV_PG_PORT. It is created by opc-podenv-seed.sh (paperclip's entrypoint). This is NOT resource exhaustion; releasing leases will not help." 4
+}
+
+podman_remote() { podman --remote --url "unix://$PODENV_SOCK" "$@"; }
+
+podenv_slug() { echo "podenv_$(echo "$1" | tr '-' '_')"; }
+
+cmd_provision() {
+    [ $# -gt 0 ] || die "usage: podenv provision <key> --image REF --port N [--as VAR] [...]" 2
+    die "podenv provision is not implemented yet (Task 3)" 2
+}
+cmd_release() {
+    [ $# -gt 0 ] || die "usage: podenv release <key>" 2
+    die "podenv release is not implemented yet (Task 3)" 2
+}
+
+cmd_list() {
+    podenv_require_control_schema
+    podenv_psql -c \
+        "SELECT key, image, netns, host_port, env_var,
+                CASE WHEN dedicated_reason IS NULL THEN ''
+                     ELSE dedicated_reason END AS dedicated,
+                date_trunc('second', idle) AS idle
+         FROM podenv_usage"
+    # Disk lives in podman's store, which SQL cannot see. Printed here rather
+    # than left out: there is no disk quota in this lane (a hard cap needs
+    # CAP_SYS_ADMIN, i.e. privileged), so visibility is the only control there
+    # is — the same stance devenv takes with devenv_usage.
+    if [ -S "$PODENV_SOCK" ]; then
+        echo
+        echo "podman store:"
+        podman_remote system df 2>/dev/null || note "podenv: (store usage unavailable)"
+    fi
+}
+
+case "${1:-}" in
+    provision) shift; cmd_provision "$@" ;;
+    release)   shift; cmd_release   "$@" ;;
+    list)      shift; cmd_list      "$@" ;;
+    -h|--help|help|"")
+        sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (provision|release|list)" 2 ;;
+esac

@@ -380,7 +380,9 @@ podenv provision legacy-erp --image postgres:9.6 \
 
 `devenv list` 尾巴加一段以 `to_regclass('podenv_lease') IS NOT NULL` 保護的查詢 ——
 podenv 沒裝就完全不影響 devenv, 裝了就有單一可觀測面。這是**對 `patches/paperclip/devenv/devenv`
-的一處修改**, 與上面 (b) 的保留名函式一起, 是本設計唯一要碰 devenv 的兩個地方。
+的一處修改**。連同 (b), 本設計碰 devenv 共三處: 新增 `devenv/shared.sh` (兩支 CLI 共用的
+真相 —— env merge、密碼推導、owner、保留變數名、provider image 家族)、`devenv` 改成 source
+它並刪掉自己那三份重複定義、以及這裡的 guarded 查詢。
 
 schema 由 podenv 自己的 seed 套用, 冪等, 且**開頭先檢查 control schema 是否存在**。這條直接
 抄 `devenv_require_control_schema` 的教訓: 當時 schema 不在, 原始訊息卻喊「no free valkey

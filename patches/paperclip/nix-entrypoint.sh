@@ -50,6 +50,11 @@ opc_own_runtime_trees
 . /usr/local/bin/opc-devenv-seed.sh
 opc_devenv_seed
 
+# podenv's own table in that same database (optional lane; never fatal).
+# Ordered AFTER the devenv seed because that one creates the database.
+. /usr/local/bin/opc-podenv-seed.sh
+opc_podenv_seed
+
 # The runtime server (and the omp executor it spawns) runs as the `node`
 # user via gosu. The nix-seed creates /paperclip/.omp as root (HOME=/paperclip
 # at entrypoint time) — hand it to node so omp's SQLite state opens cleanly.

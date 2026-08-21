@@ -695,6 +695,12 @@ services:
       # instead of the same hostname being written in two places that can
       # disagree. Set explicitly only to override that.
       DEVENV_HTTP_PUBLIC_HOST: ${DEVENV_HTTP_PUBLIC_HOST:-}
+      # podenv: the nested container lease lane. It shares devenv's control
+      # database (its own table), so it needs no extra credentials — only the
+      # pool bounds, which must match this service's published range.
+      PODENV_PORT_BASE: ${PODENV_PORT_BASE:-23000}
+      PODENV_PORT_COUNT: ${PODENV_PORT_COUNT:-16}
+      PODENV_PORT_RANGE_END: ${PODENV_PORT_RANGE_END:-23015}
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
       # Preview ports for prototype dev servers, leased by `devenv provision
@@ -733,6 +739,14 @@ services:
       # repo. Paperclip does NOT create a local_path workspace's cwd (mkdir
       # only happens for worktrees), so the `prototype` CLI makes it.
       - opc-prototypes:/prototypes
+      # podenv's API socket. A unix socket on a shared volume is reachable
+      # across containers — the same mechanism nix-daemon uses. Mounted rw
+      # because connecting to a unix socket requires write permission on it.
+      #
+      # There is deliberately NO depends_on edge to the podenv service: a
+      # broken nested runtime must degrade to "leases fail when used", not to
+      # "paperclip does not start" (invariant 8).
+      - opc-podenv-sock:/run/podenv
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s

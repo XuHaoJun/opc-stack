@@ -14,7 +14,23 @@
 # Shared nix seed image (compose passes the IMAGE_PREFIX-qualified name).
 # Declared globally so FROM ${NIX_SEED_IMAGE} expands; the `nix-seed` stage
 # below materializes it for COPY --from (which cannot expand variables).
+#
+# Both ARGs below MUST precede the FIRST FROM in the file, not merely their
+# own FROM — an ARG used in a FROM only has global scope (visible to every
+# later FROM) when declared before any stage begins; declared after one it is
+# scoped to that stage alone, and the following FROM sees an empty value
+# ("base name should not be blank"). Measured: moving PODENV_IMAGE's ARG
+# in between the two FROM lines broke the build with exactly that error.
 ARG NIX_SEED_IMAGE=opc/nix-seed:local
+# podenv image alias, for the podman CLIENT below (see the Dockerfile's OPC
+# overlay section). Same BuildKit constraint as the nix seed: COPY --from
+# cannot expand variables, so the global ARG is materialized as a stage. And
+# the same clean-machine hazard applies — `depends_on` orders STARTUP, not
+# builds, so scripts/setup.sh builds this image before paperclip or the FROM
+# here resolves to a registry pull and dies with "pull access denied", an
+# authorization error that looks nothing like an ordering problem.
+ARG PODENV_IMAGE=opc/podenv:local
+
 # Shared seed (nix + 12 tools) built once in patches/nix-seed (compose service
 # `nix-seed`); a tool-list change rebuilds only that image. Seed image alias:
 # COPY --from cannot expand variables (BuildKit), so the global
@@ -22,6 +38,8 @@ ARG NIX_SEED_IMAGE=opc/nix-seed:local
 # materialized as a stage and copied from by name. The COPY --from=nix-seed
 # in the runtime stage below consumes it.
 FROM ${NIX_SEED_IMAGE} AS nix-seed
+FROM ${PODENV_IMAGE} AS podenv
+
 FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -141,6 +159,54 @@ COPY opc/opc-devenv-seed.sh /usr/local/bin/opc-devenv-seed.sh
 COPY opc/opc-prototype-restore.sh /usr/local/bin/opc-prototype-restore.sh
 # devenv CLI + providers + control schema (see the devenv spec).
 COPY opc/devenv/ /usr/local/lib/devenv/
+# podenv CLI + its control schema (the nested container lease lane).
+COPY opc/podenv/ /usr/local/lib/podenv/
+COPY opc/opc-podenv-seed.sh /usr/local/bin/opc-podenv-seed.sh
+# The podman CLIENT, taken from the podenv image rather than from apt. Debian
+# trixie ships podman-remote 5.4.2 while the runtime host is 5.8.4, and a
+# version-skewed client against a nested runtime is precisely the kind of
+# failure that is expensive to diagnose. Copying the binary makes client and
+# server the same build by construction.
+#
+# NOT a plain `COPY --from=podenv /usr/bin/podman /usr/local/bin/podman`
+# (measured to fail): quay.io/podman/stable is Fedora, and its podman binary
+# is dynamically linked against Fedora's libc/libselinux/libsemanage/libpam/
+# libgpgme/etc — none of which exist (or exist with a compatible ABI) on this
+# image's Debian trixie base. Running the bare copy dies at the loader with
+# "libsubid.so.5: cannot open shared object file". Mixing Fedora .so files
+# into Debian's own /lib is worse: same-named libs (libc.so.6 itself) from a
+# different distro can silently shadow the ones every other tool on this
+# image relies on.
+#
+# So the ENTIRE dependency closure (ldd's flattened output, including glibc
+# and the dynamic linker itself) is vendored into its own private directory,
+# and invoked via that vendored linker with an explicit --library-path — a
+# private, self-consistent Fedora runtime for this one binary, touching
+# nothing Debian owns. `cp -L` (not COPY) is required because these are all
+# symlinks in the source image (e.g. libc.so.6 -> libc-2.4x.so); COPY would
+# have carried the symlinks over without their targets.
+RUN --mount=type=bind,from=podenv,source=/usr/bin/podman,target=/mnt/podenv-podman \
+    --mount=type=bind,from=podenv,source=/lib64,target=/mnt/podenv-lib64 \
+    mkdir -p /usr/local/lib/podenv-podman \
+    && cp -L /mnt/podenv-podman /usr/local/lib/podenv-podman/podman \
+    && for _lib in libresolv.so.2 libsubid.so.5 libgpgme.so.45 libsqlite3.so.0 \
+                   libseccomp.so.2 libgcc_s.so.1 libc.so.6 libaudit.so.1 \
+                   libselinux.so.1 libsemanage.so.2 libeconf.so.0 libcrypt.so.2 \
+                   libacl.so.1 libattr.so.1 libpam.so.0 libpam_misc.so.0 \
+                   libassuan.so.0 libgpg-error.so.0 libm.so.6 libcap-ng.so.0 \
+                   libpcre2-8.so.0 libsepol.so.2 libbz2.so.1 ld-linux-x86-64.so.2; do \
+         cp -L "/mnt/podenv-lib64/$_lib" "/usr/local/lib/podenv-podman/$_lib"; \
+       done \
+    && chmod +x /usr/local/lib/podenv-podman/podman /usr/local/lib/podenv-podman/ld-linux-x86-64.so.2 \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        '# Wrapper, not a raw binary: the vendored podman needs its own private' \
+        '# linker + library set (see the COPY-vs-cp -L comment above this file).' \
+        'exec /usr/local/lib/podenv-podman/ld-linux-x86-64.so.2 \' \
+        '    --library-path /usr/local/lib/podenv-podman \' \
+        '    /usr/local/lib/podenv-podman/podman "$@"' \
+        > /usr/local/bin/podman \
+    && chmod +x /usr/local/bin/podman
 # `prototype` CLI: the paperclip-aware workflow layer (project + git + lease).
 # Kept out of devenv on purpose — devenv must stay a generic resource lease
 # with no knowledge of Paperclip. See the header of opc/prototype/prototype.
@@ -157,11 +223,14 @@ COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh /usr/local/bin/opc-claude-seed.sh \
-             /usr/local/bin/opc-devenv-seed.sh /usr/local/bin/opc-prototype-restore.sh \
+             /usr/local/bin/opc-devenv-seed.sh /usr/local/bin/opc-podenv-seed.sh \
+             /usr/local/bin/opc-prototype-restore.sh \
              /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh \
     && chmod +x /usr/local/lib/devenv/devenv /usr/local/lib/devenv/providers/*.sh \
+    && chmod +x /usr/local/lib/podenv/podenv \
     && chmod +x /usr/local/lib/prototype/prototype \
     && ln -sf /usr/local/lib/devenv/devenv /usr/local/bin/devenv \
+    && ln -sf /usr/local/lib/podenv/podenv /usr/local/bin/podenv \
     && ln -sf /usr/local/lib/prototype/prototype /usr/local/bin/prototype
 
 # Shared seed (nix + 12 tools) from the nix-seed stage (see stage alias
@@ -209,6 +278,20 @@ RUN printf '%s\n' \
 ENV MISE_DATA_DIR=/opt/mise \
     MISE_CACHE_DIR=/opt/mise/cache \
     MISE_CONFIG_DIR=/opt/mise/config
+
+# Set in the image ENV, not only exported by the entrypoint: `docker exec`
+# interactive sessions do not inherit entrypoint-time exports (AGENTS.md
+# records this for GH_CONFIG_DIR / GIT_SSH_COMMAND / GIT_CONFIG_GLOBAL), and
+# an agent debugging by hand needs the wide `podman` interface to just work.
+#
+# Measured: with CONTAINER_HOST set, a BARE `podman` (argv[0] not
+# podman-remote, no --remote flag) reaches the remote service — `podman version`
+# reported the runtime host's 5.8.4. So the skill's examples can say `podman
+# run`, not `podman --remote run`. Installing it a second time as
+# `podman-remote` would NOT be useful insurance: with the env stripped, that
+# name defaults to the local rootless socket path, not ours.
+ENV CONTAINER_HOST=unix:///run/podenv/podman.sock \
+    PODENV_LIB=/usr/local/lib/podenv
 
 ENTRYPOINT ["/usr/local/bin/nix-entrypoint.sh", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
