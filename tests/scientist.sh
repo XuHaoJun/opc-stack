@@ -320,6 +320,41 @@ checkout "Scientist keeps one continuous session" '"sessionKeyStrategy":"agent"'
 checkout "Scientist is allowed to reach the gateway over compose-internal http" \
     '"dangerouslyAllowInsecureRemoteHttp":true' pc_scientist
 
+# The run timeout must be RAISED above the adapter's own default, not merely
+# present. Asserted as a property rather than as a literal on purpose: the
+# number already lives in two places (docker-compose.yml's default and
+# opc-paperclip-bootstrap.sh's), and a third copy here is the drift this repo
+# keeps getting bitten by — a gate pinned to 1800 goes red on a deliberate
+# retune instead of on a regression.
+#
+# Both regression shapes are caught: the key going missing (the adapter then
+# falls back to DEFAULT_TIMEOUT_SEC=600, and an absent key reads as 0 here),
+# and somebody lowering it on the board (bootstrap asserts this key, so a
+# board edit only survives until the next boot — this catches the window).
+# 600 is the literal being compared against, and it is upstream's constant,
+# not our choice: gateway/shared/constants.ts DEFAULT_TIMEOUT_SEC. If a hermes
+# upgrade changes that default, this row is where it surfaces.
+scientist_timeout_raised() {
+    pc_scientist | python3 -c '
+import json, sys
+try:
+    cfg = json.load(sys.stdin).get("adapterConfig") or {}
+except Exception:
+    sys.exit(1)
+raw = cfg.get("timeoutSec")
+# 0 means "no timeout at all" to the adapter (execute.ts:920 `if (timeoutMs
+# <= 0) return`), which is deliberately allowed by the bootstrap. Treat it as
+# raised — it is unbounded, not short.
+try:
+    v = float(raw)
+except (TypeError, ValueError):
+    sys.exit(1)
+sys.exit(0 if v == 0 or v > 600 else 1)
+'
+}
+check "Scientist run timeout is raised above the adapter's 600s default" \
+    scientist_timeout_raised
+
 echo "── routing skill ──"
 check "lane table lists research in both skill copies" \
     sh -c 'grep -q "research" patches/buzz/skills/paperclip-api/SKILL.md && grep -q "research" patches/hermes/skills/paperclip-api/SKILL.md'

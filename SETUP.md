@@ -469,3 +469,47 @@ network namespace, `localhost` 在它裡面指向自己。見上面 Quickstart �
 (既有的 relay/agent 身分不動, 所以 community 與成員關係不受影響)、`buzz-bootstrap` 每次
 都對同一批 pubkey 重新 `add-member` (已是成員時後端本身冪等)、`tencentdb-bootstrap` 先
 get 再 create、`paperclip-bootstrap` 是 reconcile 而非 create-only。
+
+## 既有安裝: 科學家的 run timeout (600s → 1800s)
+
+乾淨機器不需要這段 (`paperclip-bootstrap` 會直接寫對的值)。這台已經在跑的 stack 要一次
+性套用, 因為 one-shot 在容器已存在且 exit 0 時不會重跑。
+
+改的是 Scientist 的 `adapterConfig.timeoutSec`。hermes_gateway adapter 的預設是 **600s**
+(`gateway/shared/constants.ts` 的 `DEFAULT_TIMEOUT_SEC`), 對這條 lane 太短: 第一張真正
+派給科學家的研究票 (OPC-11, pgvector HNSW benchmark) 在 **601.7 秒**被砍 —— 砍在
+`tool.started` 中間, log 裡唯一的痕跡是 `[hermes-gateway] stop requested for run …`。它
+靠 `sessionKeyStrategy: "agent"` 在下一次喚醒接回去做完了, 但那筆 `timed_out` run 是真
+成本 (整份 context 重讀一次, 而 issue 會停在 in_progress 直到有人再叫醒它)。
+
+這是**牆鐘**上限, 不是 idle timeout —— 被砍的時候它正在連續工作。
+
+```bash
+scripts/prepare.sh && docker compose build paperclip
+docker compose up --force-recreate --no-deps paperclip-bootstrap
+```
+
+預期輸出 `agent Scientist: adapterConfig reconciled`; 再跑一次會變成 `(config current)`
+—— 那就是冪等性的證明 (它每次 PATCH 都會鑄一把新的 managed secret, 所以「第二次要安靜」
+不是美觀問題)。**不需要重啟 paperclip**: `getAgent` 每次 run 都直接讀 DB, 沒有 cache。
+
+驗證 (下一次科學家 run 的 log 開頭):
+
+```bash
+docker compose exec -T paperclip sh -c \
+  'curl -fsS -H "Authorization: Bearer $(cat /paperclip/.opc/board-api.key)" \
+   http://127.0.0.1:3100/api/companies/$(curl -fsS -H "Authorization: Bearer $(cat /paperclip/.opc/board-api.key)" \
+   http://127.0.0.1:3100/api/companies | jq -r ".[0].id")/agents' \
+  | jq -r '.[] | select(.name=="Scientist") | .adapterConfig.timeoutSec'
+# → 1800
+```
+
+要換值就在 `.env` 設 `HERMES_SCIENTIST_TIMEOUT_SEC` (compose 會轉發給 bootstrap; 非整數
+會 fail 到預設並印 WARNING, `0` 是「完全不設上限」會印 NOTE), 然後重跑上面那條
+`up --force-recreate paperclip-bootstrap`。**不要在 board 上改** —— `timeoutSec` 是
+bootstrap 主張的 key, 下次開機會被蓋回去。
+
+`tests/scientist.sh` 有一條 `Scientist run timeout is raised above the adapter's 600s
+default` 守著它。它刻意**不比對 1800** (那個數字已經在 compose 與 bootstrap 兩處, 第三
+份就是漂移風險), 只主張「有設且 > 600」—— 所以刻意調成別的值不會讓 gate 紅, 但 key 掉了
+或被降回預設會。

@@ -763,6 +763,13 @@ services:
       # Same value the hermes entrypoint seeds into the profile's own .env —
       # this is the credential paperclip presents on /p/agt-scientist.
       HERMES_SCIENTIST_API_KEY: ${HERMES_SCIENTIST_API_KEY:?set in .env}
+      # Wall-clock cap on one Scientist run. Passed explicitly (rather than
+      # left to the script's own default) because a knob documented in
+      # SETUP.md that compose does not forward is a knob that silently does
+      # nothing — the operator sets it in .env, sees no WARNING, and the value
+      # never leaves the host. The reason for 1800 over the adapter's 600 is
+      # in opc-paperclip-bootstrap.sh next to the assignment.
+      HERMES_SCIENTIST_TIMEOUT_SEC: ${HERMES_SCIENTIST_TIMEOUT_SEC:-1800}
     volumes:
       - opc-keys:/keys
       # Write-side of the board-key mirror the `prototype` CLI reads when a

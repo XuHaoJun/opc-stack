@@ -360,6 +360,53 @@ reconcile_agent "$PROTOTYPER_NAME" claude_local proto_desired_config || true
 SCIENTIST_BASE="${HERMES_SCIENTIST_BASE_URL:-http://hermes:8642/p/agt-scientist}"
 SCIENTIST_KEY="${HERMES_SCIENTIST_API_KEY:-}"
 
+# Wall-clock cap on one Scientist run. The adapter's own default is 600s
+# (gateway/shared/constants.ts DEFAULT_TIMEOUT_SEC), and 600s is too short for
+# this lane: the first real research task filed against the Scientist
+# (pgvector HNSW benchmark, OPC-11) was killed at 601.7s — mid `tool.started`,
+# with `[hermes-gateway] stop requested for run …` as the only trace — after
+# it had already loaded the dataset and taken its first measurements. It
+# resumed on the next wake and finished, but only because sessionKeyStrategy
+# is "agent"; the timed-out run is still a real cost (a `timed_out` row, a
+# re-read of the whole context, and an issue that sits in in_progress until
+# something wakes it again).
+#
+# This is a WALL-CLOCK cap, not an idle timeout — the agent was working
+# continuously when it was cut. A single measurement sweep in this lane is
+# minutes on its own (the 100k-row HNSW build alone was 87s), so 600s buys
+# nothing but interrupted work.
+#
+# There is no outer cap to coordinate with: paperclip has no run-duration
+# watchdog of its own (the only timeout that fired here came from the adapter,
+# via `POST /v1/runs/<id>/stop`), so this is the single knob.
+#
+# Asserted rather than left to the board on purpose: the reconcile below
+# overwrites the keys it names, so a value edited in the dashboard would be
+# silently reverted on the next boot. Keeping it here means the number has a
+# stated reason. Raising it further trades against a genuinely stuck run
+# holding its slot for that much longer — 1800s is 3x the observed task, not
+# an upper bound on patience.
+SCIENTIST_TIMEOUT_SEC="${HERMES_SCIENTIST_TIMEOUT_SEC:-1800}"
+
+# Validated before it reaches jq, because the failure would not look like a
+# bad number: it is passed with --argjson (the adapter reads timeoutSec as a
+# number, and a quoted "1800" is not one), so a non-numeric value makes jq
+# exit non-zero with EMPTY stdout — sci_desired_config then emits no desired
+# config at all, and the reconcile is comparing against nothing rather than
+# reporting a typo. Fall back to the default instead, loudly.
+case "$SCIENTIST_TIMEOUT_SEC" in
+    '' | *[!0-9]* )
+        echo "[pc-bootstrap] WARNING HERMES_SCIENTIST_TIMEOUT_SEC='$SCIENTIST_TIMEOUT_SEC' is not a positive integer — using 1800" >&2
+        SCIENTIST_TIMEOUT_SEC=1800
+        ;;
+    0 )
+        # 0 means "no timeout" to the adapter (timeoutSec > 0 ? ... : 0 in
+        # gateway/server/execute.ts). Allowed, but say so — an unbounded run
+        # has no way to end itself.
+        echo "[pc-bootstrap] NOTE HERMES_SCIENTIST_TIMEOUT_SEC=0 — Scientist runs will have no wall-clock timeout" >&2
+        ;;
+esac
+
 # apiKey is a schema SECRET field for hermes_gateway (its config-schema marks
 # `meta.secret`, and secrets.ts FALLBACK_ADAPTER_SCHEMA_SECRET_FIELDS lists it
 # even when the schema is unavailable). A plain string sent for such a field is
@@ -436,6 +483,7 @@ sci_desired_config() { # live adapterConfig on stdin → desired on stdout
     # `$ids | index(.apiKey.secretId)` fails with "Cannot index array with
     # string ("apiKey")" because `.` is already the id array by then.
     jq -c --arg base "$SCIENTIST_BASE" --arg key "$SCIENTIST_KEY" --arg fp "$SCIENTIST_KEY_FP" \
+          --argjson timeout "$SCIENTIST_TIMEOUT_SEC" \
           --argjson ids "$SCIENTIST_SECRET_IDS" '
           (.apiKey.secretId // null) as $sid
         | (((.apiKeyFingerprint // "") == $fp)
@@ -445,6 +493,7 @@ sci_desired_config() { # live adapterConfig on stdin → desired on stdout
           ) as $key_current
         | .apiBaseUrl = $base
         | .sessionKeyStrategy = "agent"
+        | .timeoutSec = $timeout
         | .dangerouslyAllowInsecureRemoteHttp = true
         | .apiKeyFingerprint = $fp
         | if $key_current then . else .apiKey = $key end
