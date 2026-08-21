@@ -19,11 +19,33 @@ check() {
     if "$@" >/dev/null 2>&1; then pass "$label"; else fail "$label"; fi
 }
 # expect <label> <expected> <cmd...> — pass when stdout trims to <expected>.
+# NOTE: this only compares stdout, not the command's exit status — empty
+# stdout (e.g. because the command itself failed to run) reads the same as a
+# legitimately empty result. Fine for checks whose failure mode changes what
+# they PRINT (podenv_field below turns a missing service into a sentinel that
+# cannot match any expected value); use expect_ok instead when the command
+# can fail silently with empty stdout (docker compose exec against a stopped
+# container prints its error to stderr and exits non-zero with empty stdout).
 expect() {
     local label="$1" want="$2"; shift 2
     local got
     got="$("$@" 2>/dev/null | tr -d '\r' | tail -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     if [ "$got" = "$want" ]; then pass "$label"; else fail "$label (want '$want', got '$got')"; fi
+}
+# expect_ok <label> <expected> <cmd...> — like expect(), but ALSO requires the
+# command itself to have exited 0. Without this, "could not run the check"
+# (e.g. `docker compose exec` against a stopped container) is indistinguishable
+# from "ran fine and printed nothing" — both give empty stdout.
+expect_ok() {
+    local label="$1" want="$2"; shift 2
+    local got rc
+    got="$("$@" 2>/dev/null)"; rc=$?
+    got="$(printf '%s' "$got" | tr -d '\r' | tail -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ "$rc" -eq 0 ] && [ "$got" = "$want" ]; then
+        pass "$label"
+    else
+        fail "$label (want '$want', got '$got', exit $rc)"
+    fi
 }
 
 echo "── structure ──"
@@ -33,7 +55,17 @@ echo "── structure ──"
 # override file or an env default could add a fourth without touching
 # docker-compose.yml.
 CONF_JSON="$(docker compose config --format json 2>/dev/null)"
-podenv_field() { printf '%s' "$CONF_JSON" | python3 -c "$1"; }
+# On a KeyError (most commonly: the `podenv` service does not exist in the
+# resolved config at all) this must NOT fall through to empty stdout — empty
+# is also the correct, PASSING value for several of the checks below (no bind
+# mount, no secret volume). Emit a sentinel that cannot match any expected
+# value instead, so "the service is missing" fails loudly rather than reading
+# as "the service exists and rightfully has nothing to report."
+podenv_field() {
+    local out rc
+    out="$(printf '%s' "$CONF_JSON" | python3 -c "$1" 2>/dev/null)"; rc=$?
+    if [ "$rc" -ne 0 ]; then printf 'PODENV_SERVICE_MISSING\n'; else printf '%s\n' "$out"; fi
+}
 
 expect "security_opt is exactly [seccomp=unconfined]" "seccomp=unconfined" \
     podenv_field 'import json,sys; print(",".join(json.load(sys.stdin)["services"]["podenv"].get("security_opt",[])))'
@@ -69,12 +101,19 @@ echo "── live ──"
 
 check "podenv container is running" \
     sh -c 'docker compose ps --format "{{.Service}} {{.State}}" | grep -q "^podenv running$"'
-check "socket exists" docker compose exec -T podenv test -S /run/podenv/podman.sock
+# `test -S` only proves the socket FILE exists — measured: a stale socket left
+# over from a previous run (still present on the persistent volume) also
+# passes `test -S` with nobody listening. Prove the API actually answers,
+# as the uid that will use it (there is no curl in this image; podman itself
+# is the client).
+check "podman API answers on the socket" \
+    docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman --remote --url unix:///run/podenv/podman.sock version
 expect "socket owner uid == paperclip node uid" \
     "$(docker compose exec -T paperclip id -u node 2>/dev/null | tr -d '\r')" \
     docker compose exec -T podenv stat -c %u /run/podenv/podman.sock
-expect "self-test left no diagnosis" "" \
-    docker compose exec -T podenv sh -c 'cat /run/podenv/diagnosis 2>/dev/null'
+expect_ok "self-test left no diagnosis" "" \
+    docker compose exec -T podenv cat /run/podenv/diagnosis
 expect "nested podman run works" "NESTED_OK" \
     docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
     podman run --rm docker.io/library/alpine:3.20 echo NESTED_OK
@@ -90,6 +129,27 @@ expect "userns stays host (file ownership on /prototypes)" "1000" \
     sh -c 'podman run --rm -v /prototypes:/p docker.io/library/alpine:3.20 \
              sh -c "touch /p/.podenv-probe" >/dev/null 2>&1
            stat -c %u /prototypes/.podenv-probe; rm -f /prototypes/.podenv-probe'
+# podman is PID 1 inside the container and never wait()s on reparented
+# children — every nested `podman run` leaves a (pasta.avx2) and a (conmon)
+# zombie behind (measured: 5 nested runs -> 10 zombies, ppid 1). init: true
+# (docker-init as the real PID 1) is what reaps them. No `ps` in this image,
+# so read /proc/*/stat directly — field 3 is the state char, `Z` = zombie.
+check "no zombie processes after nested container runs" \
+    sh -c '
+        for i in 1 2; do
+            docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+                podman run --rm docker.io/library/alpine:3.20 true >/dev/null 2>&1
+        done
+        z="$(docker compose exec -T podenv sh -c "
+            z=0
+            for f in /proc/[0-9]*/stat; do
+                set -- \$(cat \"\$f\" 2>/dev/null)
+                if [ \"\$3\" = \"Z\" ]; then z=\$((z + 1)); fi
+            done
+            echo \"\$z\"
+        " 2>/dev/null | tr -d "\r")"
+        [ "${z:-1}" -eq 0 ]
+    '
 # mem_limit is the ONLY memory knob that works (spec measurement 4). Read
 # podenv's OWN cgroup file — the nested one is always `max`, so asserting
 # there would make this check green in the wrong place.

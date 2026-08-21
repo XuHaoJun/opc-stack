@@ -74,7 +74,7 @@
 
 **Interfaces:**
 - Consumes: 無 (第一個 task)
-- Produces: compose service `podenv`; volume `opc-podenv-sock` 上的 unix socket `/run/podenv/podman.sock` (owner uid 1000, mode 0600); volume `opc-podenv-store`; 診斷檔 `/run/podenv/diagnosis` (可能為空); image `${IMAGE_PREFIX:-opc}/podenv:local`
+- Produces: compose service `podenv`; volume `opc-podenv-sock` 上的 unix socket `/run/podenv/podman.sock` (owner uid 1000, mode 0600); volume `opc-podenv-store`; 掛在 `podenv` 上的 `opc-prototypes` mount (`/prototypes`, 讓 lease 可以 bind-mount 自己所屬的 project); 診斷檔 `/run/podenv/diagnosis` (可能為空); image `${IMAGE_PREFIX:-opc}/podenv:local`
 
 - [ ] **Step 1: 寫失敗的測試**
 
@@ -394,6 +394,13 @@ ENTRYPOINT ["/usr/local/bin/opc-podenv-entrypoint.sh"]
       context: ./patches/podenv
       dockerfile: Dockerfile
     image: ${IMAGE_PREFIX:-opc}/podenv:local
+    # podman itself is PID 1 and never wait()s on reparented children — every
+    # nested `podman run`/`podman build` leaves a (pasta.avx2) and a (conmon)
+    # zombie behind (measured: 5 nested runs -> 10 zombies, ppid 1). init:
+    # true swaps in docker-init as PID 1, which reaps them and still forwards
+    # signals through to podman on `compose stop`. Same precedent as
+    # buzz/frontdoor/paperclip above.
+    init: true
     restart: unless-stopped
     security_opt:
       - seccomp=unconfined
@@ -413,8 +420,9 @@ ENTRYPOINT ["/usr/local/bin/opc-podenv-entrypoint.sh"]
     # lease at podenv:<port> over docker DNS.
     #
     # BASE and RANGE_END are stated twice (here and in the CLI's pool) because
-    # compose cannot do arithmetic; opc-podenv-seed.sh warns when they drift,
-    # and tests/podenv.sh fails on it.
+    # compose cannot do arithmetic; opc-podenv-seed.sh will warn when they
+    # drift once the paperclip-side seed lands in Task 2, and tests/podenv.sh
+    # fails on it in the meantime.
     ports:
       - "127.0.0.1:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}"
     volumes:
@@ -424,7 +432,11 @@ ENTRYPOINT ["/usr/local/bin/opc-podenv-entrypoint.sh"]
       # the agent already reads this whole tree from paperclip.
       - opc-prototypes:/prototypes
     healthcheck:
-      test: ["CMD-SHELL", "test -S /run/podenv/podman.sock"]
+      # `test -S` only proves the socket FILE exists, not that anything is
+      # listening — measured: a stale socket from a previous run (or one
+      # created by anything else) still passes `test -S` with nobody home.
+      # Prove the API actually answers instead, as the uid that will use it.
+      test: ["CMD-SHELL", "setpriv --reuid 1000 --regid 1000 --clear-groups --inh-caps=-all env HOME=/home/podman XDG_RUNTIME_DIR=/run/user/1000 podman --remote --url unix:///run/podenv/podman.sock version >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 30
