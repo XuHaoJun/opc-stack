@@ -132,6 +132,14 @@ services:
   # scripts/hooks/claude-cred.sh). Unlike the gh instance this one is
   # non-fatal: no Claude login just means claude_local is unavailable, and
   # omp (the primary engine) is unaffected.
+  #
+  # The source path is a variable (CLAUDE_CREDENTIALS_FILE) purely so a SECOND
+  # stack on this host can be pointed away from it. The OAuth refresh token in
+  # that file is single-use — whichever container refreshes it invalidates
+  # every other copy, host included — so two stacks holding it is two chances
+  # to log the human out. scripts/test-fresh-install.sh therefore binds an
+  # empty throwaway file: the hook treats empty as "no Claude login", WARNs,
+  # and exits 0.
   host-sync-claude:
     image: alpine:3.20
     restart: "no"
@@ -140,7 +148,7 @@ services:
       HOST_SYNC_SOURCES: "claude-cred"
     volumes:
       - opc-prototyper-home:/dst
-      - ${HOME}/.claude/.credentials.json:/src/claude-cred:ro
+      - ${CLAUDE_CREDENTIALS_FILE:-${HOME}/.claude/.credentials.json}:/src/claude-cred:ro
       - ./scripts/host-sync-worker.sh:/worker.sh:ro
       - ./scripts/hooks/claude-cred.sh:/hooks/claude-cred.sh:ro
 

@@ -8,12 +8,12 @@
 # Every row below must name a producer that runs unattended on `up`.
 #
 # WHAT THIS IS NOT. This suite is a STATIC audit of `patches/` and
-# `docker-compose.yml`. The destructive rehearsal that would actually prove
-# the open-box claim — `docker compose down -v` followed by
-# `scripts/setup.sh` on an empty machine — was deliberately skipped (it would
-# destroy the live community, board, memories, prototypes and leases), so a
-# green run here is EVIDENCE, NOT PROOF. Specifically, a green run cannot
-# catch:
+# `docker-compose.yml`. The rehearsal that actually proves the open-box claim
+# is `scripts/test-fresh-install.sh` — it clones this repo into its own
+# compose project, ports and relay and runs `scripts/setup.sh` for real,
+# BESIDE the live stack (doing it in place would destroy the live community,
+# board, memories, prototypes and leases). Until that has been run, a green
+# run here is EVIDENCE, NOT PROOF. Specifically, a green run cannot catch:
 #   - a producer that exists in the file but is never invoked at runtime
 #     (a role gate that never takes the seeding branch, a function defined and
 #     never called, a compose service nothing depends on);

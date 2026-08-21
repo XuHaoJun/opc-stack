@@ -73,7 +73,12 @@ Lean Mode (拿掉 Paperclip、Hermes Kanban 轉正) 是 PRD 允許的另一種�
 **最容易騙過自己的地方**: compose 的 one-shot 在**容器已存在且 exit 0 時不會重跑**。
 所以開發時「我 `docker compose up --force-recreate <bootstrap>` 過, 它會動」對**乾淨
 安裝完全沒有證明力** —— 那台機器上根本沒有那個容器, 走的是另一條路徑。真正算數的驗證
-只有 `docker compose down -v` + `scripts/setup.sh` 之後兩條 gate 直接綠。
+只有真的從空狀態走一次 `setup.sh` 之後三條 gate 直接綠 —— 但**不要在這台上
+`docker compose down -v`** (會毀掉 community/board/memory/prototype/租約)。
+跑 `scripts/test-fresh-install.sh`: 它把 repo clone 出去、換 compose project /
+image prefix / 全部 port (+1000) / 自己的 Buzz relay, 在活著的 stack **旁邊**
+做完整排練, 再從 clone 裡跑 audit-bootstrap + test-connectivity + test-scientist。
+`scripts/audit-bootstrap.sh` 只是靜態稽核, 不是這件事的證明。
 
 ## 常用指令
 
@@ -82,6 +87,7 @@ scripts/setup.sh              # 新機器一鍵: .env → submodule init → pre
 scripts/prepare.sh            # patches/ → upstream/ 同步 (改 patch 後、build 前必跑)
 scripts/upgrade.sh <proj> <tag>  # 升版: checkout 新 tag → prepare → rebuild → redeploy
 scripts/test-connectivity.sh  # 連通性測試 (不碰 LLM)
+scripts/test-fresh-install.sh # 開箱排練: clone 到別的 compose project 走一次 setup.sh (慢, 偶爾跑)
 docker compose up -d --build  # 啟動/重建 (改過 patches/ 後); host config (gh creds) 由 host-sync one-shot 自動同步
 docker compose logs -f <svc>
 docker compose down           # 停 (volume 保留); down -v 全清

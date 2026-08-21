@@ -339,13 +339,75 @@ docker compose exec frontdoor hermes --version
 - Buzz has no web chat UI; conversation happens in the Buzz desktop/mobile
   clients against this relay.
 
+## Fresh-install rehearsal (`scripts/test-fresh-install.sh`)
+
+The acceptance condition for this repo is the open-box one: a clean machine
+does `git clone` → `scripts/setup.sh` and gets a fully working stack, with no
+migration script and no manual step. `scripts/audit-bootstrap.sh` checks that
+claim **statically** — it greps `patches/` and `docker-compose.yml` and
+confirms every piece of state names an automatic, idempotent producer. That is
+evidence, not proof: it cannot see a producer that is never invoked, one that
+exits 0 having done nothing, or one that writes the wrong value.
+
+`scripts/test-fresh-install.sh` is the proof. It is the **only** thing in this
+repo that actually performs the open-box install, and it does it *beside* the
+live stack rather than on top of it — `docker compose down -v` here would
+destroy the real community, board, memories, prototypes and leases.
+
+```bash
+scripts/test-fresh-install.sh             # rehearse, then tear down
+scripts/test-fresh-install.sh --keep      # leave it up to poke at
+scripts/test-fresh-install.sh --dry-run   # guards + clone + .env, no build
+scripts/test-fresh-install.sh --clean     # remove a leftover rehearsal
+```
+
+What it does: clones this repo at `HEAD` into `/tmp/opc-fresh-install`
+(`--root` to move it), gives the clone its own compose project
+(`opc-rehearsal`), its own image prefix, every published port offset by
+`+1000` and its own Buzz relay, runs `scripts/setup.sh`, then runs
+`audit-bootstrap.sh`, `test-connectivity.sh` and `test-scientist.sh` **from
+the clone**. On failure it leaves the stack up for diagnosis and tells you how
+to remove it; a re-run dismantles the previous one first, so it is safe to run
+twice.
+
+Cost: expect roughly 20–40 minutes on the first run (all images built, an
+empty nix store seeded, four empty mise volumes populated — the layer cache is
+shared with the live stack, the volumes are not), about 10 GB of docker
+volumes and ~2 GB of scratch clone. Note `/tmp` is tmpfs on many systems, so
+that 2 GB is RAM; pass `--root` a disk path if that is tight.
+
+Two things it deliberately does not do:
+
+- **Submodules are fetched from the local `upstream/<proj>` checkouts, not
+  from GitHub.** Several GB per rehearsal would make it a test nobody runs,
+  and the subject is our scripts and compose reaching a working state from
+  empty, not GitHub's availability. The pinned SHAs are still what gets
+  checked out. The trade: it will **not** catch a submodule tag that has
+  disappeared upstream (deleted repo, retagged release, force-pushed history)
+  — that failure only shows up in a genuine clone from GitHub.
+- **The host's Claude credential is not shared.** The OAuth refresh token in
+  `~/.claude/.credentials.json` is single-use, so a second stack refreshing it
+  would invalidate the host's login; the rehearsal binds an empty throwaway
+  file via `CLAUDE_CREDENTIALS_FILE` instead. `~/.ssh`, `~/.config/gh` and
+  `~/.gitconfig` stay shared read-only — no single-use tokens there.
+  `claude_local` is wired to nothing today (AGENTS.md), so this costs no
+  coverage.
+
+Invariant 1 is the reason the relay port must differ: one canonical Buzz host
+= one community, enforced by NIP-42/98 signature verification. If the
+rehearsal's `BUZZ_RELAY_URL` equalled the live one its agents would join and
+sign into the *real* community. The harness refuses to start in that case
+rather than warning.
+
 ## 既有安裝: 啟用科學家 lane
 
 乾淨機器**應該不需要這段** —— 設計上 `scripts/setup.sh` 一次到位, 而這件事目前是
 **靜態稽核過的, 不是排練過的**: `scripts/audit-bootstrap.sh` 逐條確認每一份科學家狀態
 都有 compose one-shot 或 entrypoint 當非互動、冪等的產生者, 且沒有東西跟它搶 —— 但它
-是對原始碼 grep, 不是真的跑一次。真正的證明 (`docker compose down -v` + `scripts/setup.sh`)
-會毀掉現在這台的 community/board/memory/prototype/租約, 已明確跳過。所以: 稽核綠燈
+是對原始碼 grep, 不是真的跑一次。真正的證明在**這台之外**跑:
+`scripts/test-fresh-install.sh` (上一節) 把 repo clone 到另一個 compose project 再走一次
+`setup.sh`, 因為就地 `docker compose down -v` 會毀掉現在這台的
+community/board/memory/prototype/租約。所以: 稽核綠燈
 **抓不到**「產生者存在但根本沒被呼叫」「跑了、exit 0、什麼都沒做」「產生的值是錯的」
 「`patches/` 沒 `prepare.sh` 進 `upstream/`」以及「沒人寫成一條 row 的順序邊」。
 這段是給目前那台**已經在跑**
