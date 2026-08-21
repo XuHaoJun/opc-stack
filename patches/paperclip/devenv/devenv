@@ -19,11 +19,6 @@ set -eu
 
 DEVENV_LIB="${DEVENV_LIB:-/usr/local/lib/devenv}"
 
-# Truths devenv shares with podenv (env merge, password derivation, owner
-# attribution, the reserved .env names, the provider image families). One
-# file, two CLIs — see shared.sh's header for why.
-. "$DEVENV_LIB/shared.sh"
-
 DEVENV_PG_HOST="${DEVENV_PG_HOST:-devenv-pg}"
 DEVENV_PG_PORT="${DEVENV_PG_PORT:-5432}"
 DEVENV_PG_ADMIN_USER="${DEVENV_PG_ADMIN_USER:-postgres}"
@@ -47,6 +42,15 @@ DEVENV_HTTP_PORT_COUNT="${DEVENV_HTTP_PORT_COUNT:-16}"
 
 die()   { echo "devenv: $1" >&2; exit "${2:-1}"; }
 note()  { echo "$1" >&2; }
+
+# Truths devenv shares with podenv (env merge, password derivation, owner
+# attribution, the reserved .env names, the provider image families). One
+# file, two CLIs — see shared.sh's header for why. Sourced AFTER die()/note()
+# are defined: devenv_derive_password calls die() with exit 4 (backend
+# unreachable, the documented code for "cannot proceed"), and shared.sh must
+# not be forced into a special-cased `return 1` just because it is sourced
+# before this CLI's own die() exists.
+. "$DEVENV_LIB/shared.sh"
 
 # ── backend access ───────────────────────────────────────────────────────
 
@@ -305,8 +309,18 @@ cmd_list() {
     # devenv's schema hold podenv's concepts). Guarded by to_regclass so devenv
     # keeps working unchanged when podenv is not installed — this is the ONE
     # line of coupling that buys a single place to look at what is occupied.
+    #
+    # Guard on podenv_usage (the VIEW actually queried below), not podenv_lease
+    # (the TABLE): opc-podenv-seed.sh applies bootstrap.sql with
+    # ON_ERROR_STOP=1 but no --single-transaction, so "table created, view
+    # failed" is a reachable state that persists across boots. Guarding on the
+    # table and querying the view would let that state reach a plain command
+    # inside this if's BODY — which set -eu does NOT exempt from aborting the
+    # whole command — destroying visibility into every lease, devenv's
+    # included. A visibility tool must degrade to a warning here, never to a
+    # crash.
     if [ "$(devenv_psql_control -tAc \
-            "SELECT to_regclass('podenv_lease') IS NOT NULL" 2>/dev/null \
+            "SELECT to_regclass('podenv_usage') IS NOT NULL" 2>/dev/null \
             | tr -d '[:space:]')" = "t" ]; then
         echo
         echo "podenv leases (nested containers):"
@@ -315,7 +329,14 @@ cmd_list() {
                     CASE WHEN dedicated_reason IS NULL THEN ''
                          ELSE 'dedicated: ' || dedicated_reason END AS dedicated,
                     date_trunc('second', idle) AS idle
-             FROM podenv_usage"
+             FROM podenv_usage" \
+            || note "devenv: WARNING podenv_usage query failed — podenv section skipped (see below)"
+    elif [ "$(devenv_psql_control -tAc \
+            "SELECT to_regclass('podenv_lease') IS NOT NULL" 2>/dev/null \
+            | tr -d '[:space:]')" = "t" ]; then
+        # podenv_lease exists but podenv_usage does not: exactly the partial
+        # state above. Name it instead of silently skipping the section.
+        note "devenv: WARNING podenv_lease exists but podenv_usage view is missing — podenv section skipped. Schema is partially applied; rerun opc-podenv-seed.sh (docker compose exec paperclip sh -c '. /usr/local/bin/opc-podenv-seed.sh; opc_podenv_seed_schema')."
     fi
 }
 

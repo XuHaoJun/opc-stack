@@ -52,9 +52,15 @@ FAMILIES
 
 # Derived, not stored: a re-run must hand back the credential a stale .env
 # already holds, and derivation achieves that without plaintext secrets at rest.
+#
+# Calls die() rather than returning a bare status: both CLIs source this file
+# AFTER their own die()/note() are defined (see the source lines in `devenv`
+# and `podenv`), specifically so this can use exit 4 — "backend unreachable /
+# cannot proceed" — which is the code this failure had before the function
+# moved here, and the only one the exit-code table documents for it.
 devenv_derive_password() {
-    [ -n "${DEVENV_SECRET_SALT:-}" ] || {
-        echo "DEVENV_SECRET_SALT is unset — set it in .env" >&2; return 1; }
+    [ -n "${DEVENV_SECRET_SALT:-}" ] \
+        || die "DEVENV_SECRET_SALT is unset — set it in .env" 4
     printf '%s|%s|%s' "$DEVENV_SECRET_SALT" "$1" "$2" | sha256sum | cut -c1-32
 }
 

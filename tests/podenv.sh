@@ -200,6 +200,44 @@ expect "reserved env names come from devenv, not a second copy" "DATABASE_URL" \
     docker compose exec -T -u node paperclip sh -c \
     '. /usr/local/lib/devenv/shared.sh; devenv_reserved_env_names | grep -x DATABASE_URL'
 
+echo "── podenv_usage partial-state guard ──"
+
+# Review finding F1: opc-podenv-seed.sh applies bootstrap.sql with
+# ON_ERROR_STOP=1 but no --single-transaction, so "podenv_lease created,
+# podenv_usage failed" is a reachable, persistent partial state. devenv's
+# cmd_list guards the podenv section on the object it actually queries
+# (podenv_usage), so that state must degrade to a warning, never abort the
+# whole listing and take real leases (scientist + 3 prototypes) down with it.
+# Drop ONLY the view to create that state — safe, it is derived and the seed
+# recreates it below regardless of how this check comes out.
+docker compose exec -T paperclip sh -c \
+    'PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" psql -h "$DEVENV_PG_HOST" -U "$DEVENV_PG_ADMIN_USER" \
+       -d "${DEVENV_CONTROL_DB:-devenv_control}" -c "DROP VIEW IF EXISTS podenv_usage;"' >/dev/null 2>&1
+
+_pu_out="$(docker compose exec -T -u node paperclip devenv list 2>&1)"; _pu_rc=$?
+if [ "$_pu_rc" -eq 0 ]; then
+    pass "devenv list survives podenv_usage missing (exit 0, not aborted)"
+else
+    fail "devenv list survives podenv_usage missing (exit 0, not aborted) (got exit $_pu_rc)"
+fi
+if printf '%s\n' "$_pu_out" | grep -q "podenv_usage"; then
+    pass "devenv list names podenv_usage in its warning"
+else
+    fail "devenv list names podenv_usage in its warning (output: $_pu_out)"
+fi
+if printf '%s\n' "$_pu_out" | grep -q "scientist"; then
+    pass "devenv list still shows the real leases despite the missing view"
+else
+    fail "devenv list still shows the real leases despite the missing view (output: $_pu_out)"
+fi
+
+# Restore via the actual repair path (the idempotent seed), not hand-written
+# SQL, so this test also proves that path works.
+docker compose exec -T paperclip sh -c \
+    '. /usr/local/bin/opc-podenv-seed.sh; opc_podenv_seed_schema' >/dev/null 2>&1
+check "devenv list shows the podenv section again after reseeding" \
+    sh -c 'docker compose exec -T -u node paperclip devenv list 2>&1 | grep -q "podenv leases"'
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
