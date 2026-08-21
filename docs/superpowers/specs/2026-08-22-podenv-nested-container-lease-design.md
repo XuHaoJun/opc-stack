@@ -67,8 +67,8 @@ socket, 不變量 6 卻在實質上破了, 而且會通過所有靜態稽核。*
 - **per-lease 記憶體/CPU 上限。** 做不到 (見「量測結果」§4)。整條 lane 一個上限做得到。
 - 自動回收、排程、對帳。手動 `podenv release`, 照不變量 6b。
 - image allowlist / 供應鏈檢查。
-- 發給 hermes 專家。podenv 是 **paperclip lane only** (CLI 住 paperclip image, 跟 devenv
-  一樣)。要不要給科學家是另一個決定, `SOUL.md` 完全不動。
+- 發給 hermes 專家。podenv 是 **paperclip lane only** —— 理由見下面的專節,
+  `SOUL.md` 完全不動。
 - 接 board UI。
 - 主動支援 `docker compose`。podman 的 socket 本來就說 Docker API, 未來要加不用改架構。
 
@@ -294,6 +294,37 @@ podenv provision legacy-erp --image postgres:9.6 \
 `prototype destroy` 刻意不給 `--yes`, 因為「那個旗標會讓這條規則變成一行 script 就能繞過」。
 理由被持久化並列出來, 才讓它不是橡皮章。
 
+## 為什麼不發給 hermes 專家
+
+「CLI 住 paperclip image」**不是理由** —— 它住那裡是因為我們決定放那裡, 那是循環論證。
+真正的理由三條, 第一條是硬的:
+
+1. **存取閘是單一 uid, 而 hermes 是不同的 uid。** 這是量測 §3 的直接後果: socket 保持
+   podman 自己的 0600, 閘門是 owner uid = paperclip `node` 的 **1000**; hermes 跑
+   **uid 10000** (compose 的 `HERMES_UID`)。一個 uid 閘不可能同時服務兩者。而「用 group
+   服務多個消費者」正是量測 §3 證明 podman 會對抗的那條路。所以給 hermes 存取**不是加一個
+   掛載或一個旗標, 是換掉存取機制** —— 設計變更, 不是範圍開關。
+2. **hermes 專家今天也沒有 devenv 自助。** `devenv-expert-leases` 是「跑 paperclip image,
+   因為 devenv CLI 只住在那裡」, 科學家拿到的是**開機時由 compose one-shot 發的常駐租約**,
+   它自己不能跑 `devenv provision`。所以 podenv 不給 hermes **沒有製造新的不對稱**, 只是
+   延續現狀。這一條很重要: 若哪天決定要給, 該一起改的是 devenv 與 podenv 兩者, 而不是
+   把 podenv 當特例處理。
+3. **使用場景形狀不同。** `/prototypes` 是 paperclip lane 的東西; 專家的工作住在
+   `hermes-profiles`。目前「跑一顆舊 daemon」的需求來源全部是 prototype/專案。
+
+### 若日後要給, 有兩條路 (未量測)
+
+- **常駐租約 (便宜, 不動存取機制)**: 照 `devenv-expert-leases` 一模一樣的形狀做一個
+  `podenv-expert-leases` one-shot —— 跑 paperclip image、provision 容器租約、寫進
+  `/keys/podenv-scientist.env`, 由 hermes entrypoint 的 `opc_seed_expert_profile()` merge
+  進 profile 的 `.env`。**hermes 容器不需要 socket、不需要 podman client、不碰 uid 問題。**
+  給的是「常駐租約」不是「自助」。
+- **真正的自助 (要動存取機制, 兩個候選都未量測)**: (i) TCP endpoint 配一個只有 hermes +
+  paperclip 的專用 compose 網路 —— 沒有 uid 閘, 成員資格就是閘, 代價是日後有人把服務加進
+  那個網路就無聲取得存取, 需要結構測試釘住成員清單; (ii) 第二個 `podman system service`
+  行程配第二個 socket —— **同一個 graphroot 上跑兩個 service 行程的鎖定行為未量測**,
+  不要在沒量之前假設它安全。
+
 ### (d) 文字規則放在哪一個檔
 
 有個不對稱值得寫下來。我們在意的失誤是「agent 明明 devenv 就能解決卻用了 podenv」——
@@ -309,7 +340,7 @@ podenv provision legacy-erp --image postgres:9.6 \
 「agent 根本沒載入任何 skill, 直接 `podman run postgres:16`」這件事文字治不了 —— 那正是
 (c) 的 gate 存在的理由。
 
-`SOUL.md` **完全不動** (podenv 是 paperclip lane only)。
+`SOUL.md` **完全不動** —— podenv 是 paperclip lane only, 理由見上一節。
 
 ## 登記表
 
@@ -413,7 +444,6 @@ happy path 用 `traefik/whoami` (6MB, 秒起)。真正的 `mysql:5.7` 走 `SETUP
   那份 profile 會隨 docker 版本過期, 而**這個容器什麼都沒掛**, 邊界本來就宣告在外層 docker
   容器上。若日後 podenv 要掛任何敏感東西, 這一項要重新評估。
 - **`docker compose` 支援。** socket 已經說 Docker API, 加 client 即可, 不用改架構。
-- **給 hermes 專家 podenv。** 要決定 CLI 是否進 hermes image, 以及專家的常駐租約要不要包含
-  容器。
+- **給 hermes 專家 podenv。** 兩條路與各自的未量測項見「為什麼不發給 hermes 專家」。
 - **磁碟壓力通知。** 現在只有 `podenv_usage` 的數字, 沒有任何主動告知。與 devenv 的
   「延後: 自動回收與通知」同一個立場。
