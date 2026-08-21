@@ -15,6 +15,27 @@ PROFILE="agt-scientist"
 PASS=0
 FAIL=0
 
+# `docker compose up -d` returning is NOT the same as the stack being ready,
+# and on a fresh install the gap is minutes wide: frontdoor only starts after
+# buzz-bootstrap exits, and buzz-bootstrap's first boot installs the whole mise
+# toolchain (node + rust + omp) before it adds anybody to the relay. So the
+# moment setup.sh returns, frontdoor's entrypoint is still seeding — and one
+# check below has `test -s /opt/data/.agent.nsec` as its PRECONDITION (it is
+# the chief of staff's key, written by that entrypoint). Missing precondition
+# fails the check, which reads as "the chief of staff's key leaked into the
+# dashboard" — the exact opposite of what happened. Wait for the key rather
+# than reporting a security failure that is really a clock.
+# Found by scripts/test-fresh-install.sh; invisible on a stack that has been
+# up for a while, which is every stack this gate had run against before.
+printf 'waiting for the front door to seed its identity '
+for _i in $(seq 1 60); do
+    if docker compose exec -T hermes-dashboard test -s /opt/data/.agent.nsec 2>/dev/null; then
+        printf ' ready\n'; break
+    fi
+    printf '.'; sleep 5
+done
+echo
+
 pass() { printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
 fail() { printf 'FAIL  %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
@@ -137,8 +158,37 @@ check "profile carries its own nsec (not the chief of staff's)" \
     docker compose exec -T hermes sh -c "test -s /opt/data/profiles/$PROFILE/.agent.nsec && ! cmp -s /opt/data/profiles/$PROFILE/.agent.nsec /keys/agent.nsec"
 check "agent uid can read its nsec" \
     docker compose exec -T -u 10000 hermes sh -c "test -r /opt/data/profiles/$PROFILE/.agent.nsec"
-checkout "scientist is a relay member" '"channel_id"' \
-    docker compose exec -T -u 10000 -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c 'buzz --relay "http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")" channels list --member'
+# Membership, asserted through a READ rather than through a channel.
+#
+# This relay rejects reads — `channels list` included — from a key that is not
+# a community member, or that signs against a host other than the canonical
+# one (measurement in patches/buzz/opc-register-agent.sh's header). So "the
+# scientist's own key gets a JSON array back" IS the membership assertion, and
+# it is still the check that goes red on the ws://localhost:3000 default that
+# SETUP.md warns about.
+#
+# It must NOT require a non-empty array. Channels are created by a human's
+# Buzz desktop client on first join, so a genuinely fresh install has ZERO
+# channels and every identity's list is `[]`. The old form asserted
+# `"channel_id"` and was therefore the one check in this file that no clean
+# machine could ever satisfy — it failed the first real open-box rehearsal
+# (scripts/test-fresh-install.sh) for a reason that is not a defect in the
+# stack. The channel half of the old assertion is not lost; it moved to the
+# row below, in a form that is also true when there are no channels yet.
+check "scientist is a relay member (the relay accepts its key)" \
+    docker compose exec -T -u 10000 -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c \
+    'out=$(buzz --relay "http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")" channels list --member 2>/dev/null) || exit 1
+     case "$out" in "["*) exit 0 ;; *) exit 1 ;; esac'
+# Step (3) of the frontdoor register loop: join every channel the identity can
+# see. Comparing the two lists asserts exactly that, and stays true on a fresh
+# relay where both are empty — unlike "there is at least one channel", which
+# asserts a human has opened the desktop client.
+check "scientist joined every channel it can see" \
+    docker compose exec -T -u 10000 -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c \
+    'R="http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")"
+     all=$(buzz --relay "$R" channels list 2>/dev/null | jq -r ".[].channel_id" | sort) || exit 1
+     mine=$(buzz --relay "$R" channels list --member 2>/dev/null | jq -r ".[].channel_id" | sort) || exit 1
+     [ "$all" = "$mine" ]'
 
 # Fix round 1 stopped the wrapper's old home-root fallback from handing the
 # chief of staff's key to hermes-dashboard, but nothing asserted the negative
