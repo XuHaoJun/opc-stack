@@ -212,6 +212,33 @@ cmd_provision() {
     echo "$as_var" | grep -Eq '^[A-Z][A-Z0-9_]*$' \
         || die "--as '$as_var' is not a shell variable name (A-Z, 0-9, _)" 2
 
+    # (b) Variable-name partition. devenv owns a fixed set of .env names; if
+    # podenv could write them, one lease would silently overwrite the other's
+    # connection string. The list comes from devenv/shared.sh — one home, so
+    # there is no drift class here.
+    if devenv_env_name_reserved "$as_var"; then
+        die "'$as_var' is a variable name devenv owns (DATABASE_URL, VALKEY_URL, DEV_PORT, DEV_PORT_<n>, DEV_URL, DEV_HOST, HOST). Pick another with --as, e.g. --as ${as_var}_LEGACY. A devenv lease and a podenv lease share one .env, which only works while their variable names do not collide." 2
+    fi
+
+    # (c) Route gate. devenv already serves some image families, and it should
+    # win by default: it is the shared, multi-tenant, modern lane. But an old
+    # version of the SAME family is a legitimate podenv case (devenv-pg is
+    # pg18; a project stuck on pg9.6 cannot use it), so this is not an absolute
+    # ban — it is a detour that costs something. The reason is persisted and
+    # listed, which is what keeps it from being a rubber stamp: the same
+    # reasoning that keeps `prototype destroy` from having a --yes flag.
+    _img_family="$(printf '%s' "$image" | sed 's|.*/||; s|:.*||')"
+    _img_provider="$(devenv_provider_image_families \
+        | sed -n "s|^${_img_family}=||p" | head -1)"
+    if [ -n "$_img_provider" ] && [ -z "$dedicated" ]; then
+        die "devenv already serves '$_img_family' — use it instead:
+    devenv provision $key --with $_img_provider
+devenv is the shared, multi-tenant lane and it should win whenever it can.
+If you genuinely need a dedicated or older one (devenv-pg is pg18, devenv-valkey
+is valkey 9.1), say why and it will be recorded on the lease:
+    podenv provision $key --image $image --port $cport --dedicated \"<reason>\"" 2
+    fi
+
     podenv_require_runtime
     podenv_require_control_schema
 

@@ -370,6 +370,44 @@ check "F3a gate lease and container clean up" \
      rm -f /tmp/f3-gate.env
      true'
 
+echo "── devenv coexistence ──"
+
+# (b) variable-name partition. Refusing DATABASE_URL is what makes "postgres
+# from devenv + Milvus from podenv" the only possible shape.
+expect "refuses a variable name devenv owns" "refused" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision name-clash --image docker.io/traefik/whoami --port 80 \
+             --as DATABASE_URL 2>&1); rc=$?
+     [ "$rc" = 2 ] && echo "$out" | grep -q "devenv" && echo refused || echo "rc=$rc out=$out"'
+expect "refuses the DEV_PORT_<n> family too" "refused" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision name-clash --image docker.io/traefik/whoami --port 80 \
+             --as DEV_PORT_2 2>&1); rc=$?
+     [ "$rc" = 2 ] && echo refused || echo "rc=$rc out=$out"'
+
+# (c) route gate. redis is a family devenv serves, so an unqualified request
+# must be refused and must name the devenv command.
+expect "route gate refuses an image devenv already serves" "refused" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision legacy-cache --image docker.io/library/redis:5 --port 6379 2>&1); rc=$?
+     [ "$rc" = 2 ] && echo "$out" | grep -q "devenv provision" && echo refused || echo "rc=$rc out=$out"'
+expect "--dedicated opens the gate and the reason is persisted" "pg9.6 client API" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision legacy-pg --image docker.io/library/postgres:9.6 --port 5432 \
+        --dedicated "pg9.6 client API" --password-env POSTGRES_PASSWORD \
+        --env-file /tmp/podenv-dedicated.env >/dev/null 2>&1
+     podenv list 2>/dev/null | grep -o "pg9.6 client API" | head -1'
+expect "the dedicated reason shows up in devenv list too" "pg9.6 client API" \
+    docker compose exec -T -u node paperclip sh -c \
+    'devenv list 2>/dev/null | grep -o "pg9.6 client API" | head -1'
+expect "--memory is refused rather than silently ignored" "refused" \
+    docker compose exec -T -u node paperclip sh -c \
+    'out=$(podenv provision mem-probe --image docker.io/traefik/whoami --port 80 --memory 128m 2>&1); rc=$?
+     [ "$rc" = 2 ] && echo "$out" | grep -q "PODENV_MEM_LIMIT" && echo refused || echo "rc=$rc out=$out"'
+# cleanup so re-runs start clean
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release legacy-pg >/dev/null 2>&1; rm -f /tmp/podenv-dedicated.env' >/dev/null 2>&1
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
