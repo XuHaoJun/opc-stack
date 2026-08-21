@@ -49,7 +49,7 @@
 |---|---|
 | `docker-compose.yml` | 新增 `podenv` service、兩顆 volume; paperclip 掛 socket volume + podenv env |
 | `.env.example` | `PODENV_*` 四個變數 |
-| `patches/paperclip/Dockerfile` | `COPY --from=podenv` 取 client、COPY podenv CLI/seed、symlink、`ENV CONTAINER_HOST` |
+| `patches/paperclip/Dockerfile` | apt 裝 `podman-remote` client (量測後推翻了 `COPY --from=podenv` 的方案)、COPY podenv CLI/seed、symlink、`ENV CONTAINER_HOST` |
 | `patches/paperclip/nix-entrypoint.sh` | source podenv seed |
 | `patches/paperclip/devenv/devenv` | 改成 source `shared.sh`; `cmd_list` 尾巴加 guarded 的 podenv 段 |
 | `patches/paperclip/skills/devenv/SKILL.md` | 一行前向指標 (**不複製決策表**) |
@@ -508,7 +508,10 @@ git commit -m "feat: podenv 的 runtime host — rootless podman, 無 privileged
   - `shared.sh` 匯出 `devenv_env_merge <env_file> <new_file>`、`devenv_derive_password <key> <kind>` (印 32 字元 hex)、`devenv_owner` (印字串)、`devenv_reserved_env_names` (每行一個名字)、`devenv_provider_image_families` (每行一個 `family=provider`)
   - `podenv list` (exit 0)、`podenv` 的 exit code 2/4
   - 表 `podenv_lease`、view `podenv_usage` (在 `devenv_control`)
-  - paperclip 容器內 `CONTAINER_HOST=unix:///run/podenv/podman.sock`, PATH 上有 `podman`
+  - paperclip 容器內 `CONTAINER_HOST=unix:///run/podenv/podman.sock`, PATH 上有 `podman`。
+    client 是 Debian 的 `podman-remote` package (apt, 5.4.2), `podman` 只是它的
+    symlink — 不是從 podenv image `COPY --from` 出來的同build binary (量測後推翻,
+    見 Step 9)。
 
 - [ ] **Step 1: 寫失敗的測試**
 
@@ -517,11 +520,18 @@ git commit -m "feat: podenv 的 runtime host — rootless podman, 無 privileged
 ```bash
 echo "── cli ──"
 
-expect "paperclip has a podman client whose version matches the server" "match" \
+# NOT a version-match check: the client (Debian's podman-remote) and the
+# runtime host legitimately differ (5.4.2 vs 5.8.4), and that gap is measured
+# to be fine. What matters is that the client can DRIVE the server — assert
+# that directly: a non-empty server version AND a real nested operation
+# succeeding. expect_ok (not expect) so a silently-failed half cannot read as
+# a pass.
+expect_ok "paperclip's podman client can drive the podenv server" "OK" \
     docker compose exec -T -u node paperclip sh -c \
-    'c=$(podman --remote version --format "{{.Client.Version}}" 2>/dev/null)
-     s=$(podman --remote version --format "{{.Server.Version}}" 2>/dev/null)
-     [ -n "$s" ] && [ "$c" = "$s" ] && echo match || echo "client=$c server=$s"'
+    's=$(podman --remote version --format "{{.Server.Version}}" 2>/dev/null)
+     [ -n "$s" ] || exit 1
+     podman --remote run --rm docker.io/library/alpine:3.20 echo NESTED_OK >/dev/null 2>&1 || exit 1
+     echo OK'
 check "podenv list works" docker compose exec -T -u node paperclip podenv list
 check "podenv_lease table exists" \
     docker compose exec -T paperclip sh -c \
@@ -970,35 +980,48 @@ cmd_release() {
 
 `patches/paperclip/Dockerfile` 三處修改。
 
-(a) 檔頭 ARG/stage alias, 緊接在既有的 `FROM ${NIX_SEED_IMAGE} AS nix-seed` 之後:
+(a) **不需要 stage alias。** 一開始的計畫是 `ARG PODENV_IMAGE` + `FROM ${PODENV_IMAGE} AS podenv`
+(緊接在既有的 `FROM ${NIX_SEED_IMAGE} AS nix-seed` 之後), 用來 `COPY --from=podenv` 取 podman
+binary。**這條路被量測推翻**: `quay.io/podman/stable` 是 Fedora, 那顆 binary 動態連結 Fedora 的
+libc/libselinux/libsemanage/libpam/libgpgme 等 22+ 顆 library, 在這個 image 的 Debian trixie base
+上直接死在 loader (`libsubid.so.5: cannot open shared object file`)。「複製 binary 讓 client/server
+同一個 build, 版本不會 skew」是預防性理由, 不是量測— 量了之後發現版本 skew 本身不構成問題 (見 (b))。
+所以整個 stage alias、`COPY --from=podenv` (binary 與整組 vendored library)、私有 lib 目錄、linker
+wrapper script 一起拿掉, 這一步什麼都不用加。
+
+(b) 在既有的 apt 工具層 (`openssh-client jq` 那條 `RUN`) 加 `podman-remote`, 在 OPC overlay 段
+`COPY opc/devenv/ /usr/local/lib/devenv/` 之後只留 CLI + seed 兩個 COPY:
 
 ```dockerfile
-# podenv image alias, for the podman CLIENT below. Same BuildKit constraint as
-# the nix seed: COPY --from cannot expand variables, so the global ARG is
-# materialized as a stage. And the same clean-machine hazard applies —
-# `depends_on` orders STARTUP, not builds, so scripts/setup.sh builds this
-# image before paperclip or the FROM here resolves to a registry pull and dies
-# with "pull access denied", an authorization error that looks nothing like an
-# ordering problem.
-ARG PODENV_IMAGE=opc/podenv:local
-FROM ${PODENV_IMAGE} AS podenv
+RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
+  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends openssh-client jq podman-remote \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /paperclip \
+  && chown node:node /paperclip
 ```
-
-(b) 在 OPC overlay 段, `COPY opc/devenv/ /usr/local/lib/devenv/` 之後:
 
 ```dockerfile
 # podenv CLI + its control schema (the nested container lease lane).
 COPY opc/podenv/ /usr/local/lib/podenv/
 COPY opc/opc-podenv-seed.sh /usr/local/bin/opc-podenv-seed.sh
-# The podman CLIENT, taken from the podenv image rather than from apt. Debian
-# trixie ships podman-remote 5.4.2 while the runtime host is 5.8.4, and a
-# version-skewed client against a nested runtime is precisely the kind of
-# failure that is expensive to diagnose. Copying the binary makes client and
-# server the same build by construction. ~44MB.
-COPY --from=podenv /usr/bin/podman /usr/local/bin/podman
+# The podman CLIENT: Debian's own `podman-remote` package (installed in the
+# apt layer above), symlinked to the plain name an agent types (see the
+# chmod/ln chain below).
+#
+# NOT `COPY --from=podenv /usr/bin/podman` (measured to fail, and previously
+# the approach here) — see (a) for why the Fedora binary cannot load on this
+# Debian base. Measured directly against the running podenv service instead:
+# a 5.4.2 podman-remote client against the 5.8.4 runtime host succeeds at
+# `version` (reports `server: 5.8.4`), `run`, `ps`, `build` (built and tagged
+# an image), `image inspect`, and `system df`. So the version-skew precaution
+# was buying nothing, and apt's ~33MB package replaces a ~44MB binary plus 23
+# vendored libraries plus a private-linker wrapper script.
 ```
 
-(c) 既有的 `RUN chmod +x ...` 鏈補上 podenv, 並加 symlink:
+(c) 既有的 `RUN chmod +x ...` 鏈補上 podenv, 並加三個 symlink (devenv/podenv/prototype 沿用既有慣例,
+`podman` 是新加的第四個):
 
 ```dockerfile
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
@@ -1011,7 +1034,8 @@ RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
     && chmod +x /usr/local/lib/prototype/prototype \
     && ln -sf /usr/local/lib/devenv/devenv /usr/local/bin/devenv \
     && ln -sf /usr/local/lib/podenv/podenv /usr/local/bin/podenv \
-    && ln -sf /usr/local/lib/prototype/prototype /usr/local/bin/prototype
+    && ln -sf /usr/local/lib/prototype/prototype /usr/local/bin/prototype \
+    && ln -sf /usr/bin/podman-remote /usr/local/bin/podman
 ```
 
 (d) 在既有的 `ENV MISE_DATA_DIR=...` 區塊之後加:
@@ -1022,12 +1046,11 @@ RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
 # records this for GH_CONFIG_DIR / GIT_SSH_COMMAND / GIT_CONFIG_GLOBAL), and
 # an agent debugging by hand needs the wide `podman` interface to just work.
 #
-# Measured: with CONTAINER_HOST set, a BARE `podman` (argv[0] not
-# podman-remote, no --remote flag) reaches the remote service — `podman version`
-# reported the runtime host's 5.8.4. So the skill's examples can say `podman
-# run`, not `podman --remote run`. Installing it a second time as
-# `podman-remote` would NOT be useful insurance: with the env stripped, that
-# name defaults to the local rootless socket path, not ours.
+# Measured (all three forms reach the runtime host's 5.8.4): `podman-remote
+# --remote --url unix:///run/podenv/podman.sock version`; the `podman` symlink
+# above with CONTAINER_HOST set and no flags at all; and `podman --remote
+# --url ... version` through that same symlink. So the skill's examples can
+# say plain `podman run`, not `podman-remote --remote --url ... run`.
 ENV CONTAINER_HOST=unix:///run/podenv/podman.sock \
     PODENV_LIB=/usr/local/lib/podenv
 ```
@@ -1099,7 +1122,7 @@ docker compose build podenv paperclip \
   && sleep 40 && tests/podenv.sh
 ```
 
-Expected: 全部 PASS (19 條), exit 0。若 `podman client version matches server` FAIL 且顯示 `client=... server=`, 表示 socket 連不上 —— 先看 `docker compose exec paperclip ls -ln /run/podenv/`, socket 的 owner 必須是 1000。
+Expected: 全部 PASS, exit 0。若 `paperclip's podman client can drive the podenv server` FAIL, 表示 socket 連不上或 nested run 失敗 —— 先看 `docker compose exec paperclip ls -ln /run/podenv/`, socket 的 owner 必須是 1000。
 
 - [ ] **Step 13: commit**
 
@@ -1846,31 +1869,26 @@ git commit -m "feat: podenv skill 是決策表正本, devenv 與 container-tools
 grep -n "compose build nix-seed" scripts/setup.sh
 ```
 
-Expected: 只有 nix-seed 被單獨 build。paperclip 的 `FROM ${PODENV_IMAGE}` 在乾淨機器上會解析不到 podenv image, 轉去 registry, 死在 `pull access denied for <prefix>/podenv` —— **一個看起來完全不像順序問題的授權錯誤**, 與 AGENTS.md 已記錄的 nix-seed 那個 bug 同一個。
+Expected: 只有 nix-seed 被單獨 build — 這對 nix-seed 仍然是真的 hazard (paperclip 的
+`FROM ${NIX_SEED_IMAGE}` 在乾淨機器上會解析不到就轉去 registry, 死在
+`pull access denied for <prefix>/nix-seed`, 見 AGENTS.md)。**podenv 沒有這條 hazard**:
+Task 2 改成 apt 裝 `podman-remote` 之後, `patches/paperclip/Dockerfile` 已經沒有任何
+`FROM` 指向 podenv image (拿掉了量測後發現不需要的 stage alias), 所以 podenv 的 build
+順序與 paperclip 的 build 完全無關 — 不必再單獨 build 它。
 
 - [ ] **Step 2: 修 setup.sh**
 
-把 `scripts/setup.sh` 裡單獨 build nix-seed 的那一行改成也 build podenv:
-
-```sh
-# `depends_on` orders STARTUP, not builds: compose hands the whole set to
-# buildx bake as one parallel graph, so on a clean machine paperclip's
-# `FROM ${NIX_SEED_IMAGE}` / `FROM ${PODENV_IMAGE}` resolve while those images
-# are still building, miss, fall through to a registry pull and die with
-# "pull access denied" — an authorization error that looks nothing like an
-# ordering problem. Build the base images first. Any machine that has built
-# once never sees this again, which is why only tests/fresh-install.sh catches
-# it.
-docker compose build nix-seed podenv
-```
+`scripts/setup.sh` 單獨 build nix-seed 的那一行維持原樣 (`docker compose build nix-seed`),
+**不需要**加 podenv: 沒有 `FROM` 引用它, 就沒有 build-ordering hazard, 沿用既有的
+nix-seed 注解即可, 不必修改。
 
 - [ ] **Step 3: 修 fresh-install.sh 的 port 位移**
 
 `tests/fresh-install.sh` 對每個 port 做 +1000 的改寫。把 `PODENV_PORT_BASE`、`PODENV_PORT_RANGE_END` 加進去 (base 24000 / end 24015), 與既有的 `DEVENV_HTTP_PORT_*` 同一處。
 
-- [ ] **Step 4: 加 compose 傳遞 PODENV_IMAGE build arg**
+- [ ] **Step 4: compose 的 paperclip build 區段不需要 podenv 條目**
 
-`docker-compose.yml` 的 paperclip build 區段:
+`docker-compose.yml` 的 paperclip build 區段維持只有 nix-seed 這一個 additional context / arg:
 
 ```yaml
     build:
@@ -1878,11 +1896,13 @@ docker compose build nix-seed podenv
       dockerfile: opc/Dockerfile
       additional_contexts:
         nix-seed: "service:nix-seed"
-        podenv: "service:podenv"
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
-        PODENV_IMAGE: ${IMAGE_PREFIX:-opc}/podenv:local
 ```
+
+**不要**加 `podenv: "service:podenv"` additional context 或 `PODENV_IMAGE` build arg —
+Task 2 拿掉 stage alias之後, paperclip 的 build 再也不需要 podenv image 存在, 這一整類
+「乾淨安裝 build 順序」失敗模式對 podenv 不成立。
 
 - [ ] **Step 5: 寫 SETUP.md 段落**
 

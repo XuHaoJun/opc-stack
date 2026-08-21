@@ -172,11 +172,19 @@ check "mem_limit is actually applied to the podenv container" \
 
 echo "── cli ──"
 
-expect "paperclip has a podman client whose version matches the server" "match" \
+# NOT a version-match check: the client is Debian's podman-remote (5.4.2) and
+# the runtime host is 5.8.4, and that gap is measured to be fine — `version`,
+# `run`, `ps`, `build`, `image inspect`, and `system df` all work across it.
+# What actually matters is that the client can DRIVE the server, so assert
+# that property directly: a non-empty server version AND a real nested
+# operation succeeding. expect_ok (not expect) because either half failing
+# silently — e.g. the socket unreachable — must not read as a match.
+expect_ok "paperclip's podman client can drive the podenv server" "OK" \
     docker compose exec -T -u node paperclip sh -c \
-    'c=$(podman --remote version --format "{{.Client.Version}}" 2>/dev/null)
-     s=$(podman --remote version --format "{{.Server.Version}}" 2>/dev/null)
-     [ -n "$s" ] && [ "$c" = "$s" ] && echo match || echo "client=$c server=$s"'
+    's=$(podman --remote version --format "{{.Server.Version}}" 2>/dev/null)
+     [ -n "$s" ] || exit 1
+     podman --remote run --rm docker.io/library/alpine:3.20 echo NESTED_OK >/dev/null 2>&1 || exit 1
+     echo OK'
 check "podenv list works" docker compose exec -T -u node paperclip podenv list
 check "podenv_lease table exists" \
     docker compose exec -T paperclip sh -c \
