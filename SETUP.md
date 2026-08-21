@@ -285,13 +285,29 @@ Each boot self-heals: if the profile ever loses the preinstalled tools, the
 entrypoint re-adds them automatically.
 
 `omp` (Oh My Pi) — the Paperclip executor agent runtime — is mise-managed:
-the entrypoint installs the prebuilt `github:can1357/oh-my-pi@17.3.5` into the
-paperclip `*-mise` volume on first boot (and re-adds it if missing). The nix
-derivation can't build in image environments (bun EPERM), so omp is not part
-of the nix seed. Upgrade with zero rebuild:
-`docker compose exec -u root paperclip mise install github:can1357/oh-my-pi@latest`.
-It runs as the `OMP Engineer` agent via the claude_local adapter with
+the entrypoint installs the prebuilt `github:can1357/oh-my-pi@17.4.0` into each
+`*-mise` volume on first boot (and re-adds it if missing). The nix derivation
+can't build in image environments (bun EPERM), so omp is not part of the nix
+seed. It runs as the `OMP Engineer` agent via the claude_local adapter with
 `agentCommand: "omp acp --yolo"`.
+
+The entrypoint check is **install-if-missing, not reconcile** — bumping the pin
+in `patches/*/opc-mise-seed.sh` only affects volumes that are still empty, so an
+already-running stack has to be upgraded by hand. Zero rebuild, all four
+containers (each has its own `*-mise` volume):
+
+```bash
+for c in buzz frontdoor hermes paperclip; do
+  docker compose exec -u root "$c" mise use -g github:can1357/oh-my-pi@17.4.0
+done
+for c in buzz frontdoor hermes paperclip; do
+  echo -n "$c: "; docker compose exec -T "$c" omp --version
+done
+```
+
+Use `mise use -g` rather than `mise install` — only `use` rewrites the pin in
+`/opt/mise/config/config.toml`, so the version survives the next boot instead of
+being shadowed by the old global.
 
 Search: `nix search nixpkgs <name>`. Wipe a store: `docker volume rm opc_hermes-nix`.
 

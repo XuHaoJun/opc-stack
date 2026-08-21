@@ -32,6 +32,6 @@ opc_mise_seed() {
     fi
     if [ ! -d "$MISE_DATA_DIR/installs/github-can1357-oh-my-pi" ]; then
         echo "[mise] first boot: installing omp (prebuilt, github releases)"
-        mise use -g github:can1357/oh-my-pi@17.3.5 || echo "[mise] omp install failed (network?)" >&2
+        mise use -g github:can1357/oh-my-pi@17.4.0 || echo "[mise] omp install failed (network?)" >&2
     fi
 }
