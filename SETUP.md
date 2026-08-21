@@ -374,7 +374,10 @@ Cost: expect roughly 20–40 minutes on the first run (all images built, an
 empty nix store seeded, four empty mise volumes populated — the layer cache is
 shared with the live stack, the volumes are not), about 10 GB of docker
 volumes and ~2 GB of scratch clone. Note `/tmp` is tmpfs on many systems, so
-that 2 GB is RAM; pass `--root` a disk path if that is tight.
+that 2 GB is RAM; pass `--root` a disk path if that is tight. A repeat run is
+much shorter (~10 minutes here) because the teardown keeps the rehearsal
+images — measured at ~1.5 GB on top of the existing store, since nearly every
+layer is shared. `--clean` deletes those too.
 
 Two things it deliberately does not do:
 

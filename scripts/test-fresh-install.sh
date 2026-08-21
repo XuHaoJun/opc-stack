@@ -152,7 +152,15 @@ teardown() {
 if [ "$CLEAN_ONLY" = 1 ]; then
     teardown
     rm -rf "$SCRATCH_ROOT"
-    echo "rehearsal '$TEST_PROJECT' removed (scratch: $SCRATCH_ROOT)"
+    # Images are the one thing a normal teardown KEEPS — they share almost all
+    # their layers with the live stack's (measured: eight rehearsal images add
+    # ~1.5 GB on top of a 47 GB store) and keeping them makes the next
+    # rehearsal's build phase near-instant. `--clean` is the explicit "get rid
+    # of it" command, so here they go.
+    assert_rehearsal_project "$TEST_PROJECT"
+    imgs="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^$TEST_PROJECT/" || true)"
+    [ -n "$imgs" ] && docker rmi $imgs >/dev/null 2>&1 || true
+    echo "rehearsal '$TEST_PROJECT' removed (scratch: $SCRATCH_ROOT, images included)"
     exit 0
 fi
 
@@ -459,7 +467,9 @@ elif [ "$OVERALL" != 0 ]; then
 else
     teardown
     rm -rf "$SCRATCH_ROOT"
-    echo "torn down; scratch removed."
+    echo "torn down; scratch removed. Rehearsal IMAGES are kept (they share"
+    echo "almost every layer with the live stack's, and they make the next run"
+    echo "skip the build phase). 'scripts/test-fresh-install.sh --clean' drops them."
 fi
 
 exit "$OVERALL"
