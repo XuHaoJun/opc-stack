@@ -100,12 +100,20 @@ cgroup v2 / seccomp builtin profile / **無 AppArmor、無 SELinux、無 userns-
    uid 9999 明確 `connect: permission denied`。
    副作用是**設計少一個約束**: 不需要 `podagents gid 3001` 這個跨 image 必須同數字的東西。
    另外目錄本身是第二道獨立的閘 (uid 對但不能 traverse 目錄時同樣被拒), 兩道閘都留著。
-4. **per-lease 記憶體上限做不到。** `/sys/fs/cgroup` 在容器內是 **`ro` 掛載, root 也寫不了**
-   (`touch: Read-only file system`), 所以原設計的「entrypoint chown 自己的 cgroup 目錄取得
-   cgroup v2 delegation」根本不可能 —— 要做到只能掛 host 的 `/sys/fs/cgroup`, 那就違反不變量 6。
-   實測 `podman run --memory 128m` → nested 容器的 `memory.max` 是 `max`, **podman 一行警告
-   都沒有**。這正是本 repo 一再記錄的無聲失效類型。
-   可行的替代是**整條 lane 一個上限**: compose 給 podenv service 自己 `mem_limit`。
+4. **per-lease 記憶體上限做不到。** 實測 `podman run --memory 128m` → nested 容器的
+   `memory.max` 是 `max`, **podman 一行警告都沒有**。這正是本 repo 一再記錄的無聲失效類型。
+   有**兩個**已量到的成因, 而我**沒有隔離出是哪一個在起作用** (照本 repo 對 hermes multiplex
+   憑證那條的做法, 因果不確定就要寫明, 不要把讀出來的推論當量測):
+   - `/sys/fs/cgroup` 在容器內是 **`ro` 掛載, root 也寫不了** (`touch: Read-only file system`),
+     所以原設計的「entrypoint chown 自己的 cgroup 目錄取得 cgroup v2 delegation」根本不可能
+     —— 要做到只能掛 host 的 `/sys/fs/cgroup`, 那就違反不變量 6。
+   - `quay.io/podman/stable` 的 `containers.conf` 明確寫著 **`cgroups="disabled"`** 與
+     `cgroup_manager="cgroupfs"`。
+   兩者任一單獨成立都足以讓 `--memory` 失效, 所以結論 (per-lease 上限不可交付) 是穩的,
+   但**不要在 spec 或 commit message 裡把成因說成只有 ro 掛載那一條**。
+   可行的替代是**整條 lane 一個上限**: compose 給 podenv service 自己 `mem_limit`。這條與上面
+   兩個成因都無關 —— nested 容器的行程是 podenv 容器行程的子孫, 活在 podenv 自己那個被 docker
+   限制的 cgroup 裡。
 5. **網路有三種, 其中一種不可能。**
    - `quay.io/podman/stable` 的 `/etc/containers/containers.conf` 寫著 `netns="host"`, 所以
      nested 容器**預設共用 sidecar 的 netns**。這條路通 (從 p0-net 上另一個容器打
@@ -121,8 +129,14 @@ cgroup v2 / seccomp builtin profile / **無 AppArmor、無 SELinux、無 userns-
 6. **nested 容器反向連 stack 服務可行**, host netns 與 pasta 兩種都通
    (`nc -z devenv-pg 5432` 成功)。
 7. **bind-mount 歸屬乾淨。** nested 容器建的檔案落在 uid 1000 (= paperclip 的 `node`),
-   **加不加 `--userns=keep-id` 都一樣**, 因為 rootless 的 container-root 就映射到呼叫者。
-   所以 `/prototypes` 的 bind mount 不會重演不變量 3b 那種擁有權痛苦。
+   **加不加 `--userns=keep-id` 都一樣**。原因不是我最初以為的「rootless 的 container-root
+   映射到呼叫者」, 而是 `quay.io/podman/stable` 的 `containers.conf` 寫著 **`userns="host"`**
+   (連同 `netns`/`ipcns`/`utsns`/`cgroupns` 全部是 host) —— nested 容器根本沒有自己的 userns。
+   量到的結果不變, 但成因不同, 而成因決定了下一句: **我們的 containers.conf 只改 `netns`,
+   `userns="host"` 必須留著**, 否則檔案會落在 subuid 區間 (image 的 `/etc/subuid` 給
+   `podman:1:999` 與 `podman:1001:64535`), `/prototypes` 就重演不變量 3b 那種擁有權痛苦。
+   代價要說清楚: nested 容器之間**共用 sidecar 的 userns**, 彼此隔離很弱 —— 這與「邊界是外層
+   docker 容器」的既有立場一致, 不是新的妥協。
 8. **磁碟沒有硬上限的路。** docker named volume 沒有 size 旋鈕; 在容器內掛 loopback ext4 要
    `CAP_SYS_ADMIN` (等於回到 privileged)。所以磁碟只能走 devenv 的既有立場: **可觀測性而非
    配額**。
@@ -177,6 +191,13 @@ entrypoint 以 root 起, 做兩件只有 root 能做的事, 然後降權:
 
 - podenv 的 Dockerfile 有一條 **build-time 斷言**: `id -u podman` 不等於 1000 就讓 build 失敗。
   這把「上游 image 換了 uid」從 runtime 的權限錯誤變成 build 時的明確失敗。
+  (量到的現況: `quay.io/podman/stable` 的 `podman` 使用者恰好就是 uid 1000, 所以斷言目前是
+  免費的。斷言存在的意義是上游哪天改動時**在 build 時**炸, 而不是在 socket 連線時。)
+
+**與 paperclip Dockerfile 那句「Unifying the runtime UIDs instead was rejected」不衝突**,
+方向相反: 那句拒絕的是**改動既有 image 的 uid** (paperclip 的 1000 來自上游 node base image,
+而既有 home volume 是現有 uid 擁有的 —— 不變量 3b)。這裡是一個**全新的 image、沒有任何既有
+volume**, 讓它去對齊既有的 1000。沒有任何既有擁有權被改動。
 - `tests/podenv.sh` 有一條結構檢查: paperclip 的 `id -u node` == podenv 的 runtime uid。
 
 ### 網路
@@ -184,6 +205,12 @@ entrypoint 以 root 起, 做兩件只有 root 能做的事, 然後降權:
 CLI 的 lease 預設 `--network=pasta` (量測 §5), 並且我們自己的 `containers.conf` 把
 `netns` 從上游的 `host` 改成 `pasta`, 讓**寬介面的裸 `podman run` 與 lease 行為一致** ——
 否則 agent 會拿到 host netns 而 `-p` 靜靜失效。
+
+**這個檔是最小差異覆蓋, 不是重寫。** 上游那份把 `netns`/`userns`/`ipcns`/`utsns`/`cgroupns`
+全設成 host, 加上 `cgroups="disabled"`、`cgroup_manager="cgroupfs"`、`log_driver="k8s-file"`、
+`events_logger="file"`、`runtime="crun"`。**只改 `netns` 一行, 其餘逐字保留** —— 特別是
+`userns="host"` (量測 §7: 拿掉它 `/prototypes` 的檔案歸屬就壞) 與 `cgroups="disabled"`
+(量測 §4)。整份重寫會在看不出關聯的地方壞掉。
 
 `--netns host` 是**顯式**退路 (遇到 pasta 搞不定的 image)。
 
