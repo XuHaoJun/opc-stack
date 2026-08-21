@@ -238,6 +238,68 @@ docker compose exec -T paperclip sh -c \
 check "devenv list shows the podenv section again after reseeding" \
     sh -c 'docker compose exec -T -u node paperclip devenv list 2>&1 | grep -q "podenv leases"'
 
+echo "── provision / release ──"
+
+PROBE_ENV=/tmp/podenv-gate.env
+docker compose exec -T -u node paperclip sh -c "rm -f $PROBE_ENV" >/dev/null 2>&1
+
+expect "provision writes the requested variable" "WHOAMI_ADDR" \
+    docker compose exec -T -u node paperclip sh -c \
+    "podenv provision gate-probe --image docker.io/traefik/whoami --port 80 \
+        --as WHOAMI_ADDR --env-file $PROBE_ENV >/dev/null 2>&1
+     sed 's/=.*//' $PROBE_ENV | grep -x WHOAMI_ADDR"
+
+expect "the lease is reachable from paperclip over docker DNS" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "addr=\$(grep '^WHOAMI_ADDR=' $PROBE_ENV | cut -d= -f2-)
+     curl -s -o /dev/null -w '%{http_code}' --max-time 5 \"http://\$addr/\""
+
+# expect_ok, not expect: without the `-n "$a"` guard and the `|| exit 1` on the
+# re-run, an EMPTY $a and an EMPTY $b (e.g. because the prior provision never
+# actually wrote the file) also satisfy "$a" = "$b" and print "same" — a false
+# pass that proves nothing ran, not that it is idempotent. Measured: this is
+# exactly what happened against the unimplemented stub.
+expect_ok "provision is idempotent (same port on re-run)" "same" \
+    docker compose exec -T -u node paperclip sh -c \
+    "a=\$(grep '^WHOAMI_ADDR=' $PROBE_ENV | cut -d= -f2-)
+     [ -n \"\$a\" ] || exit 1
+     podenv provision gate-probe --image docker.io/traefik/whoami --port 80 \
+        --as WHOAMI_ADDR --env-file $PROBE_ENV >/dev/null 2>&1 || exit 1
+     b=\$(grep '^WHOAMI_ADDR=' $PROBE_ENV | cut -d= -f2-)
+     [ \"\$a\" = \"\$b\" ] && echo same || echo \"\$a != \$b\""
+
+# `{{.Labels.opc.podenv.key}}` cannot work — the label name contains dots, so
+# Go's template parser reads them as field traversal. `index` is the only way.
+expect "the lease carries the restore label" "gate-probe" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podman ps --filter label=opc.podenv.lease --format "{{index .Labels \"opc.podenv.key\"}}" 2>/dev/null | head -1'
+
+# expect_ok: if provision fails, KEEP_ME was never at risk of being clobbered
+# (the file was never touched), so an unguarded check passes for the wrong
+# reason. `|| exit 1` on the provision call makes that failure visible instead
+# of silently proving nothing.
+expect_ok "provision does not clobber other keys in .env" "KEEP_ME" \
+    docker compose exec -T -u node paperclip sh -c \
+    "echo 'KEEP_ME=yes' >> $PROBE_ENV
+     podenv provision gate-probe --image docker.io/traefik/whoami --port 80 \
+        --as WHOAMI_ADDR --env-file $PROBE_ENV >/dev/null 2>&1 || exit 1
+     sed 's/=.*//' $PROBE_ENV | grep -x KEEP_ME"
+
+# expect_ok, with an explicit precondition: without proving the lease existed
+# (nb/rb >= 1) BEFORE release runs, "n=0 and r=0 afterwards" is also true when
+# release had nothing to do — e.g. because provision above never actually
+# created anything. That precondition failing, or release itself failing, both
+# `exit 1` so the command-as-a-whole fails rather than quietly printing "gone".
+expect_ok "release removes container and row" "gone" \
+    docker compose exec -T -u node paperclip sh -c \
+    "nb=\$(podman ps -a --filter label=opc.podenv.lease --format '{{.Names}}' 2>/dev/null | grep -c podenv_gate_probe || true)
+     rb=\$(podenv list 2>/dev/null | grep -c gate-probe || true)
+     [ \"\$nb\" -ge 1 ] && [ \"\$rb\" -ge 1 ] || exit 1
+     podenv release gate-probe >/dev/null 2>&1 || exit 1
+     n=\$(podman ps -a --filter label=opc.podenv.lease --format '{{.Names}}' 2>/dev/null | grep -c podenv_gate_probe || true)
+     r=\$(podenv list 2>/dev/null | grep -c gate-probe || true)
+     [ \"\$n\" = 0 ] && [ \"\$r\" = 0 ] && echo gone || echo \"containers=\$n rows=\$r\""
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -70,7 +70,7 @@ podenv_require_runtime() {
     # socket owner). Naming the wrong one sends the reader to fix a uid that
     # was never the problem.
     if ! command -v podman >/dev/null 2>&1; then
-        die "no podman client on PATH. It ships in the paperclip image (copied from the podenv image at build time via COPY --from=podenv); rebuild the paperclip image if it is missing." 4
+        die "no podman client on PATH. It ships in the paperclip image as Debian's apt podman-remote package (symlinked to /usr/local/bin/podman); rebuild the paperclip image if it is missing." 4
     fi
     if ! podman --remote --url "unix://$PODENV_SOCK" version --format '{{.Server.Version}}' >/dev/null 2>&1; then
         _pr_diag=""
@@ -93,13 +93,165 @@ podman_remote() { podman --remote --url "unix://$PODENV_SOCK" "$@"; }
 
 podenv_slug() { echo "podenv_$(echo "$1" | tr '-' '_')"; }
 
-cmd_provision() {
-    [ $# -gt 0 ] || die "usage: podenv provision <key> --image REF --port N [--as VAR] [...]" 2
-    die "podenv provision is not implemented yet (Task 3)" 2
+# Smallest free port in the pool. UNIQUE(host_port) makes the DB the arbiter,
+# so concurrent callers race harmlessly — the loser retries. No table lock is
+# needed here (unlike devenv's http provider) because a lease holds one port,
+# not a contiguous block.
+podenv_port_alloc() {
+    _pa_key="$1"
+    _pa_have="$(podenv_psql -tAc \
+        "SELECT COALESCE(host_port::text,'') FROM podenv_lease WHERE key = '$_pa_key'" \
+        2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$_pa_have" ]; then echo "$_pa_have"; return 0; fi
+    _pa_n="$(podenv_psql -tAc "
+        SELECT n FROM generate_series($PODENV_PORT_BASE,
+                                     $((PODENV_PORT_BASE + PODENV_PORT_COUNT - 1))) AS n
+        WHERE NOT EXISTS (SELECT 1 FROM podenv_lease l WHERE l.host_port = n)
+        ORDER BY n LIMIT 1" | tr -d '[:space:]')"
+    [ -n "$_pa_n" ] || die "no free podenv port (pool $PODENV_PORT_BASE-$((PODENV_PORT_BASE + PODENV_PORT_COUNT - 1))) — run 'podenv list' and release one" 3
+    echo "$_pa_n"
 }
+
+# Render {{host}} / {{port}} / {{password}} in a --url template. The double
+# brace form matches the expose.urlTemplate syntax this stack already uses;
+# ${port} is the wrong syntax here and AGENTS.md records it as an expired
+# example from upstream docs.
+podenv_render_url() {
+    printf '%s' "$1" \
+        | sed -e "s|{{host}}|$2|g" -e "s|{{port}}|$3|g" -e "s|{{password}}|$4|g"
+}
+
+cmd_provision() {
+    key=""; image=""; cport=""; as_var=""; url_tpl=""; netns="pasta"
+    dedicated=""; pw_env=""; env_file="$PWD/.env"; run_env=""; run_vol=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --image)        image="${2:?--image needs a value}"; shift 2 ;;
+            --port)         cport="${2:?--port needs a value}"; shift 2 ;;
+            --as)           as_var="${2:?--as needs a value}"; shift 2 ;;
+            --url)          url_tpl="${2:?--url needs a value}"; shift 2 ;;
+            # Accumulated in a string and later re-split by the shell, so a
+            # VALUE CONTAINING SPACES is not supported. Stated as a limit
+            # rather than half-handled: the alternative (an eval-based array
+            # emulation in POSIX sh) is worse than the restriction.
+            --env)          run_env="$run_env ${2:?--env needs K=V}"; shift 2 ;;
+            --volume)       run_vol="$run_vol ${2:?--volume needs HOST:CONTAINER}"; shift 2 ;;
+            --password-env) pw_env="${2:?--password-env needs a NAME}"; shift 2 ;;
+            --netns)        netns="${2:?--netns needs pasta|host}"; shift 2 ;;
+            --dedicated)    dedicated="${2:?--dedicated needs a reason}"; shift 2 ;;
+            --env-file)     env_file="${2:?--env-file needs a value}"; shift 2 ;;
+            --memory)
+                # Never accept a flag that does nothing. Measured: podman's
+                # --memory is silently ignored in this topology (memory.max
+                # stays `max`, no warning), and delegation cannot be obtained
+                # without mounting the host's /sys/fs/cgroup.
+                die "--memory does not exist here: per-lease memory limits cannot be enforced in this topology (cgroup delegation needs a host /sys/fs/cgroup mount, which invariant 6 forbids). The whole lane is capped by PODENV_MEM_LIMIT in .env." 2 ;;
+            -*)             die "unknown flag: $1" 2 ;;
+            *)  [ -z "$key" ] || die "unexpected argument: $1" 2; key="$1"; shift ;;
+        esac
+    done
+
+    [ -n "$key" ]   || die "usage: podenv provision <key> --image REF --port N [--as VAR]" 2
+    [ -n "$image" ] || die "--image is required (e.g. --image mysql:5.7)" 2
+    [ -n "$cport" ] || die "--port is required — the port the daemon listens on INSIDE the container (mysql: 3306)" 2
+    echo "$key" | grep -Eq '^[a-z][a-z0-9-]{1,40}$' \
+        || die "invalid key '$key' — must match ^[a-z][a-z0-9-]{1,40}\$" 2
+    echo "$cport" | grep -Eq '^[1-9][0-9]*$' || die "--port must be a positive integer" 2
+    case "$netns" in pasta|host) ;; *) die "--netns must be pasta or host" 2 ;; esac
+
+    # Default variable name from the image's own name: mysql:5.7 -> MYSQL_ADDR.
+    if [ -z "$as_var" ]; then
+        as_var="$(printf '%s' "$image" | sed 's|.*/||; s|:.*||; s|[^A-Za-z0-9]|_|g' \
+                  | tr '[:lower:]' '[:upper:]')_ADDR"
+    fi
+    echo "$as_var" | grep -Eq '^[A-Z][A-Z0-9_]*$' \
+        || die "--as '$as_var' is not a shell variable name (A-Z, 0-9, _)" 2
+
+    podenv_require_runtime
+    podenv_require_control_schema
+
+    slug="$(podenv_slug "$key")"
+    pw="$(devenv_derive_password "$key" podenv)" \
+        || die "cannot derive the lease password — DEVENV_SECRET_SALT is unset" 4
+    hport="$(podenv_port_alloc "$key")"
+
+    existing="$(podenv_psql -tAc "SELECT key FROM podenv_lease WHERE key = '$key'" \
+                | tr -d '[:space:]')"
+
+    # Register BEFORE creating: the row is what makes the port exclusive, so it
+    # has to exist before anything is bound to it.
+    if [ -z "$existing" ]; then
+        podenv_psql -v ON_ERROR_STOP=1 -c "
+            INSERT INTO podenv_lease
+              (key, slug, image, netns, container_port, host_port, env_var,
+               dedicated_reason, created_by)
+            VALUES ('$key', '$slug', '$image', '$netns', $cport, $hport, '$as_var',
+                    $( [ -n "$dedicated" ] && printf "'%s'" "$dedicated" || echo NULL ),
+                    '$(devenv_owner)')" >/dev/null
+    else
+        podenv_psql -c "UPDATE podenv_lease SET last_seen_at = now() WHERE key = '$key'" >/dev/null
+    fi
+
+    # Idempotent container creation. `podman ps -a` is authoritative for its
+    # own containers, unlike prototype-restore's problem where a DB row claimed
+    # `running` after the process was long gone — the containers ARE this
+    # service's child processes, so if it is up and they are listed, they exist.
+    if podman_remote container exists "$slug" 2>/dev/null; then
+        podman_remote start "$slug" >/dev/null 2>&1 || true
+    else
+        set -- run -d --name "$slug" \
+            --label "opc.podenv.lease=$slug" \
+            --label "opc.podenv.key=$key" \
+            --restart no \
+            --network="$netns"
+        [ "$netns" = host ] || set -- "$@" -p "${hport}:${cport}"
+        [ -z "$pw_env" ] || set -- "$@" -e "${pw_env}=${pw}"
+        for _e in $run_env; do set -- "$@" -e "$_e"; done
+        for _v in $run_vol; do set -- "$@" -v "$_v"; done
+        set -- "$@" "$image"
+        podman_remote "$@" >/dev/null \
+            || die "podman could not start the lease. Run the same image by hand to see why: podman run --rm -it $image" 1
+    fi
+
+    # With --netns host there is no port remapping at all (measured: -p is
+    # discarded without a warning), so the reachable port IS the container's.
+    [ "$netns" = host ] && hport="$cport"
+
+    out_file="$(mktemp)"
+    if [ -n "$url_tpl" ]; then
+        printf '%s=%s\n' "$as_var" \
+            "$(podenv_render_url "$url_tpl" "$PODENV_HOST_NAME" "$hport" "$pw")" > "$out_file"
+    else
+        printf '%s=%s:%s\n' "$as_var" "$PODENV_HOST_NAME" "$hport" > "$out_file"
+    fi
+    devenv_env_merge "$env_file" "$out_file"
+    if [ -n "$existing" ]; then
+        note "podenv: '$key' (existing) → $env_file"
+    else
+        note "podenv: '$key' provisioned → $env_file"
+    fi
+    cat "$out_file"
+    rm -f "$out_file"
+}
+
 cmd_release() {
-    [ $# -gt 0 ] || die "usage: podenv release <key>" 2
-    die "podenv release is not implemented yet (Task 3)" 2
+    key="${1:?usage: podenv release <key>}"
+    podenv_require_control_schema
+    if [ -z "$(podenv_psql -tAc "SELECT key FROM podenv_lease WHERE key = '$key'" | tr -d '[:space:]')" ]; then
+        note "podenv: '$key' (absent)"; return 0
+    fi
+    slug="$(podenv_slug "$key")"
+    if [ -S "$PODENV_SOCK" ]; then
+        podman_remote rm -f -v "$slug" >/dev/null 2>&1 || true
+    else
+        note "podenv: WARNING the runtime host is not reachable, so the container for"
+        note "podenv:   '$key' was NOT removed. The registry row is going away, which"
+        note "podenv:   frees port $(podenv_psql -tAc "SELECT host_port FROM podenv_lease WHERE key = '$key'" | tr -d '[:space:]') for the next lease — and a container still"
+        note "podenv:   holding it would make that lease fail to start. Bring podenv up"
+        note "podenv:   and run: podman rm -f -v $slug"
+    fi
+    podenv_psql -c "DELETE FROM podenv_lease WHERE key = '$key'" >/dev/null
+    note "podenv: '$key' released"
 }
 
 cmd_list() {
