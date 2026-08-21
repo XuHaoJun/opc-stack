@@ -70,6 +70,19 @@ RUN groupadd -r nixbld \
         # /nix-seed` bakes the same seed into each image's layers. Nothing
         # starts a postgres here — devenv-pg is the server.
         github:NixOS/nixpkgs/8be7bd0c83f1#postgresql \
+        # valkey rides in for the same reason and on the same evidence: every
+        # devenv tenant also holds a valkey lease (VALKEY_URL, next to
+        # DATABASE_URL in the same .env), so an operator or an agent told it
+        # owns that resource needs something to talk to it with. `valkey`
+        # rather than `redis` because the server here is valkey 9.1 and the
+        # tenant isolation depends on its 9.1+ `db=<dbid>` ACL op (AGENTS.md);
+        # matching client to server costs nothing — the two packages measured
+        # identically. Marginal cost over the rest of this seed is ~100MB /
+        # 33 store paths, almost entirely a full systemd that valkey links
+        # against and the seed did not already carry. As with postgresql that
+        # lands in the shared volume AND in every service image layer, and
+        # nothing starts a valkey here — devenv-valkey is the server.
+        github:NixOS/nixpkgs/8be7bd0c83f1#valkey \
     && cp -al /nix /nix-seed
 
 # Two roles, one image:

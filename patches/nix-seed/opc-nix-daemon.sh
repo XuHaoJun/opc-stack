@@ -37,7 +37,7 @@ NIXPKGS=github:NixOS/nixpkgs/8be7bd0c83f1
 # Single source of truth for what the seed contains: "<bin on disk>:<nixpkgs
 # attr>". Both the detection below and the heal's install list derive from
 # this — add a tool here once, not in two places that can drift apart.
-SEED_TOOLS="rg:ripgrep jq:jq fd:fd htop:htop bat:bat just:just mise:mise gh:gh ps:procps ss:iproute2 lsof:lsof psql:postgresql"
+SEED_TOOLS="rg:ripgrep jq:jq fd:fd htop:htop bat:bat just:just mise:mise gh:gh ps:procps ss:iproute2 lsof:lsof psql:postgresql valkey-cli:valkey"
 
 export NIX_SSL_CERT_FILE="${NIX_SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
