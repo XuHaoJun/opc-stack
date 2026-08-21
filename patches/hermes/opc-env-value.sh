@@ -3,7 +3,7 @@
 #
 # Sourced by hermes-entrypoint.sh (which needs the function while it
 # reconciles a profile's .env) and executed directly by
-# scripts/test-scientist.sh (which needs the SAME parse to read the key back
+# tests/scientist.sh (which needs the SAME parse to read the key back
 # out of a running container). Those two used to be different code: the
 # entrypoint had this parser, the gate had a bare `sed -n 's/^KEY=//p'` — one
 # of them with a `head -1`, one without. A gate that parses .env differently

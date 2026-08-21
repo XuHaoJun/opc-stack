@@ -7,7 +7,7 @@ Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-
 - **`upstream/`** = 4 個 git submodule, pin 在 upstream tag commit (乾淨 checkout, 永不直接編輯): buzz `desktop-v0.5.14` / hermes `v2026.8.16` / paperclip `canary/v2026.722.1-canary.0` / tencentdb `v2.0.0`。
 - **`patches/`** = 全部本地客製 (opc/Dockerfile、entrypoints、one-shot scripts)。build 前 `scripts/prepare.sh` 把 `patches/<proj>/` rsync 進 `upstream/<proj>/opc/` (冪等)。**改 image 一律改 `patches/`, 不改 upstream 主 Dockerfile。**
 - **`patches/nix-seed/`** = 第一個不屬 submodule 的 build context (compose service `nix-seed`, one-shot)。pin nix 2.35.2 + nixpkgs `8be7bd0c83f1`, 建 `/nix-seed` (cp -al hardlink) 含 12 工具 (ripgrep jq fd htop bat just mise gh procps iproute2 lsof postgresql — procps/iproute2/lsof 是 ps/pkill/ss/lsof, 沒有它們連「誰在跑」「誰佔著 port」都查不了; postgresql 是為了 **client** psql/pg_isready —— 每個 devenv 租戶 (prototype lane、現在加上 scientist expert) 都握著一個 postgres 租約, 操作者被要求直接拿 SQL client 接上去 (`devenv list` 那行「或 SQL client 連 127.0.0.1:5433」), client 因此屬於 seed, 與任何測試是否存在無關; nixpkgs 沒有 client-only 切分所以 server binary 一起進來 (量到的 closure ~166MB, 沒有單一依賴獨占多數 — icu4c ~40MB、postgresql 本體 ~26MB、其餘是 curl/openssl/glibc 系), 沒有任何東西會啟動它, 而這筆成本不只付在共用的 `opc-nix` volume 一次 —— `COPY --from=nix-seed /nix-seed /nix-seed` 把同一份 seed 烤進**每個** service image 的 layer, 所以也逐 image 付一次)。各 build service `depends_on nix-seed` + `FROM ${NIX_SEED_IMAGE} AS nix-seed` / `COPY --from=nix-seed` 取用 (BuildKit 不支援 `--from` 變數展開, 故用 stage alias)。改 seed 工具清單 = 改這個 Dockerfile, seed 只重裝 1 次。
-  **`depends_on` 不排序 build, 只排序啟動** —— 而這裡的 seed 是別人的 base image。compose 把整組交給 buildx bake 當**一張平行圖**跑, 所以乾淨機器上 paperclip 的 `FROM` 會在 nix-seed 還在 build 時就去解析, 解不到就轉去 registry, 死在 `pull access denied for <prefix>/nix-seed` —— 一個看起來完全不像順序問題的授權錯誤。`scripts/setup.sh` 因此先單獨 `docker compose build nix-seed` 再 `up -d --build`。任何機器只要 build 過一次就再也看不到這個 bug (image 已在 store 裡), 它只咬乾淨安裝 —— 由 `scripts/test-fresh-install.sh` 抓到。
+  **`depends_on` 不排序 build, 只排序啟動** —— 而這裡的 seed 是別人的 base image。compose 把整組交給 buildx bake 當**一張平行圖**跑, 所以乾淨機器上 paperclip 的 `FROM` 會在 nix-seed 還在 build 時就去解析, 解不到就轉去 registry, 死在 `pull access denied for <prefix>/nix-seed` —— 一個看起來完全不像順序問題的授權錯誤。`scripts/setup.sh` 因此先單獨 `docker compose build nix-seed` 再 `up -d --build`。任何機器只要 build 過一次就再也看不到這個 bug (image 已在 store 裡), 它只咬乾淨安裝 —— 由 `tests/fresh-install.sh` 抓到。
 - **prototype lane** (`prototype` CLI, paperclip image): 一個 prototype = 一個 Paperclip project + `/prototypes/<name>` (自己的 git) + 一個 devenv 租約 + 一個掛在 **project workspace** 上的 runtime service。服務掛 project 層而非 execution workspace,所以沒有 issue 在跑時宣告仍在,**preview URL 跨 session 不變**。`prototype create` 冪等,同時是「建立」與「用名字接續」的路徑。設計見 `docs/superpowers/specs/2026-08-18-devenv-http-preview-design.md`。
 - **devenv** (`docker-compose.yml` 的 `devenv-pg` / `devenv-valkey`): agent 的開發資源租約, **兩類租戶**。(1) paperclip agent 自己跑 `devenv provision <key>`, 拿到獨立的 postgres DB (pgvector) + valkey ACL user, 寫進 workspace `.env` 的 `DATABASE_URL`/`VALKEY_URL`。(2) **hermes 專家 agent 有常駐租約**: one-shot `devenv-expert-leases` (跑 paperclip image, 因為 devenv CLI 只住在那裡) provision `scientist` 到 `/keys/devenv-scientist.env`, hermes entrypoint 的 `opc_seed_expert_profile()` 把它 merge 進 profile 的 `.env`。**租約壞掉只會降級專家, 不會擋 gateway 起來** —— one-shot 一律 exit 0, 失敗時印 WARNING (詳見不變量 8)。刻意不給 agent docker (不變量 6); 設計見 `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md`。
 - 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉; **專家 agent 的宿主** — multiplex 服務 `hermes-profiles` volume 上的每個 profile, 目前有 `agt-scientist`) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
@@ -76,10 +76,10 @@ Lean Mode (拿掉 Paperclip、Hermes Kanban 轉正) 是 PRD 允許的另一種�
 安裝完全沒有證明力** —— 那台機器上根本沒有那個容器, 走的是另一條路徑。真正算數的驗證
 只有真的從空狀態走一次 `setup.sh` 之後三條 gate 直接綠 —— 但**不要在這台上
 `docker compose down -v`** (會毀掉 community/board/memory/prototype/租約)。
-跑 `scripts/test-fresh-install.sh`: 它把 repo clone 出去、換 compose project /
+跑 `tests/fresh-install.sh`: 它把 repo clone 出去、換 compose project /
 image prefix / 全部 port (+1000) / 自己的 Buzz relay, 在活著的 stack **旁邊**
 做完整排練, 再從 clone 裡跑 audit-bootstrap + test-connectivity + test-scientist。
-`scripts/audit-bootstrap.sh` 只是靜態稽核, 不是這件事的證明。
+`tests/audit-bootstrap.sh` 只是靜態稽核, 不是這件事的證明。
 
 ## 常用指令
 
@@ -87,8 +87,8 @@ image prefix / 全部 port (+1000) / 自己的 Buzz relay, 在活著的 stack **
 scripts/setup.sh              # 新機器一鍵: .env → submodule init → prepare → build → up
 scripts/prepare.sh            # patches/ → upstream/ 同步 (改 patch 後、build 前必跑)
 scripts/upgrade.sh <proj> <tag>  # 升版: checkout 新 tag → prepare → rebuild → redeploy
-scripts/test-connectivity.sh  # 連通性測試 (不碰 LLM)
-scripts/test-fresh-install.sh # 開箱排練: clone 到別的 compose project 走一次 setup.sh (慢, 偶爾跑)
+tests/connectivity.sh  # 連通性測試 (不碰 LLM)
+tests/fresh-install.sh # 開箱排練: clone 到別的 compose project 走一次 setup.sh (慢, 偶爾跑)
 docker compose up -d --build  # 啟動/重建 (改過 patches/ 後); host config (gh creds) 由 host-sync one-shot 自動同步
 docker compose logs -f <svc>
 docker compose down           # 停 (volume 保留); down -v 全清
@@ -98,7 +98,7 @@ docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL 
 docker compose exec paperclip prototype list          # 目前有哪些 prototype (名字 / port / URL)
 docker compose exec paperclip prototype restore       # 手動把該跑的 preview 叫回來 (開機時會自動跑)
 docker compose exec paperclip prototype templates     # 可用的 scaffold
-scripts/test-prototype-template.sh nextjs [ui]        # template/layer smoke test (建→裝→migrate→serve→驗兩個後端→刪)
+tests/prototype-template.sh nextjs [ui]        # template/layer smoke test (建→裝→migrate→serve→驗兩個後端→刪)
 docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除路徑, 會先列出再要你打名字
 ```
 
@@ -152,7 +152,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
    operator。**不要為此拿掉 dashboard 的 `frontdoor-hermes` 掛載** —— 那會毀掉
    「一次登入看到全部 agent(含參謀長)」這個使用者明確選擇的性質; 要換掉這個取捨
    是使用者的決定。真正被機器守住的是 `hermes` 容器那半邊, 由
-   `scripts/test-scientist.sh` 的兩條結構檢查釘住 (不掛 `frontdoor-hermes`、
+   `tests/scientist.sh` 的兩條結構檢查釘住 (不掛 `frontdoor-hermes`、
    uid 10000 讀不到 `/keys/agent.nsec`)。
    **專家之間不隔離** (同容器同 uid), 這是換 8 倍記憶體的顯式取捨: 每專家一容器是
    ~118MB × N (Python heap 是 RssAnon, 行程間不共享), multiplex 是 ~148MB + ~9MB × N
@@ -166,7 +166,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
    `[devenv-expert-leases] WARNING`(並把 provisioner 輸出裡的密碼遮掉再印), 讓專家退化成
    「沒有 `DATABASE_URL`/`VALKEY_URL`」而不是全棧起不來。與
    `patches/paperclip/opc-devenv-seed.sh` 同一個立場: devenv 的問題要在**用到資源時**炸,
-   不是在開機時。偵測器是 `scripts/test-scientist.sh` 的 `── devenv lease ──` 三條
+   不是在開機時。偵測器是 `tests/scientist.sh` 的 `── devenv lease ──` 三條
    (含一條真的用租約 `psql` 連上去), 修完重跑
    `docker compose up devenv-expert-leases` 即可 —— 它是冪等的。
    **dashboard 容器的 `command` argv[0] 必須是 `dashboard`** —— upstream 用
@@ -241,18 +241,19 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - `patches/nix-seed/` — nix seed build context (nix 2.35.2 + 12 工具, `cp -al` 成 `/nix-seed`); compose `nix-seed` 是 one-shot, 消費者 = 各 service Dockerfile 的 `COPY --from=nix-seed`
 - `patches/{buzz,hermes}/SOUL.md` — agent 身分 + 「不自己實作」規則 (兩份必須相同; 唯一對所有 lane 都生效的位置)
 - `patches/<proj>/opc-mise-seed.sh` — 每 project 一份, entrypoint source 的 mise bootstrap (空 volume 自動裝 node/rust/omp)
-- `patches/hermes/opc-env-value.sh` — 唯一的 `.env` 讀取器。entrypoint `source` 它拿 `opc_env_value` 函式, `scripts/test-scientist.sh` 在容器裡把**同一個檔**當 CLI 執行 (`opc-env-value.sh <file> <name>`)。寫的人與驗的人用同一份 parser, 否則 gate 會對著跟 gateway 不同的值變綠
+- `patches/hermes/opc-env-value.sh` — 唯一的 `.env` 讀取器。entrypoint `source` 它拿 `opc_env_value` 函式, `tests/scientist.sh` 在容器裡把**同一個檔**當 CLI 執行 (`opc-env-value.sh <file> <name>`)。寫的人與驗的人用同一份 parser, 否則 gate 會對著跟 gateway 不同的值變綠
 - `patches/tencentdb-agent-memory/MemoryCore/` — tencentdb-core 的 opc Dockerfile (schema overlay: team/create + agent/create 接受顯式 id) + `opc-tencentdb-provision.sh` (meta-plane bootstrap)
 - `patches/paperclip/skills/<slug>/` — vendor 的第三方 skill (SKILL.md + sibling 檔 + `SOURCE` 記 repo/SHA); image 內落在 `/opt/opc-skills/`, bootstrap 裝進 company library
 - `patches/paperclip/templates/_layers/<name>/apply.sh` — 選配的 layer (`prototype layer add`)。**layer 之間必須獨立** — 需要知道另一個 layer 存在的 layer 是設計失敗, 它會讓測試從線性變成組合爆炸。用 script 而非複製檔案, 是因為 tailwind/shadcn 有自己的 installer, 複製快照等於凍結我們控制不了的版本
-- `patches/paperclip/templates/<name>/` — `prototype create --template` 的 scaffold。**是程式碼不是文件**: env 覆蓋順序、`NODE_ENV`、`allowedDevOrigins`、valkey ready check 每一條都是一次除錯換來的, 讓 agent 照文件重打必然出錯 (已發生過)。改了跑 `scripts/test-prototype-template.sh`
+- `patches/paperclip/templates/<name>/` — `prototype create --template` 的 scaffold。**是程式碼不是文件**: env 覆蓋順序、`NODE_ENV`、`allowedDevOrigins`、valkey ready check 每一條都是一次除錯換來的, 讓 agent 照文件重打必然出錯 (已發生過)。改了跑 `tests/prototype-template.sh`
 - `patches/paperclip/prototype/` — `prototype` CLI (paperclip-aware 的工作流層: project + git + 租約)。**刻意不放進 devenv** — devenv 是通用資源租約, 不該認識 paperclip; 它只多一個 `mark-exposed` 供 `devenv list` 標記
 - `patches/paperclip/skills/{devenv,prototype-workspace}/` — first-party skill (租約用法 / prototype 工作流 + 覆寫 vendored `prototype` skill 的第 1、3、6 條規則)
 - `patches/paperclip/devenv/` — `devenv` CLI + `providers/{postgres,valkey}.sh` + `bootstrap.sql`;
   image 內落在 `/usr/local/lib/devenv/`, symlink 到 `/usr/local/bin/devenv`。schema 由 `opc-devenv-seed.sh` 每次開機套用 (冪等, 後端不通只警告不擋 `up`)
 - `scripts/prepare.sh` — 除了同步 patches, 還有**防漂移檢查**: 兩份 `paperclip-api` SKILL.md 與兩份 `SOUL.md` 必須逐字相同, 不同就中止 build (這條規則在本 repo 已經默默壞過三次)
-- `scripts/` — setup / prepare / upgrade / test-connectivity; `host-sync.sh` (通用 host→volume 鏡像 CLI) + `host-sync-worker.sh` (容器側 engine, 唯一邏輯) + `hooks/` (per-source 轉換, ssh/gitconfig/claude-cred) + `sync-gh-creds.sh` / `sync-claude-creds.sh` (場景薄 wrapper); compose `host-sync` (gh) 與 `host-sync-claude` (Claude cred) 兩個 one-shot 每次 up 自動跑
+- `scripts/` — 操作用的一次性工具: setup / prepare / upgrade / load-env (`.env` 讀取器, 被 `scripts/setup.sh`、`scripts/upgrade.sh` 與 `tests/*.sh` 共用); `host-sync.sh` (通用 host→volume 鏡像 CLI) + `host-sync-worker.sh` (容器側 engine, 唯一邏輯) + `hooks/` (per-source 轉換, ssh/gitconfig/claude-cred) + `sync-gh-creds.sh` / `sync-claude-creds.sh` (場景薄 wrapper); compose `host-sync` (gh) 與 `host-sync-claude` (Claude cred) 兩個 one-shot 每次 up 自動跑
+- `tests/` — 測試與驗證腳本的慣例落腳處, 與 `scripts/` 分工: `scripts/` 是操作工具, `tests/` 是測試與驗證。移進來的檔案把冗餘的 `test-` 前綴拿掉 (目錄名已經說明性質了) —— 例外是 `tests/audit-bootstrap.sh` (本來就沒有前綴) 與 `tests/acp-smoke-test.mjs` (`-test` 是複合名稱的一部分而非前綴, 且它在 paperclip 容器內跑, 名稱與位置無關)。`tests/set-buzz-agent-owner.sh` 測的是 `scripts/set-buzz-agent-owner.sh` — 同名分屬 `scripts/`/`tests/` 兩個目錄是刻意的配對, 不是巧合, 其餘整合測試同理。三個 gate: `tests/audit-bootstrap.sh` (靜態: 每份狀態是否都有無人值守的產生者)、`tests/connectivity.sh` (live: 既有功能沒被弄壞)、`tests/scientist.sh` (live: 專家 lane 端到端); 外加偶爾才跑的 `tests/fresh-install.sh` (乾淨機器完整排練, 見「部署假設」一節)。這是慣例, 不是強制關卡 —— `scripts/prepare.sh` 不對它 gate。
 - `upstream/<proj>/opc/` — prepare.sh 產物, 勿手改
-- `acp-smoke-test.mjs` — omp ACP handshake 驗證 script (在 paperclip 容器內跑)
+- `tests/acp-smoke-test.mjs` — omp ACP handshake 驗證 script (在 paperclip 容器內跑)
 - `patches/hermes/profiles/<name>/SOUL.md` — 專家 agent 的身分。**不是** `patches/hermes/SOUL.md` 的副本: 那份帶著「你不是實作者」, 而專家的工作就是自己動手, 套上去會切斷探索迴圈
-- `scripts/test-scientist.sh` — 專家 lane 的端到端 gate (volume → gateway → 身分 → 記憶 → board)
+- `tests/scientist.sh` — 專家 lane 的端到端 gate (volume → gateway → 身分 → 記憶 → board)

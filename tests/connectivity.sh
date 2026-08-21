@@ -9,7 +9,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 if [ ! -f .env ]; then echo "FAIL  no .env — run scripts/setup.sh first"; exit 1; fi
-. "$(dirname "$0")/load-env.sh"; opc_load_env ./.env
+. "$(dirname "$0")/../scripts/load-env.sh"; opc_load_env ./.env
 
 PASS=0; FAIL=0
 check() { # check <label> <cmd...>
@@ -78,7 +78,7 @@ check "hermes API       :${HERMES_API_PORT:-8642}/" http_ok "http://127.0.0.1:${
 # precisely what GATEWAY_MULTIPLEX_PROFILES=1 plus a seeded
 # /opt/data/profiles/<name> buys. Turn multiplex off, or lose the profile
 # directory, and the 404 becomes a 200 and this goes red.
-# (scripts/test-scientist.sh asserts the credential half — the profile route
+# (tests/scientist.sh asserts the credential half — the profile route
 # accepts the profile's own key and rejects the default profile's.)
 check "hermes scientist :${HERMES_API_PORT:-8642}/p/agt-scientist/" http_ok \
   "http://127.0.0.1:${HERMES_API_PORT:-8642}/p/agt-scientist/v1/health" 200

@@ -21,7 +21,7 @@ LLM 全棧預設使用 OpenCode Go(`https://opencode.ai/zen/go/v1`),`.env` 填 `
 scripts/setup.sh              # 新機器一鍵: .env → submodule init → prepare → build → up
 scripts/prepare.sh            # patches/ → upstream/ 同步(改 patch 後、build 前必跑)
 docker compose up -d --build  # 啟動/重建
-scripts/test-connectivity.sh  # 連通性測試(不碰 LLM)
+tests/connectivity.sh          # 連通性測試(不碰 LLM)
 docker compose logs -f <svc>  # 看日誌
 ```
 

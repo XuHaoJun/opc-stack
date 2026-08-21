@@ -58,7 +58,7 @@ is the bug the map fixes.
    `meta.txt` + `manifest.sha256`. The component stays stopped — the upgrade
    below restarts it.
 5. **Upgrade** — `scripts/upgrade.sh <proj> <tag>` (unchanged engine).
-6. **Verify** — `scripts/test-connectivity.sh` + component smoke checks +
+6. **Verify** — `tests/connectivity.sh` + component smoke checks +
    logs scan (see references/risk-checklist.md §6).
 7. **GATE B — on verification failure:** present the failure to the user and
    OFFER rollback; do NOT auto-rollback. On approval: restore = checkout old
@@ -67,7 +67,7 @@ is the bug the map fixes.
    git -C upstream/<proj> checkout <old> && git add upstream/<proj>
    bash .claude/skills/upgrade-opc-stack/scripts/restore-volumes.sh <proj> backups/<backup-dir>
    scripts/prepare.sh && docker compose up -d --build <services>
-   scripts/test-connectivity.sh
+   tests/connectivity.sh
    ```
 8. **Finish** — report outcome, backup location, and the upgrade record
    (submodule pointer commit). Keep the backup dir until the new version has

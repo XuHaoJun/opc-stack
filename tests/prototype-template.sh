@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Smoke-test a prototype template end to end, against the LIVE stack.
 #
-#   scripts/test-prototype-template.sh [template] [layer...]
-#     scripts/test-prototype-template.sh                 # nextjs, no layers
-#     scripts/test-prototype-template.sh nextjs ui       # nextjs + the ui layer
+#   tests/prototype-template.sh [template] [layer...]
+#     tests/prototype-template.sh                 # nextjs, no layers
+#     tests/prototype-template.sh nextjs ui       # nextjs + the ui layer
 #
 # Layers are tested one at a time against the base, never in combination:
 # they are required to be independent, so coverage is linear. If a combination

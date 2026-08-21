@@ -137,7 +137,7 @@ services:
   # stack on this host can be pointed away from it. The OAuth refresh token in
   # that file is single-use — whichever container refreshes it invalidates
   # every other copy, host included — so two stacks holding it is two chances
-  # to log the human out. scripts/test-fresh-install.sh therefore binds an
+  # to log the human out. tests/fresh-install.sh therefore binds an
   # empty throwaway file: the hook treats empty as "no Claude login", WARNs,
   # and exits 0.
   host-sync-claude:
@@ -789,7 +789,7 @@ services:
   # the resource is USED, not as the runtime failing to start. So a failed
   # provision degrades the scientist's database access (no DATABASE_URL /
   # VALKEY_URL in its profile .env) and the three `── devenv lease ──` checks
-  # in scripts/test-scientist.sh are the detector for that state.
+  # in tests/scientist.sh are the detector for that state.
   #
   # This one-shot applies the devenv control schema ITSELF before it
   # provisions, by sourcing the same /usr/local/bin/opc-devenv-seed.sh the
@@ -870,7 +870,7 @@ services:
                  echo "[devenv-expert-leases] WARNING: [devenv-seed] lines above this one say which)." >&2 ;;
               *) echo "[devenv-expert-leases] WARNING: see the provisioner output below for the cause." >&2 ;;
             esac
-            echo "[devenv-expert-leases] WARNING: Detector: 'scripts/test-scientist.sh' (the devenv lease block)." >&2
+            echo "[devenv-expert-leases] WARNING: Detector: 'tests/scientist.sh' (the devenv lease block)." >&2
             echo "[devenv-expert-leases] WARNING: Retry with 'docker compose up devenv-expert-leases' (idempotent)." >&2
             echo "[devenv-expert-leases] WARNING: Provisioner output:" >&2
             # Redact rather than drop: an error can legitimately quote a URL,

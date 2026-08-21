@@ -4,7 +4,7 @@
 # AGENTS.md's deployment assumption is that a clean machine does
 #   git clone <repo> && scripts/setup.sh
 # and ends up with a fully working stack: no migration script, no manual step.
-# Nothing in this repo ever PROVED that. scripts/audit-bootstrap.sh is a
+# Nothing in this repo ever PROVED that. tests/audit-bootstrap.sh is a
 # STATIC audit — it reads patches/ and docker-compose.yml and checks that
 # every piece of state names an automatic producer; its own header lists what
 # it cannot see (a producer that runs and does nothing, a producer that writes
@@ -18,10 +18,10 @@
 # own volumes, its own ports, its own Buzz relay. The live stack keeps
 # running and is never a target of any command here.
 #
-#   scripts/test-fresh-install.sh            # rehearse, then tear down
-#   scripts/test-fresh-install.sh --keep     # leave it up for inspection
-#   scripts/test-fresh-install.sh --clean    # tear down a leftover rehearsal
-#   scripts/test-fresh-install.sh --dry-run  # guards + clone + .env only, no build
+#   tests/fresh-install.sh            # rehearse, then tear down
+#   tests/fresh-install.sh --keep     # leave it up for inspection
+#   tests/fresh-install.sh --clean    # tear down a leftover rehearsal
+#   tests/fresh-install.sh --dry-run  # guards + clone + .env only, no build
 #
 # Slow and occasional, not CI: the first run builds every image and seeds an
 # empty nix store and four empty mise volumes (tens of minutes, ~10 GB of
@@ -171,7 +171,7 @@ fi
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="scripts/audit-bootstrap.sh scripts/test-connectivity.sh scripts/test-scientist.sh"
+GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/scientist.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
@@ -180,7 +180,7 @@ for g in $GATES; do
     # audit-bootstrap.sh is a pure file audit and reads no .env; the other two
     # drive a running stack and must resolve ports/project from the clone's.
     case "$g" in
-        scripts/audit-bootstrap.sh) ;;
+        tests/audit-bootstrap.sh) ;;
         *) grep -q 'opc_load_env \./\.env' "$REPO_ROOT/$g" || \
                die "$g does not load ./.env — it would not follow the clone's ports" ;;
     esac
@@ -458,18 +458,18 @@ if [ "$KEEP" = 1 ]; then
     echo "kept for inspection (--keep): $CLONE"
     echo "  board     http://$HOST:${TEST_PORT_OF[PAPERCLIP_PORT]}"
     echo "  dashboard http://$HOST:${TEST_PORT_OF[HERMES_DASHBOARD_PORT]}"
-    echo "  remove it: scripts/test-fresh-install.sh --clean"
+    echo "  remove it: tests/fresh-install.sh --clean"
 elif [ "$OVERALL" != 0 ]; then
     echo
     echo "⚠  rehearsal FAILED — the stack is left up so you can look at it:"
     echo "     cd $CLONE && docker compose logs <service>"
-    echo "   remove it when done: scripts/test-fresh-install.sh --clean"
+    echo "   remove it when done: tests/fresh-install.sh --clean"
 else
     teardown
     rm -rf "$SCRATCH_ROOT"
     echo "torn down; scratch removed. Rehearsal IMAGES are kept (they share"
     echo "almost every layer with the live stack's, and they make the next run"
-    echo "skip the build phase). 'scripts/test-fresh-install.sh --clean' drops them."
+    echo "skip the build phase). 'tests/fresh-install.sh --clean' drops them."
 fi
 
 exit "$OVERALL"

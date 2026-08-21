@@ -9,7 +9,7 @@
 #
 # WHAT THIS IS NOT. This suite is a STATIC audit of `patches/` and
 # `docker-compose.yml`. The rehearsal that actually proves the open-box claim
-# is `scripts/test-fresh-install.sh` — it clones this repo into its own
+# is `tests/fresh-install.sh` — it clones this repo into its own
 # compose project, ports and relay and runs `scripts/setup.sh` for real,
 # BESIDE the live stack (doing it in place would destroy the live community,
 # board, memories, prototypes and leases). Until that has been run, a green

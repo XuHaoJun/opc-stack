@@ -26,12 +26,12 @@ cp .env.example .env
 #            one canonical Buzz host = one community, enforced by NIP-42/98
 #            signature verification), so this is not just a device-access nice-to-have
 scripts/setup.sh          # same as: submodule init + prepare + up -d --build
-scripts/test-connectivity.sh
+tests/connectivity.sh
 ```
 
 `scripts/setup.sh` is idempotent — safe to re-run any time. It applies the
 patches (copies `patches/<proj>/` onto `upstream/<proj>/opc/`), builds all
-images, and brings the stack up. `test-connectivity.sh` probes every
+images, and brings the stack up. `tests/connectivity.sh` probes every
 service endpoint and the frontdoor→relay link without ever calling an LLM.
 
 > Note: after `docker compose down -v`, relay/agent keys, community,
@@ -39,7 +39,7 @@ service endpoint and the frontdoor→relay link without ever calling an LLM.
 > automatically by the one-shot bootstrap containers, with no manual signing
 > on a fresh install.
 >
-> **Evidence level: statically audited, not rehearsed.** `scripts/audit-bootstrap.sh`
+> **Evidence level: statically audited, not rehearsed.** `tests/audit-bootstrap.sh`
 > checks that every piece of that state has an unattended, idempotent producer
 > declared in `docker-compose.yml` or an entrypoint, and that nothing races it.
 > It is a grep suite over the source, not a run. The rehearsal that would
@@ -59,7 +59,7 @@ service endpoint and the frontdoor→relay link without ever calling an LLM.
 > machine will otherwise come up green on every check except one. Expert
 > agents (e.g. the scientist profile) sign into Buzz from the `hermes`
 > container, which cannot reach `ws://localhost:3000`, so
-> `scripts/test-scientist.sh`'s "is a relay member" check fails until you set
+> `tests/scientist.sh`'s "is a relay member" check fails until you set
 > a real `BUZZ_RELAY_URL` and recreate `buzz`/`frontdoor`/`hermes`. This is
 > not a regression — the previous default (`ws://buzz:3000`) was silently
 > non-canonical instead, which is worse — but it is a real manual step this
@@ -339,33 +339,33 @@ docker compose exec frontdoor hermes --version
 - Buzz has no web chat UI; conversation happens in the Buzz desktop/mobile
   clients against this relay.
 
-## Fresh-install rehearsal (`scripts/test-fresh-install.sh`)
+## Fresh-install rehearsal (`tests/fresh-install.sh`)
 
 The acceptance condition for this repo is the open-box one: a clean machine
 does `git clone` → `scripts/setup.sh` and gets a fully working stack, with no
-migration script and no manual step. `scripts/audit-bootstrap.sh` checks that
+migration script and no manual step. `tests/audit-bootstrap.sh` checks that
 claim **statically** — it greps `patches/` and `docker-compose.yml` and
 confirms every piece of state names an automatic, idempotent producer. That is
 evidence, not proof: it cannot see a producer that is never invoked, one that
 exits 0 having done nothing, or one that writes the wrong value.
 
-`scripts/test-fresh-install.sh` is the proof. It is the **only** thing in this
+`tests/fresh-install.sh` is the proof. It is the **only** thing in this
 repo that actually performs the open-box install, and it does it *beside* the
 live stack rather than on top of it — `docker compose down -v` here would
 destroy the real community, board, memories, prototypes and leases.
 
 ```bash
-scripts/test-fresh-install.sh             # rehearse, then tear down
-scripts/test-fresh-install.sh --keep      # leave it up to poke at
-scripts/test-fresh-install.sh --dry-run   # guards + clone + .env, no build
-scripts/test-fresh-install.sh --clean     # remove a leftover rehearsal
+tests/fresh-install.sh             # rehearse, then tear down
+tests/fresh-install.sh --keep      # leave it up to poke at
+tests/fresh-install.sh --dry-run   # guards + clone + .env, no build
+tests/fresh-install.sh --clean     # remove a leftover rehearsal
 ```
 
 What it does: clones this repo at `HEAD` into `/tmp/opc-fresh-install`
 (`--root` to move it), gives the clone its own compose project
 (`opc-rehearsal`), its own image prefix, every published port offset by
 `+1000` and its own Buzz relay, runs `scripts/setup.sh`, then runs
-`audit-bootstrap.sh`, `test-connectivity.sh` and `test-scientist.sh` **from
+`tests/audit-bootstrap.sh`, `tests/connectivity.sh` and `tests/scientist.sh` **from
 the clone**. On failure it leaves the stack up for diagnosis and tells you how
 to remove it; a re-run dismantles the previous one first, so it is safe to run
 twice.
@@ -405,10 +405,10 @@ rather than warning.
 ## 既有安裝: 啟用科學家 lane
 
 乾淨機器**應該不需要這段** —— 設計上 `scripts/setup.sh` 一次到位, 而這件事目前是
-**靜態稽核過的, 不是排練過的**: `scripts/audit-bootstrap.sh` 逐條確認每一份科學家狀態
+**靜態稽核過的, 不是排練過的**: `tests/audit-bootstrap.sh` 逐條確認每一份科學家狀態
 都有 compose one-shot 或 entrypoint 當非互動、冪等的產生者, 且沒有東西跟它搶 —— 但它
 是對原始碼 grep, 不是真的跑一次。真正的證明在**這台之外**跑:
-`scripts/test-fresh-install.sh` (上一節) 把 repo clone 到另一個 compose project 再走一次
+`tests/fresh-install.sh` (上一節) 把 repo clone 到另一個 compose project 再走一次
 `setup.sh`, 因為就地 `docker compose down -v` 會毀掉現在這台的
 community/board/memory/prototype/租約。所以: 稽核綠燈
 **抓不到**「產生者存在但根本沒被呼叫」「跑了、exit 0、什麼都沒做」「產生的值是錯的」
@@ -455,10 +455,10 @@ docker compose up --force-recreate buzz-bootstrap tencentdb-bootstrap paperclip-
 docker compose restart hermes
 
 # 5. 驗證
-scripts/test-connectivity.sh && scripts/test-scientist.sh
+tests/connectivity.sh && tests/scientist.sh
 ```
 
-`test-scientist.sh` 的「is a relay member」那條紅掉、其餘全綠時, 先看 `.env` 的
+`tests/scientist.sh` 的「is a relay member」那條紅掉、其餘全綠時, 先看 `.env` 的
 `BUZZ_RELAY_URL`: 還停在 `ws://localhost:3000` 預設值的安裝**一定**會紅在這一條, 而
 測試本身不會指出原因。科學家是從 `hermes` 容器簽進 Buzz 的, 那個容器不與 relay 共享
 network namespace, `localhost` 在它裡面指向自己。見上面 Quickstart 的

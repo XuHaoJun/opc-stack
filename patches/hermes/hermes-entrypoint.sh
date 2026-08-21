@@ -226,7 +226,7 @@ opc_key_is_usable() { # <value>
 }
 
 # opc_env_value <env-file> <name> — read one value out of a .env the way
-# hermes itself parses it. Lives in its own file because scripts/test-scientist.sh
+# hermes itself parses it. Lives in its own file because tests/scientist.sh
 # executes the same file as a CLI to read a profile's API_SERVER_KEY back out
 # of the running container; see the header of opc-env-value.sh.
 . /usr/local/bin/opc-env-value.sh
@@ -315,7 +315,7 @@ opc_seed_expert_profile() { # <profile-name> <api-key-value>
     # prints it. Before that, the function ended with an unconditional
     # "expert profile ready: $_p" that ran after a missing nsec, a rejected
     # API key, a failed cron seed and an empty lease — four different broken
-    # profiles all reporting ready. scripts/test-scientist.sh also greps for
+    # profiles all reporting ready. tests/scientist.sh also greps for
     # that exact string as the dashboard role gate's negative signal, so the
     # wording of the healthy case must not change.
     _degraded=""
@@ -706,7 +706,7 @@ PYEOF
     if [ -z "$_degraded" ]; then
         echo "[hermes] expert profile ready: $_p"
     else
-        echo "[hermes] WARNING expert profile DEGRADED: $_p —$_degraded (see the WARNINGs above; scripts/test-scientist.sh names the failing row)" >&2
+        echo "[hermes] WARNING expert profile DEGRADED: $_p —$_degraded (see the WARNINGs above; tests/scientist.sh names the failing row)" >&2
     fi
 }
 

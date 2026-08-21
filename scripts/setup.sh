@@ -3,7 +3,7 @@
 #   git clone <this repo> && cd <repo> && scripts/setup.sh
 #
 # Does: .env bootstrap → submodule init → apply patches → build → up.
-# Afterwards run scripts/test-connectivity.sh to verify the stack.
+# Afterwards run tests/connectivity.sh to verify the stack.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -52,4 +52,4 @@ docker compose up -d --build
 
 echo "── [5/5] done ──"
 echo "Stack is up. Verify connectivity:"
-echo "  scripts/test-connectivity.sh"
+echo "  tests/connectivity.sh"

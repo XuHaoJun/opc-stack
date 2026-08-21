@@ -69,7 +69,7 @@ memorized — this table is the starting hint list.
   migrations run automatically on boot; check new migrations in the diff.
   After a fresh-volume rebuild the community is NEW → re-run add-member
   (`buzz-bootstrap` one-shot handles it on first boot).
-- **hermes** — `scripts/test-scientist.sh` reaches INTO hermes internals and
+- **hermes** — `tests/scientist.sh` reaches INTO hermes internals and
   will break on an upgrade that moves them, with a red gate that looks like a
   scientist-lane regression rather than an upgrade artifact. Three couplings,
   all in that one script: it imports the PRIVATE functions
@@ -124,7 +124,7 @@ memorized — this table is the starting hint list.
 
 ## 6. Post-upgrade verification (per component)
 
-All: `scripts/test-connectivity.sh` (container health + HTTP probes +
+All: `tests/connectivity.sh` (container health + HTTP probes +
 frontdoor→relay link) + `docker compose logs --since 10m <svc>` scanned for
 `error|panic|fatal|migration`.
 

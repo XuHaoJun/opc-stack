@@ -18,5 +18,5 @@ backups/
 __pycache__/
 *.py[cod]
 
-# Node deps (acp-smoke-test.mjs runs inside the paperclip container, not here)
+# Node deps (tests/acp-smoke-test.mjs runs inside the paperclip container, not here)
 node_modules/

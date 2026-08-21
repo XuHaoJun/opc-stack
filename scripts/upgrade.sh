@@ -62,4 +62,4 @@ docker compose build ${SERVICES[$PROJ]}
 docker compose up -d ${SERVICES[$PROJ]}
 
 echo "── done: $PROJ → $TAG ──"
-echo "verify: scripts/test-connectivity.sh"
+echo "verify: tests/connectivity.sh"

@@ -2,14 +2,14 @@
 # Scientist expert lane — end-to-end gate.
 #
 # Grows task-by-task alongside docs/superpowers/plans/2026-08-20-scientist-expert-profile.md.
-# Run from the repo root against a running stack: scripts/test-scientist.sh
+# Run from the repo root against a running stack: tests/scientist.sh
 #
 # This repo has no unit-test framework; every check here is "run a command,
 # compare the output". Checks are ordered by layer (volume -> gateway ->
 # identity -> board) so the first failure tells you which layer broke.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-. "$(dirname "$0")/load-env.sh"; opc_load_env ./.env
+. "$(dirname "$0")/../scripts/load-env.sh"; opc_load_env ./.env
 
 PROFILE="agt-scientist"
 PASS=0
@@ -25,7 +25,7 @@ FAIL=0
 # fails the check, which reads as "the chief of staff's key leaked into the
 # dashboard" — the exact opposite of what happened. Wait for the key rather
 # than reporting a security failure that is really a clock.
-# Found by scripts/test-fresh-install.sh; invisible on a stack that has been
+# Found by tests/fresh-install.sh; invisible on a stack that has been
 # up for a while, which is every stack this gate had run against before.
 printf 'waiting for the front door to seed its identity '
 for _i in $(seq 1 60); do
@@ -172,7 +172,7 @@ check "agent uid can read its nsec" \
 # channels and every identity's list is `[]`. The old form asserted
 # `"channel_id"` and was therefore the one check in this file that no clean
 # machine could ever satisfy — it failed the first real open-box rehearsal
-# (scripts/test-fresh-install.sh) for a reason that is not a defect in the
+# (tests/fresh-install.sh) for a reason that is not a defect in the
 # stack. The channel half of the old assertion is not lost; it moved to the
 # row below, in a form that is also true when there are no channels yet.
 check "scientist is a relay member (the relay accepts its key)" \
