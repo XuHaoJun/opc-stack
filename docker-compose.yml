@@ -159,6 +159,16 @@ services:
       context: ./upstream/buzz
       dockerfile: opc/Dockerfile
       target: opc-relay
+      # nix-seed is this image's BASE (`FROM ${NIX_SEED_IMAGE} AS nix-seed`),
+      # and `depends_on` orders container START, not builds — compose hands the
+      # whole set to buildx bake as one parallel graph, so on a clean machine
+      # this FROM resolves before the nix-seed service has produced the image,
+      # falls through to the registry and dies with "pull access denied for
+      # <prefix>/nix-seed". Same edge, same fix as hermes' buzz-cli below: a
+      # named build context IS the dependency, and it shadows the same-named
+      # Dockerfile stage, so a manual `docker build` still works off the ARG.
+      additional_contexts:
+        nix-seed: "service:nix-seed"
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     image: ${IMAGE_PREFIX:-opc}/buzz:local
@@ -175,6 +185,10 @@ services:
       context: ./upstream/buzz
       dockerfile: opc/Dockerfile
       target: opc-relay
+      # Build-order edge for the nix seed — see buzz-keys above for why the
+      # `depends_on` is not one.
+      additional_contexts:
+        nix-seed: "service:nix-seed"
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     image: ${IMAGE_PREFIX:-opc}/buzz:local
@@ -261,6 +275,10 @@ services:
     build:
       context: ./upstream/buzz
       dockerfile: opc/Dockerfile
+      # Build-order edge for the nix seed — see buzz-keys above for why the
+      # `depends_on` is not one.
+      additional_contexts:
+        nix-seed: "service:nix-seed"
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     # ACP sidecar of the relay: shares its network namespace so the canonical
@@ -398,6 +416,10 @@ services:
       # image to pre-exist.
       additional_contexts:
         buzz-cli: "service:frontdoor"
+        # Same edge for the nix seed: `FROM ${NIX_SEED_IMAGE} AS nix-seed` needs
+        # an image that only the nix-seed service produces, and only a named
+        # context makes compose build it first.
+        nix-seed: "service:nix-seed"
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
         BUZZ_IMAGE: ${IMAGE_PREFIX:-opc}/frontdoor:local
@@ -599,6 +621,10 @@ services:
     build:
       context: ./upstream/paperclip
       dockerfile: opc/Dockerfile
+      # Build-order edge for the nix seed — see buzz-keys above for why the
+      # `depends_on` is not one.
+      additional_contexts:
+        nix-seed: "service:nix-seed"
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
     image: ${IMAGE_PREFIX:-opc}/paperclip:local
