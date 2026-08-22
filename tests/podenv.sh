@@ -18,6 +18,37 @@ check() {
     local label="$1"; shift
     if "$@" >/dev/null 2>&1; then pass "$label"; else fail "$label"; fi
 }
+# check_absent <label> <cmd...> — pass only when <cmd> (typically `cat` on a
+# file expected to be gone) fails BECAUSE THE FILE IS GENUINELY ABSENT, not
+# for any other reason. Bare `! cmd` (used here pre-fix) cannot tell "file
+# confirmed absent" apart from "could not even run the check" (e.g. the exec
+# target itself unreachable) — both are just "cmd exited nonzero," and the
+# latter must fail loudly rather than read as proof of absence (review F2).
+check_absent() {
+    local label="$1"; shift
+    local out rc
+    out="$("$@" 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'no such file'; then
+        pass "$label"
+    else
+        fail "$label (want: file absent, got rc=$rc output: $(printf '%s' "$out" | head -1))"
+    fi
+}
+# check_absent_from <label> <needle> <listing-cmd...> — pass only when the
+# listing itself ran (exit 0) AND does not contain <needle>. Bare
+# `! cmd | grep -q needle` (used here pre-fix) cannot tell "confirmed absent
+# from a real listing" apart from "the listing itself errored and printed
+# nothing" — both look like "grep found nothing" (review F2).
+check_absent_from() {
+    local label="$1" needle="$2"; shift 2
+    local out rc
+    out="$("$@" 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q -- "$needle"; then
+        pass "$label"
+    else
+        fail "$label (rc=$rc, needle '$needle' present or listing failed; output: $(printf '%s' "$out" | head -3))"
+    fi
+}
 # expect <label> <expected> <cmd...> — pass when stdout trims to <expected>.
 # NOTE: this only compares stdout, not the command's exit status — empty
 # stdout (e.g. because the command itself failed to run) reads the same as a
@@ -26,8 +57,19 @@ check() {
 # cannot match any expected value); use expect_ok instead when the command
 # can fail silently with empty stdout (docker compose exec against a stopped
 # container prints its error to stderr and exits non-zero with empty stdout).
+#
+# An EMPTY want is refused outright (mirrors tests/scientist.sh's checkout(),
+# which closed the identical class of bug there): "" equals both a
+# legitimately empty result AND the empty string a failed-to-run command
+# also produces, so a plain empty-want `expect` can pass for the wrong
+# reason and nothing here would ever show it. Use expect_empty instead — it
+# has the has-to-run guarantee built in.
 expect() {
     local label="$1" want="$2"; shift 2
+    if [ -z "$want" ]; then
+        fail "$label (BUG: empty wanted value passed to expect — use expect_empty)"
+        return
+    fi
     local got
     got="$("$@" 2>/dev/null | tr -d '\r' | tail -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     if [ "$got" = "$want" ]; then pass "$label"; else fail "$label (want '$want', got '$got')"; fi
@@ -38,6 +80,10 @@ expect() {
 # from "ran fine and printed nothing" — both give empty stdout.
 expect_ok() {
     local label="$1" want="$2"; shift 2
+    if [ -z "$want" ]; then
+        fail "$label (BUG: empty wanted value passed to expect_ok — use expect_empty)"
+        return
+    fi
     local got rc
     got="$("$@" 2>/dev/null)"; rc=$?
     got="$(printf '%s' "$got" | tr -d '\r' | tail -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
@@ -45,6 +91,23 @@ expect_ok() {
         pass "$label"
     else
         fail "$label (want '$want', got '$got', exit $rc)"
+    fi
+}
+# expect_empty <label> <cmd...> — the ONE sanctioned way to assert "stdout is
+# empty": requires the command to also have exited 0, so "genuinely printed
+# nothing" is distinguished from "failed to run and therefore printed
+# nothing" (the exact double-empty defect expect()/expect_ok() now refuse to
+# accept as a `want`). Route every legitimate empty-want check through this
+# instead (review F2).
+expect_empty() {
+    local label="$1"; shift
+    local got rc
+    got="$("$@" 2>/dev/null)"; rc=$?
+    got="$(printf '%s' "$got" | tr -d '\r' | tail -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ "$rc" -eq 0 ] && [ -z "$got" ]; then
+        pass "$label"
+    else
+        fail "$label (want empty, got '$got', exit $rc)"
     fi
 }
 
@@ -76,11 +139,11 @@ d=s.get("devices",[])
 print(",".join(x if isinstance(x,str) else x.get("source","?") for x in d))'
 expect "not privileged" "False" \
     podenv_field 'import json,sys; print(json.load(sys.stdin)["services"]["podenv"].get("privileged",False))'
-expect "no host bind mount" "" \
+expect_empty "no host bind mount" \
     podenv_field 'import json,sys
 s=json.load(sys.stdin)["services"]["podenv"]
 print(",".join(v.get("source","") for v in s.get("volumes",[]) if v.get("type")=="bind"))'
-expect "mounts no secret volume" "" \
+expect_empty "mounts no secret volume" \
     podenv_field 'import json,sys
 bad={"opc-keys","opc-gh-creds","opc-prototyper-home","frontdoor-hermes","hermes-profiles","hermes-data"}
 s=json.load(sys.stdin)["services"]["podenv"]
@@ -90,11 +153,35 @@ expect "port range is published on 127.0.0.1 only" "127.0.0.1" \
 s=json.load(sys.stdin)["services"]["podenv"]
 print(",".join(sorted({p.get("host_ip","") for p in s.get("ports",[])})))'
 
-# compose cannot do arithmetic, so the pool bounds are stated twice. The same
-# hazard is already documented for DEVENV_HTTP_PORT_RANGE_END.
-BASE="${PODENV_PORT_BASE:-23000}"; COUNT="${PODENV_PORT_COUNT:-16}"
-END="${PODENV_PORT_RANGE_END:-23015}"
-expect "PODENV_PORT_RANGE_END == BASE + COUNT - 1" "$((BASE + COUNT - 1))" echo "$END"
+# compose cannot do arithmetic, so the pool bounds are stated twice: once in
+# paperclip's PODENV_PORT_BASE/COUNT/RANGE_END environment (which the CLI
+# reads) and once in podenv's own `ports:` publish range. The same hazard is
+# already documented for DEVENV_HTTP_PORT_RANGE_END.
+#
+# Review F2: this used to fall back to the TEST'S OWN literals
+# (${PODENV_PORT_BASE:-23000} etc.) when the shell environment did not carry
+# these vars — which it never does, since the live .env defines no PODENV_
+# vars at all. That compared 23015 with 23015 unconditionally and never once
+# read docker-compose.yml, the exact drift this check exists to catch. Read
+# both real operands from the RESOLVED compose config instead — paperclip's
+# environment block (what the CLI actually sees) and podenv's published
+# `ports:` (what docker actually opened) — via the same podenv_field/
+# CONF_JSON machinery the structure checks above already use.
+BASE="$(podenv_field 'import json,sys
+print(json.load(sys.stdin)["services"]["paperclip"]["environment"].get("PODENV_PORT_BASE",""))')"
+COUNT="$(podenv_field 'import json,sys
+print(json.load(sys.stdin)["services"]["paperclip"]["environment"].get("PODENV_PORT_COUNT",""))')"
+END="$(podenv_field 'import json,sys
+print(json.load(sys.stdin)["services"]["paperclip"]["environment"].get("PODENV_PORT_RANGE_END",""))')"
+PUB_RANGE="$(podenv_field 'import json,sys
+p=json.load(sys.stdin)["services"]["podenv"].get("ports",[])
+t=sorted(int(x["target"]) for x in p)
+print(f"{t[0]}-{t[-1]}" if t else "")')"
+
+expect "paperclip's PODENV_PORT_RANGE_END == BASE + COUNT - 1 (from docker-compose.yml, not test literals)" \
+    "$((BASE + COUNT - 1))" echo "$END"
+expect "podenv's published port range matches paperclip's BASE..RANGE_END (from docker-compose.yml)" \
+    "${BASE}-${END}" echo "$PUB_RANGE"
 check "port base is below the ephemeral range" test "$BASE" -lt 32768
 
 echo "── live ──"
@@ -126,7 +213,7 @@ if [ "$_node_rc" -eq 0 ] && [ "$_sock_rc" -eq 0 ] && [ -n "$_node_uid" ] && [ "$
 else
     fail "socket owner uid == paperclip node uid (want '$_node_uid' [rc=$_node_rc], got '$_sock_uid' [rc=$_sock_rc])"
 fi
-expect_ok "self-test left no diagnosis" "" \
+expect_empty "self-test left no diagnosis" \
     docker compose exec -T podenv cat /run/podenv/diagnosis
 expect "nested podman run works" "NESTED_OK" \
     docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
@@ -330,8 +417,8 @@ expect "a hostile --image is rejected at exit 2, not accepted (F1b)" "2" \
     docker compose exec -T -u node paperclip sh -c \
     'podenv provision f1-image-gate --image "evil\$(true)image" --port 80 >/dev/null 2>&1; echo $?'
 
-check "the rejected hostile image never created a row (F1b)" \
-    sh -c '! docker compose exec -T -u node paperclip podenv list 2>&1 | grep -q f1-image-gate'
+check_absent_from "the rejected hostile image never created a row (F1b)" f1-image-gate \
+    docker compose exec -T -u node paperclip podenv list
 
 # F3a: a container that exists but fails to (re)start must be reported as a
 # failure, not printed as success. Set up the exact scenario by hand: create
@@ -356,19 +443,22 @@ expect "a failed (re)start is reported as a failure, not success (F3a)" "5" \
     docker compose exec -T -u node paperclip sh -c \
     'podenv provision f3-gate --image docker.io/library/alpine:3.20 --port 80 --as F3_GATE_ADDR --env-file /tmp/f3-gate.env >/dev/null 2>&1; echo $?'
 
-check "the failed start wrote no stale .env entry (F3a)" \
-    sh -c '! docker compose exec -T -u node paperclip cat /tmp/f3-gate.env >/dev/null 2>&1'
+check_absent "the failed start wrote no stale .env entry (F3a)" \
+    docker compose exec -T -u node paperclip cat /tmp/f3-gate.env
 
 # Cleanup: this key's row pre-dated the call (created_now=0), so the fix's
 # rollback trap correctly leaves it in place (F3b: never tear down a
 # pre-existing lease just because a later step had a bad day) — release it
 # by hand instead, same as an operator would.
-check "F3a gate lease and container clean up" \
-    docker compose exec -T -u node paperclip sh -c \
+# Not wrapped in `check`: everything here is already `|| true`'d and ends in
+# `true`, so a `check` wrapper could never fail regardless of whether the
+# release actually happened — the exact vacuous-check shape review F2 flags,
+# and a silently failed release here would leak a lease into later runs.
+# Bare cleanup, same convention as the sibling cleanups elsewhere in this file.
+docker compose exec -T -u node paperclip sh -c \
     'podenv release f3-gate >/dev/null 2>&1
      podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f3_gate >/dev/null 2>&1
-     rm -f /tmp/f3-gate.env
-     true'
+     rm -f /tmp/f3-gate.env' >/dev/null 2>&1
 
 echo "── devenv coexistence ──"
 
@@ -398,9 +488,13 @@ expect "route gate refuses an image devenv already serves" "refused" \
     docker compose exec -T -u node paperclip sh -c \
     'out=$(podenv provision legacy-cache --image docker.io/library/redis:5 --port 6379 2>&1); rc=$?
      [ "$rc" = 2 ] && echo "$out" | grep -q "devenv provision" && echo refused || echo "rc=$rc out=$out"'
+# Review F8: `postgres:9.6` (full, ~206MB) → `postgres:9.6-alpine` (a few
+# tens of MB) — this is the one legitimate-dedicated-use check that genuinely
+# needs a real postgres-family pull-and-start (not a refused call), so use
+# the smallest tag that actually exists rather than the default full image.
 expect "--dedicated opens the gate and the reason is persisted" "pg9.6 client API" \
     docker compose exec -T -u node paperclip sh -c \
-    'podenv provision legacy-pg --image docker.io/library/postgres:9.6 --port 5432 \
+    'podenv provision legacy-pg --image docker.io/library/postgres:9.6-alpine --port 5432 \
         --dedicated "pg9.6 client API" --password-env POSTGRES_PASSWORD \
         --env-file /tmp/podenv-dedicated.env >/dev/null 2>&1
      podenv list 2>/dev/null | grep -o "pg9.6 client API" | head -1'
@@ -437,13 +531,25 @@ expect "route gate catches an uppercase local tag (F1)" "refused" \
 # are asserted NOT gated; whether podman itself can start them here is
 # irrelevant to this gate, so this only fails "gated" if the route gate's
 # refusal message shows up, not on any downstream podman error.
+#
+# Review F8: this used to use the REAL mysql:5.7 (520MB) and REAL
+# milvus/milvus:v2.5.0 (1.7GB, by far the single largest thing ever in the
+# gate's podman store) tags. Neither pull needs to actually SUCCEED for this
+# check — the route gate's family parsing only reads the `--image` string
+# (repo name before `:`/`@`), which is identical whether the tag exists or
+# not, and podman correctly reaching the registry and getting a 404 is
+# already proof this "reached podman, a real attempt, not a stub" — so a
+# deliberately-nonexistent tag on the same repo name exercises the exact
+# same route-gate code path for a manifest-lookup's worth of network traffic
+# instead of a multi-hundred-MB/multi-GB download, and never leaves an image
+# behind in the store either.
 expect "route gate does NOT fire for MySQL — devenv does not serve it (F1)" "not-gated" \
     docker compose exec -T -u node paperclip sh -c \
-    'out=$(podenv provision f1-neg-mysql --image mysql:5.7 --port 3306 --env-file /tmp/podenv-f1-neg-mysql.env 2>&1); rc=$?
+    'out=$(podenv provision f1-neg-mysql --image mysql:0.0.0-podenv-gate-nonexistent --port 3306 --env-file /tmp/podenv-f1-neg-mysql.env 2>&1); rc=$?
      if [ "$rc" = 2 ] && echo "$out" | grep -q "devenv already serves"; then echo gated; else echo not-gated; fi'
 expect "route gate does NOT fire for Milvus — devenv does not serve it (F1)" "not-gated" \
     docker compose exec -T -u node paperclip sh -c \
-    'out=$(podenv provision f1-neg-milvus --image milvus/milvus:v2.5.0 --port 19530 --env-file /tmp/podenv-f1-neg-milvus.env 2>&1); rc=$?
+    'out=$(podenv provision f1-neg-milvus --image milvus/milvus:v0.0.0-podenv-gate-nonexistent --port 19530 --env-file /tmp/podenv-f1-neg-milvus.env 2>&1); rc=$?
      if [ "$rc" = 2 ] && echo "$out" | grep -q "devenv already serves"; then echo gated; else echo not-gated; fi'
 
 # (F2) the lookup must be a string compare, not a sed/grep PATTERN match: a
@@ -613,20 +719,19 @@ expect "a die-immediately image fails provision loudly, not exit 0 (F1 create pa
 check "the failure message points at 'podman logs' (F1 create path)" \
     sh -c "docker compose exec -T -u node paperclip cat /tmp/podenv-f1-create.out 2>&1 | grep -q 'podman logs'"
 
-check "the failed create wrote no stale .env entry (F1 create path)" \
-    sh -c '! docker compose exec -T -u node paperclip cat /tmp/podenv-f1-create.env >/dev/null 2>&1'
+check_absent "the failed create wrote no stale .env entry (F1 create path)" \
+    docker compose exec -T -u node paperclip cat /tmp/podenv-f1-create.env
 
 # The whole point of arming the EXIT trap before container creation: a
 # provision THIS invocation failed must not leave a registry row behind —
 # `podenv list` showing a lease for a container that never ran is exactly
 # the defect class the last two review rounds were about.
-check "the die-immediately lease left no registry row behind (F1 create path)" \
-    sh -c '! docker compose exec -T -u node paperclip podenv list 2>&1 | grep -q f1-create-gate'
+check_absent_from "the die-immediately lease left no registry row behind (F1 create path)" f1-create-gate \
+    docker compose exec -T -u node paperclip podenv list
 
-check "the die-immediately lease left no container behind (F1 create path)" \
-    sh -c '! docker compose exec -T -u node paperclip sh -c \
-        "podman --remote --url unix:///run/podenv/podman.sock ps -a --format \"{{.Names}}\"" 2>&1 \
-        | grep -q podenv_f1_create_gate'
+check_absent_from "the die-immediately lease left no container behind (F1 create path)" podenv_f1_create_gate \
+    docker compose exec -T -u node paperclip sh -c \
+    'podman --remote --url unix:///run/podenv/podman.sock ps -a --format "{{.Names}}"'
 
 docker compose exec -T -u node paperclip sh -c \
     'rm -f /tmp/podenv-f1-create.env /tmp/podenv-f1-create.out' >/dev/null 2>&1
@@ -664,15 +769,25 @@ check "a bare TCP connect succeeds anyway (measured pasta forwarder behaviour, F
 # it to run, so it says so explicitly rather than relying on the old
 # execute-vs-source ambiguity.
 _f2_restore_line="$(docker compose exec -T podenv sh -c 'PODENV_RESTORE_RUN=1 /usr/local/bin/opc-podenv-restore.sh' 2>&1 | grep podenv_f2_probe | tail -1)"
-if printf '%s\n' "$_f2_restore_line" | grep -q '^\[podenv-restore\] restored podenv_f2_probe'; then
-    fail "opc-podenv-restore.sh must not report this lease as restored — nothing answers (F2) (got: $_f2_restore_line)"
+# Review F2 (re-check): if the restore script itself never ran (socket not
+# up yet, the exec target unreachable, an unrelated crash), grep above finds
+# nothing and $_f2_restore_line is empty — and BOTH assertions below would
+# then take their "else" branch and print "pass", a could-not-look false
+# pass indistinguishable from "ran and behaved honestly". Require the line
+# to exist before trusting either assertion.
+if [ -z "$_f2_restore_line" ]; then
+    fail "opc-podenv-restore.sh produced no line at all for podenv_f2_probe (F2) — could not check its wording; it may not have run"
 else
-    pass "opc-podenv-restore.sh does not claim success for a lease that never exchanges data (F2)"
-fi
-if printf '%s\n' "$_f2_restore_line" | grep -qi 'answer'; then
-    fail "opc-podenv-restore.sh's wording still claims the port 'answers' — the exact overclaim F2 is about (got: $_f2_restore_line)"
-else
-    pass "opc-podenv-restore.sh's wording no longer claims the port 'answers' (F2)"
+    if printf '%s\n' "$_f2_restore_line" | grep -q '^\[podenv-restore\] restored podenv_f2_probe'; then
+        fail "opc-podenv-restore.sh must not report this lease as restored — nothing answers (F2) (got: $_f2_restore_line)"
+    else
+        pass "opc-podenv-restore.sh does not claim success for a lease that never exchanges data (F2)"
+    fi
+    if printf '%s\n' "$_f2_restore_line" | grep -qi 'answer'; then
+        fail "opc-podenv-restore.sh's wording still claims the port 'answers' — the exact overclaim F2 is about (got: $_f2_restore_line)"
+    else
+        pass "opc-podenv-restore.sh's wording no longer claims the port 'answers' (F2)"
+    fi
 fi
 
 # task-5 (gate flake): the check above relies on the same natural flake it is
@@ -726,11 +841,16 @@ expect "reprovision on a running-but-unbound lease fails loudly, not exit 0 (F2)
     'podenv provision f2-probe --image docker.io/library/alpine:3.20 --port 80 \
         --as F2_PROBE_ADDR --env-file /tmp/podenv-f2.env >/tmp/podenv-f2.out 2>&1; echo $?'
 
-check "the failed reprovision wrote no stale .env entry (F2)" \
-    sh -c '! docker compose exec -T -u node paperclip cat /tmp/podenv-f2.env >/dev/null 2>&1'
+check_absent "the failed reprovision wrote no stale .env entry (F2)" \
+    docker compose exec -T -u node paperclip cat /tmp/podenv-f2.env
 
-check "the reprovision failure message does not claim the port 'answers' (F2)" \
-    sh -c "! docker compose exec -T -u node paperclip cat /tmp/podenv-f2.out 2>&1 | grep -qi 'never answered'"
+# Review F2: this used to assert `! grep -qi 'never answered'` — a string
+# that exists NOWHERE in the product (the real message says "never
+# exchanged any data after 30s"), so the assertion was unconditionally true
+# AND inverted; it could never fail regardless of what the CLI actually
+# printed. Assert the HONEST wording positively instead.
+check "the reprovision failure message uses the honest wording, not an overclaim (F2)" \
+    sh -c "docker compose exec -T -u node paperclip cat /tmp/podenv-f2.out 2>&1 | grep -qi 'never exchanged any data after 30s'"
 
 # Cleanup. This key's row pre-dated the call (created_now=0 — it was
 # inserted by hand above, the same as the F3-gate section), so the rollback
@@ -882,6 +1002,13 @@ expect "the --netns host lease carries the opc.podenv.port label (F1)" "8099" \
 # measured run), so the expectation has to be the port this run actually
 # got, read the same way a probe would: from the address podenv itself just
 # wrote to the .env file above.
+#
+# Review F2 (re-check): if the provision above never actually wrote
+# F1HOST_PASTA_ADDR, `_f1h_pasta_addr` is empty and `${_f1h_pasta_addr##*:}`
+# is empty too — a verbatim recurrence of the socket-uid double-empty defect
+# documented above (a computed `want` that can itself be empty). expect()'s
+# empty-want guard (added this round) now refuses that outright instead of
+# comparing two empty strings and calling it a match.
 expect "the pasta lease carries the opc.podenv.port label too (F1)" "${_f1h_pasta_addr##*:}" \
     docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
     podman inspect podenv_f1host_pasta --format '{{ index .Config.Labels "opc.podenv.port" }}'
@@ -895,7 +1022,28 @@ for i in $(seq 1 30); do
     docker compose exec -T podenv test -S /run/podenv/podman.sock >/dev/null 2>&1 && break
     sleep 2
 done
-sleep 10
+
+# Review F7 (a hypothesis for the unexplained 95/1 flake, closed here as a
+# plausible mechanism — NOT confirmed, this was never reproduced): this used
+# to be a flat `sleep 10` after the socket reappears, immediately followed by
+# a single-shot assertion that both leases serve. The restore pass's own
+# worst case is ~35s PER LEASE (5s stop grace + up to 30s probe), and
+# opc-podenv-restore.sh's loop handles the two leases here one at a time —
+# so a flat 10s margin is nowhere near the ~70s worst case, while every
+# OTHER restore assertion in this file already uses a bounded retry
+# (podenv_restore_probe above polls 45x2s). This was the one outlier still
+# using a fixed sleep instead. Poll for both instead: deterministic, bounded,
+# and cheap in the common case (both usually already answer well inside the
+# bound).
+_pasta_code=""; _host_code=""
+for i in $(seq 1 45); do
+    _pasta_code="$(docker compose exec -T -u node paperclip sh -c \
+        "curl -s -o /dev/null -w '%{http_code}' --max-time 3 'http://$_f1h_pasta_addr/'" 2>/dev/null | tr -d '\r')"
+    _host_code="$(docker compose exec -T -u node paperclip sh -c \
+        "curl -s -o /dev/null -w '%{http_code}' --max-time 3 'http://$_f1h_host_addr/'" 2>/dev/null | tr -d '\r')"
+    [ "$_pasta_code" = "200" ] && [ "$_host_code" = "200" ] && break
+    sleep 2
+done
 
 # (a) revived and genuinely serving again — see the corrected header
 # comment above for why "undisturbed" is not the property being asserted
@@ -903,12 +1051,16 @@ sleep 10
 # the actual-data-exchange requirement: pasta's forwarder alone (nothing
 # behind it) cannot produce one, so this cannot pass against a lease that
 # only "looks" alive.
-expect_ok "the pasta lease still serves after the restart (F1)" "200" \
-    docker compose exec -T -u node paperclip sh -c \
-    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1h_pasta_addr/'"
-expect_ok "the --netns host lease still serves after the restart (F1)" "200" \
-    docker compose exec -T -u node paperclip sh -c \
-    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1h_host_addr/'"
+if [ "$_pasta_code" = "200" ]; then
+    pass "the pasta lease still serves after the restart (F1)"
+else
+    fail "the pasta lease still serves after the restart (F1) (want http_code 200, got '$_pasta_code')"
+fi
+if [ "$_host_code" = "200" ]; then
+    pass "the --netns host lease still serves after the restart (F1)"
+else
+    fail "the --netns host lease still serves after the restart (F1) (want http_code 200, got '$_host_code')"
+fi
 
 # Second half: break the --netns host lease FOR REAL (kill its process,
 # leaving podman's own container bookkeeping to notice on its own — the
@@ -917,9 +1069,20 @@ expect_ok "the --netns host lease still serves after the restart (F1)" "200" \
 docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
     podman kill -s KILL podenv_f1host_host >/dev/null 2>&1
 
-check "the --netns host lease is genuinely dead after the kill (setup sanity, F1)" \
-    sh -c "! docker compose exec -T -u node paperclip sh -c \
-        \"curl -s -o /dev/null --max-time 3 'http://$_f1h_host_addr/'\""
+# Review F2: a bare `! curl ...` cannot tell "genuinely refused" apart from
+# "docker compose exec itself never even ran curl" — both exit nonzero.
+# curl's `-w '%{http_code}'` always prints something, and prints the literal
+# sentinel "000" specifically for "no response was received" (never a real
+# status line), which a broken exec path cannot produce (its failure lands
+# on stderr, discarded here, with empty stdout). Requiring the exact "000"
+# instead of a bare nonzero exit closes that gap.
+_f1h_dead_code="$(docker compose exec -T -u node paperclip sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 3 'http://$_f1h_host_addr/'" 2>/dev/null | tr -d '\r')"
+if [ "$_f1h_dead_code" = "000" ]; then
+    pass "the --netns host lease is genuinely dead after the kill (setup sanity, F1)"
+else
+    fail "the --netns host lease is genuinely dead after the kill (setup sanity, F1) (want http_code '000', got '$_f1h_dead_code')"
+fi
 
 _f1h_revive_line="$(docker compose exec -T podenv sh -c 'PODENV_RESTORE_RUN=1 /usr/local/bin/opc-podenv-restore.sh' 2>&1 | grep podenv_f1host_host | tail -1)"
 
@@ -1014,19 +1177,129 @@ check "the fallback lease is genuinely RUNNING (setup sanity)" \
 
 _f1_nolabel_line="$(docker compose exec -T podenv sh -c 'PODENV_RESTORE_RUN=1 /usr/local/bin/opc-podenv-restore.sh' 2>&1 | grep podenv_f1_nolabel_host | tail -1)"
 
-if printf '%s\n' "$_f1_nolabel_line" | grep -q '^\[podenv-restore\] restored podenv_f1_nolabel_host'; then
-    fail "opc-podenv-restore.sh must not claim a label-less --netns host lease as restored — it has no port to probe (F1 fallback) (got: $_f1_nolabel_line)"
+# Same could-not-look guard as the F2 recheck above: an empty line here means
+# the restore script produced nothing for this container at all (it may not
+# have run), and the first assertion's "else" branch would otherwise read
+# that as "pass" — a false pass indistinguishable from "ran and behaved".
+if [ -z "$_f1_nolabel_line" ]; then
+    fail "opc-podenv-restore.sh produced no line at all for podenv_f1_nolabel_host (F1 fallback) — could not check its wording; it may not have run"
 else
-    pass "opc-podenv-restore.sh does not claim success for a label-less --netns host lease it cannot probe (F1 fallback)"
-fi
-if printf '%s\n' "$_f1_nolabel_line" | grep -qi 'cannot verify liveness by probing'; then
-    pass "opc-podenv-restore.sh reports the label-less --netns host lease honestly as unprobeable (F1 fallback)"
-else
-    fail "opc-podenv-restore.sh's wording for the label-less case is missing or changed (F1 fallback) (got: $_f1_nolabel_line)"
+    if printf '%s\n' "$_f1_nolabel_line" | grep -q '^\[podenv-restore\] restored podenv_f1_nolabel_host'; then
+        fail "opc-podenv-restore.sh must not claim a label-less --netns host lease as restored — it has no port to probe (F1 fallback) (got: $_f1_nolabel_line)"
+    else
+        pass "opc-podenv-restore.sh does not claim success for a label-less --netns host lease it cannot probe (F1 fallback)"
+    fi
+    if printf '%s\n' "$_f1_nolabel_line" | grep -qi 'cannot verify liveness by probing'; then
+        pass "opc-podenv-restore.sh reports the label-less --netns host lease honestly as unprobeable (F1 fallback)"
+    else
+        fail "opc-podenv-restore.sh's wording for the label-less case is missing or changed (F1 fallback) (got: $_f1_nolabel_line)"
+    fi
 fi
 
 docker compose exec -T -u node paperclip sh -c \
     'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f1_nolabel_host >/dev/null 2>&1'
+
+echo "── task-7: reprovision refuses a changed lease identity (F1) ──"
+
+# Final review F1 (the seventh occurrence in this branch of "reports success
+# while the thing is dead or is not what you asked for"): the existing-lease
+# branch of cmd_provision used to touch ONLY last_seen_at — every other
+# parameter from THIS call (image, port, netns, --as) was silently accepted,
+# and the .env write further down used THIS call's --as regardless of what
+# the lease was actually created with. RED-proved live by the reviewer:
+#   podenv provision review-drift --image traefik/whoami --port 80   --as WHOAMI_ADDR
+#   podenv provision review-drift --image nginx:alpine   --port 8080 --as NGINX_ADDR
+# both exited 0; the container stayed traefik/whoami on its original port,
+# and .env gained NGINX_ADDR=podenv:<port> — a variable named for nginx that
+# actually serves whoami. Reproduce that exact sequence here.
+docker compose exec -T -u node paperclip sh -c 'rm -f /tmp/podenv-f1drift.env /tmp/podenv-f1drift.out'
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision review-drift --image docker.io/traefik/whoami --port 80 \
+        --as WHOAMI_ADDR --env-file /tmp/podenv-f1drift.env' >/dev/null 2>&1
+
+_f1drift_image_before="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_review_drift --format '{{.Config.Image}}' 2>/dev/null | tr -d '\r')"
+
+expect "a changed image+port+--as on reprovision is refused, not silently accepted (F1)" "2" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision review-drift --image docker.io/library/nginx:alpine --port 8080 \
+        --as NGINX_ADDR --env-file /tmp/podenv-f1drift.env >/tmp/podenv-f1drift.out 2>&1; echo $?'
+
+check "the refusal names what the lease already holds and how to fix it (F1)" \
+    sh -c "docker compose exec -T -u node paperclip sh -c \
+        'grep -qi \"already holds\" /tmp/podenv-f1drift.out && grep -qi \"release\" /tmp/podenv-f1drift.out'"
+
+# The container must never have been touched by the refused call — not the
+# image swapped, not even a probe/stop/start attempted against it. Since the
+# route gate does not cover nginx, reaching podman at all here would mean
+# the identity check fired too late (or not before podenv_provision_alive).
+check "the container is still the original image, never swapped or pulled over (F1)" \
+    sh -c "docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+        podman inspect podenv_review_drift --format '{{.Config.Image}}' 2>/dev/null | tr -d '\r' \
+        | grep -qF \"$_f1drift_image_before\""
+
+check_absent_from "the refused reprovision did not write the new variable name into .env (F1)" "NGINX_ADDR=" \
+    docker compose exec -T -u node paperclip cat /tmp/podenv-f1drift.env
+
+expect "re-running with IDENTICAL parameters stays exit 0 (F1 regression guard — refusal only fires on an actual mismatch)" "0" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision review-drift --image docker.io/traefik/whoami --port 80 \
+        --as WHOAMI_ADDR --env-file /tmp/podenv-f1drift.env >/dev/null 2>&1; echo $?'
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release review-drift >/dev/null 2>&1; rm -f /tmp/podenv-f1drift.env /tmp/podenv-f1drift.out' >/dev/null 2>&1
+
+echo "── task-7: --netns host reprovision refuses a changed --port before probing/disrupting (F1 destructive sub-case) ──"
+
+# The destructive sub-case named in the review: under --netns host, hport
+# equals THIS call's --port verbatim (no remapping to correct it — see the
+# hport=cport comment in cmd_provision). Pre-fix, a reprovision with a
+# typo'd --port made podenv_provision_alive probe a port nothing serves;
+# probe-first then saw "nothing answering" and stopped+started a HEALTHY
+# stateful daemon before exiting 5 — a bounced database for a typo. The
+# identity check must fire BEFORE podenv_provision_alive is ever called, so
+# a healthy lease's StartedAt+pid must be completely untouched by the
+# refusal.
+docker compose exec -T -u node paperclip sh -c 'rm -f /tmp/podenv-f1drift-host.env'
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1drift-host --image docker.io/traefik/whoami --port 8097 \
+        --netns host --env WHOAMI_PORT_NUMBER=8097 \
+        --as F1DRIFTHOST_ADDR --env-file /tmp/podenv-f1drift-host.env' >/dev/null 2>&1
+
+_f1dh_addr="$(docker compose exec -T -u node paperclip sh -c \
+    'grep "^F1DRIFTHOST_ADDR=" /tmp/podenv-f1drift-host.env | cut -d= -f2-' 2>/dev/null | tr -d '\r')"
+
+expect_ok "the --netns host lease genuinely serves before the mismatched reprovision (F1 precondition)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "[ -n '$_f1dh_addr' ] || exit 1
+     curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1dh_addr/'"
+
+_f1dh_before="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_f1drift_host --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+
+expect "a changed --port on a --netns host reprovision is refused, not probed against the wrong port (F1)" "2" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1drift-host --image docker.io/traefik/whoami --port 9999 \
+        --netns host --env WHOAMI_PORT_NUMBER=8097 \
+        --as F1DRIFTHOST_ADDR --env-file /tmp/podenv-f1drift-host.env >/dev/null 2>&1; echo $?'
+
+_f1dh_after="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_f1drift_host --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+
+if [ -n "$_f1dh_before" ] && [ -n "$_f1dh_after" ] && [ "$_f1dh_before" = "$_f1dh_after" ]; then
+    pass "the refusal happened before any probe/disrupt — StartedAt+pid unchanged (F1 destructive sub-case closed)"
+else
+    fail "the refused reprovision still disrupted a healthy --netns host lease — StartedAt+pid changed from '$_f1dh_before' to '$_f1dh_after' (F1 destructive sub-case NOT closed)"
+fi
+
+expect_ok "the --netns host lease still serves after the refused reprovision (F1)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1dh_addr/'"
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release f1drift-host >/dev/null 2>&1; rm -f /tmp/podenv-f1drift-host.env' >/dev/null 2>&1
 
 echo "── skill ──"
 
