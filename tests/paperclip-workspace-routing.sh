@@ -675,7 +675,7 @@ assert_eq "idempotent concurrent helper IDs match" \
   "$(jq -r '.id' "$TMPDIR/prototype-concurrent-a.json")" \
   "$(jq -r '.id' "$TMPDIR/prototype-concurrent-b.json")"
 stop_fixture
-cat >"$STATE" <<'JSON'
+cat >"$STATE" <<JSON
 {
   "experimental": {"enableIsolatedWorkspaces": false},
   "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
@@ -714,7 +714,7 @@ cat >"$STATE" <<'JSON'
       "title": "Prototype: terminal-bot",
       "description": "fresh same-scope title",
       "status": "todo",
-      "createdAt": "2030-01-01T00:00:00+00:00"
+      "createdAt": "$(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%S+00:00')"
     }
   ]
 }
