@@ -337,7 +337,7 @@ live_gate() {
 
   repo="https://github.com/opc-fixture/workspace-routing-$(date +%s)-$$"
   ticket="$(printf '%s\n' "$LIVE_MARKER engineering backlog fixture" | "$CLI" engineering-ticket create \
-    --repo "$repo" --title 'workspace routing fixture' --status backlog)" || {
+    --repo "$repo" --title "$LIVE_MARKER workspace routing fixture" --status backlog)" || {
     bad "create test-owned backlog engineering ticket"
     return 1
   }
@@ -364,8 +364,8 @@ live_gate() {
   assert_eq "backlog ticket inherits project policy" inherit \
     "$(printf '%s' "$issue_json" | jq -r '.executionWorkspaceSettings.mode // .executionWorkspacePreference // empty')"
   second="${repo/github.com\/opc-fixture/github.com\/OPC-FIXTURE}"
-  ticket="$(printf 'Workspace routing fixture second form.\n' | "$CLI" engineering-ticket create \
-    --repo "$second" --title 'workspace routing fixture second' --status backlog)" || {
+  ticket="$(printf 'Workspace routing fixture second.\n' | "$CLI" engineering-ticket create \
+    --repo "$second" --title "$LIVE_MARKER workspace routing fixture second" --status backlog)" || {
     bad "create second-form engineering ticket"
   }
   issue_second="$(printf '%s' "$ticket" | jq -r '.id // empty')"
@@ -772,6 +772,45 @@ printf x | "$CLI" engineering-ticket create \
 assert_eq "canonical-equivalent ticket reuses project" "1" \
   "$(jq '[.projects[] | select(.primaryWorkspace.repoUrl == "https://github.com/owner/repo")] | length' "$STATE")"
 assert_eq "two tickets persisted" "2" "$(jq '.issues | length' "$STATE")"
+stop_fixture
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["projects"].append({
+    "id": "00000000-0000-4000-8000-000000000151",
+    "name": "Unrelated Project",
+    "primaryWorkspace": {
+        "id": "00000000-0000-4000-8000-000000000251",
+        "repoUrl": "https://github.com/other/unrelated",
+        "isPrimary": True,
+    },
+    "workspaces": [{
+        "id": "00000000-0000-4000-8000-000000000251",
+        "repoUrl": "https://github.com/other/unrelated",
+        "isPrimary": True,
+    }],
+})
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+printf x | "$CLI" engineering-ticket create --repo Owner/NewRepo --title unrelated-project-regression >/dev/null
+assert_eq "unrelated project does not block registration" "1" \
+  "$(jq '[.projects[] | select(.primaryWorkspace.repoUrl == "https://github.com/owner/newrepo")] | length' "$STATE")"
+assert_eq "unrelated-project ticket persisted" "3" "$(jq '.issues | length' "$STATE")"
+NO_MATCH_ERR="$TMPDIR/no-match.err"
+if "$CLI" project workspace show --repo Owner/Missing >/dev/null 2>"$NO_MATCH_ERR"; then
+  bad "no-match project lookup fails closed"
+else
+  ok "no-match project lookup fails closed"
+fi
+assert_contains "no-match project error is actionable" "no Paperclip project matches" "$(cat "$NO_MATCH_ERR")"
 before_ambiguous_issues="$(jq '.issues | length' "$STATE")"
 python3 - "$STATE" <<'PY'
 import json

@@ -336,7 +336,9 @@ projects_matching() {
         _url="$(printf '%s' "$_workspace" | jq -r '.repoUrl // empty')"
         [ -n "$_url" ] || continue
         if _live_identity="$(canonical_repo_json "$_url" 2>/dev/null | jq -r '.identity')"; then
-            [ "$_live_identity" = "$_identity" ] && printf '%s\n' "$_project"
+            if [ "$_live_identity" = "$_identity" ]; then
+                printf '%s\n' "$_project"
+            fi
         fi
     done <<EOF
 $_project_lines
@@ -917,6 +919,7 @@ cmd_engineering_ticket_create() {
         --argjson settings "$_settings" '
         {title:$title,description:$description,assigneeAgentId:$agent,
          projectId:$project,projectWorkspaceId:$workspace,
+         executionWorkspacePreference:$mode,
          executionWorkspaceSettings:$settings}
         | if $priority == "" then . else .priority=$priority end
         | if $status == "" then . else .status=$status end
@@ -938,7 +941,7 @@ cmd_engineering_ticket_create() {
         --arg execution_workspace_id "$_execution_workspace_id" '
         .assigneeAgentId == $agent and .projectId == $project
         and .projectWorkspaceId == $workspace
-        and .executionWorkspaceSettings.mode == $mode
+        and ((.executionWorkspaceSettings.mode // .executionWorkspacePreference) == $mode)
         and (if $mode == "reuse_existing"
              then .executionWorkspaceId == $execution_workspace_id
                   and .executionWorkspacePreference == "reuse_existing"
