@@ -31,7 +31,7 @@ LIVE_PROJECT_ID=""
 LIVE_PROJECT_ISSUE_IDS=""
 LIVE_PROTO_NAMES=""
 LIVE_TEST_AGENT_IDS=""
-LIVE_RECORD=""
+LIVE_ADAPTER_SCRIPT=""
 LIVE_RELEASE=""
 LIVE_CLEANUP_STATUS=0
 
@@ -62,20 +62,24 @@ live_mutation() {
   LIVE_RESPONSE_STATUS="$status"
   case "$status" in 2??) return 0 ;; *) return 1 ;; esac
 }
-
 delete_and_verify() {
   local label="$1" delete_path="$2" verify_path="$3" expected="$4"
   if ! live_mutation DELETE "$delete_path"; then
-    bad "$label delete (HTTP $LIVE_RESPONSE_STATUS)"
-    LIVE_CLEANUP_STATUS=1
-    return 1
+    case "$LIVE_RESPONSE_STATUS" in
+      404) ok "$label cleanup (already absent)" ; return 0 ;;
+      *) bad "$label delete (HTTP $LIVE_RESPONSE_STATUS)"; LIVE_CLEANUP_STATUS=1; return 1 ;;
+    esac
   fi
   if [ "$expected" = absent ]; then
-    if live_api GET "$verify_path" >/dev/null 2>&1; then
-      bad "$label delete verification"
+    if live_mutation GET "$verify_path"; then
+      bad "$label delete verification (record still present)"
       LIVE_CLEANUP_STATUS=1
       return 1
     fi
+    case "$LIVE_RESPONSE_STATUS" in
+      404) ;;
+      *) bad "$label delete verification (HTTP $LIVE_RESPONSE_STATUS)"; LIVE_CLEANUP_STATUS=1; return 1 ;;
+    esac
   fi
   ok "$label cleanup"
 }
@@ -86,15 +90,22 @@ wake_issue() {
     { bad "wakeup issue $issue (HTTP $LIVE_RESPONSE_STATUS)"; return 1; }
 }
 create_issue() {
-  local payload="$1" id
+  local payload="$1" id title
   live_mutation POST "/companies/$LIVE_COMPANY_ID/issues" "$payload" || return 1
   id="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.id // empty')"
-  [ -n "$id" ] || return 1
-  printf '%s\n' "$id"
+  if [ -z "$id" ]; then
+    title="$(printf '%s' "$payload" | jq -r '.title // empty')"
+    id="$(live_api GET "/companies/$LIVE_COMPANY_ID/issues?limit=1000" 2>/dev/null \
+      | jq -r --arg t "$title" '.[] | select(.title == $t) | .id' | head -n 1)"
+    [ -n "$id" ] && LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $id"
+    return 1
+  fi
+  LIVE_CREATED_ISSUE_ID="$id"
 }
 create_process_agent() {
-  local key="$1" project="$2" workspace="$3" payload id
-  payload="$(jq -nc --arg n "workspace-routing-process-$key-$$" \
+  local key="$1" project="$2" workspace="$3" payload id name
+  name="workspace-routing-process-$key-$$"
+  payload="$(jq -nc --arg n "$name" \
     --arg cmd "sh $adapter_script" --arg record "$LIVE_RECORD" --arg release "$LIVE_RELEASE" \
     --arg key "$key" --arg project "$project" --arg workspace "$workspace" \
     '{name:$n,role:"general",adapterType:"process",
@@ -105,7 +116,13 @@ create_process_agent() {
       metadata:{opcWorkspaceRoutingTest:true}}')"
   live_mutation POST "/companies/$LIVE_COMPANY_ID/agents" "$payload" || return 1
   id="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.id // empty')"
-  [ -n "$id" ] || return 1
+  if [ -z "$id" ]; then
+    id="$(live_api GET "/companies/$LIVE_COMPANY_ID/agents" 2>/dev/null \
+      | jq -r --arg n "$name" '.[] | select(.name == $n and .metadata.opcWorkspaceRoutingTest == true) | .id' \
+      | head -n 1)"
+    [ -n "$id" ] && LIVE_TEST_AGENT_IDS="$LIVE_TEST_AGENT_IDS $id"
+    return 1
+  fi
   LIVE_TEST_AGENT_IDS="$LIVE_TEST_AGENT_IDS $id"
   LIVE_CREATED_AGENT_ID="$id"
 }
@@ -143,7 +160,23 @@ live_restore() {
 }
 
 live_cleanup() {
-  local issue name agent cleanup_status=0 gone
+  local issue name agent cleanup_status=0 gone live_runs
+  if [ -n "${LIVE_ADAPTER_SCRIPT:-}" ] && ! docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"; then
+    bad "release process probe holders"
+    cleanup_status=1
+  fi
+  if [ -n "${LIVE_ADAPTER_SCRIPT:-}" ]; then
+    for _ in $(seq 1 30); do
+      [ -z "$LIVE_COMPANY_ID" ] && break
+      live_runs="$(live_api GET "/companies/$LIVE_COMPANY_ID/live-runs?minCount=0&limit=1000" 2>/dev/null || printf '[]')"
+      if ! printf '%s' "$live_runs" | jq -e --arg ids "$LIVE_TEST_AGENT_IDS" \
+        'any(.[]? as $run; ($run.status == "queued" or $run.status == "running")
+          and (($ids | split(" ")) | index($run.agentId)) != null)' >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+  fi
   live_restore || cleanup_status=1
   for agent in $LIVE_TEST_AGENT_IDS; do
     delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
@@ -162,8 +195,12 @@ live_cleanup() {
     else
       gone=0
       for _ in $(seq 1 10); do
-        if ! live_api GET "/companies/$LIVE_COMPANY_ID/projects" \
-          | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
+        if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/projects"; then
+          case "$LIVE_RESPONSE_STATUS" in
+            404) gone=1; break ;;
+            *) bad "test prototype $name cleanup verification (HTTP $LIVE_RESPONSE_STATUS)"; cleanup_status=1; break ;;
+          esac
+        elif ! printf '%s' "$LIVE_RESPONSE_BODY" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
           gone=1
           break
         fi
@@ -171,14 +208,17 @@ live_cleanup() {
       done
       if [ "$gone" -eq 1 ]; then
         ok "test prototype $name cleanup"
-      else
+      elif [ "$cleanup_status" -eq 0 ]; then
         bad "test prototype $name cleanup verification"
         cleanup_status=1
       fi
     fi
   done
+  if ! docker compose exec -T paperclip sh -c "rm -f '$LIVE_RECORD' '$LIVE_RELEASE' '$LIVE_ADAPTER_SCRIPT'"; then
+    bad "remove container process probe files"
+    cleanup_status=1
+  fi
   rm -f "$LIVE_RECORD" "$LIVE_RELEASE"
-  [ -n "$LIVE_TMPDIR" ] && rm -rf "$LIVE_TMPDIR"
   LIVE_CLEANUP_STATUS="$cleanup_status"
   return "$cleanup_status"
 }
@@ -207,24 +247,6 @@ live_gate() {
   ok "obtain Paperclip board key inside container"
   export PAPERCLIP_API_URL="http://127.0.0.1:${PAPERCLIP_PORT:-3100}"
   export PAPERCLIP_API_KEY="$LIVE_BOARD_KEY"
-  if "$CLI" agent concurrency set --role engineer --max 6 >/dev/null; then
-    assert_eq "live operator concurrency set to six" 6 \
-      "$("$CLI" agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
-  else
-    bad "live operator concurrency set to six"
-  fi
-  if docker compose up -d --force-recreate paperclip-bootstrap >/dev/null; then
-    assert_eq "six-run override survives bootstrap recreate" 6 \
-      "$("$CLI" agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
-  else
-    bad "paperclip-bootstrap force-recreate"
-  fi
-  if "$CLI" agent concurrency reset --role engineer >/dev/null; then
-    assert_eq "live concurrency reset returns four" 4 \
-      "$("$CLI" agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
-  else
-    bad "live concurrency reset"
-  fi
 
   experimental="$(live_api GET /instance/settings/experimental)" || {
     bad "experimental settings endpoint responds"
@@ -264,7 +286,7 @@ live_gate() {
   else
     bad "live operator concurrency set to six"
   fi
-  if docker compose up -d --force-recreate paperclip-bootstrap >/dev/null; then
+  if docker compose up --force-recreate paperclip-bootstrap >/dev/null; then
     assert_eq "six-run override survives bootstrap recreate" 6 \
       "$("$CLI" agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
   else
@@ -345,6 +367,7 @@ live_gate() {
   assert_eq "prototype policy uses project primary" project_primary \
     "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type')"
   adapter_script="/tmp/opc-workspace-routing-agent-$$.sh"
+  LIVE_ADAPTER_SCRIPT="$adapter_script"
   LIVE_RECORD="/tmp/opc-workspace-routing-paths-$$"
   LIVE_RELEASE="/tmp/opc-workspace-routing-release-$$"
   docker compose exec -T paperclip sh -c "rm -f '$LIVE_RECORD' '$LIVE_RELEASE' '$adapter_script'"
@@ -361,12 +384,14 @@ AGENT_SCRIPT
     '{title:"workspace routing execution A",description:"fixture execution A",
       status:"todo",projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,
       executionWorkspaceSettings:{mode:"inherit"}}')"
-  issue_a="$(create_issue "$issue_payload")" || { bad "create execution issue A"; return 1; }
+  create_issue "$issue_payload" || { bad "create execution issue A"; return 1; }
+  issue_a="$LIVE_CREATED_ISSUE_ID"
   issue_payload="$(jq -nc --arg p "$LIVE_PROJECT_ID" --arg w "$workspace_id" --arg a "$test_agent_b" \
     '{title:"workspace routing execution B",description:"fixture execution B",
       status:"todo",projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,
       executionWorkspaceSettings:{mode:"inherit"}}')"
-  issue_b="$(create_issue "$issue_payload")" || { bad "create execution issue B"; return 1; }
+  create_issue "$issue_payload" || { bad "create execution issue B"; return 1; }
+  issue_b="$LIVE_CREATED_ISSUE_ID"
   LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $issue_a $issue_b"
   wake_issue "$test_agent_a" "$issue_a" || return 1
   wake_issue "$test_agent_b" "$issue_b" || return 1
@@ -377,24 +402,27 @@ AGENT_SCRIPT
     sleep 1
   done
   if [ "$(printf '%s\n' "$paths" | sed '/^$/d' | wc -l | tr -d ' ')" -ge 2 ]; then
-    record_a="$(printf '%s\n' "$paths" | awk '$1 == "engineering-a" {print; exit}')"
-    record_b="$(printf '%s\n' "$paths" | awk '$1 == "engineering-b" {print; exit}')"
-    path_a="$(printf '%s' "$record_a" | awk '{print $4}')"
-    path_b="$(printf '%s' "$record_b" | awk '{print $4}')"
-    [ "$(printf '%s' "$record_a" | awk '{print $2":"$3}')" = "$LIVE_PROJECT_ID:$workspace_id" ] \
-      && [ "$(printf '%s' "$record_b" | awk '{print $2":"$3}')" = "$LIVE_PROJECT_ID:$workspace_id" ] \
-      && ok "engineering records bind project and primary workspace" \
-      || bad "engineering records bind project and primary workspace"
-    [ -n "$path_a" ] && [ -n "$path_b" ] && [ "$path_a" != "$path_b" ] \
-      && ok "engineering runs report distinct execution workspaces" \
-      || bad "engineering runs report distinct execution workspaces"
+    workspaces_a="$(live_api GET "/companies/$LIVE_COMPANY_ID/execution-workspaces?issueId=$issue_a" 2>/dev/null || true)"
+    workspaces_b="$(live_api GET "/companies/$LIVE_COMPANY_ID/execution-workspaces?issueId=$issue_b" 2>/dev/null || true)"
+    workspace_a="$(printf '%s' "$workspaces_a" | jq -c 'if type == "array" then .[0] else . end' 2>/dev/null || true)"
+    workspace_b="$(printf '%s' "$workspaces_b" | jq -c 'if type == "array" then .[0] else . end' 2>/dev/null || true)"
+    path_a="$(printf '%s' "$workspace_a" | jq -r '.cwd // .providerRef // empty')"
+    path_b="$(printf '%s' "$workspace_b" | jq -r '.cwd // .providerRef // empty')"
+    strategy_a="$(printf '%s' "$workspace_a" | jq -r '.strategyType // .workspaceStrategy.type // empty')"
+    strategy_b="$(printf '%s' "$workspace_b" | jq -r '.strategyType // .workspaceStrategy.type // empty')"
+    [ "$(printf '%s' "$workspace_a" | jq -r '.projectWorkspaceId // empty')" = "$workspace_id" ] \
+      && [ "$(printf '%s' "$workspace_b" | jq -r '.projectWorkspaceId // empty')" = "$workspace_id" ] \
+      && ok "execution workspaces bind project primary" \
+      || bad "execution workspaces bind project primary"
+    [ "$strategy_a" = git_worktree ] && [ "$strategy_b" = git_worktree ] \
+      && [ -n "$path_a" ] && [ -n "$path_b" ] && [ "$path_a" != "$path_b" ] \
+      && ok "engineering runs report distinct managed git worktrees" \
+      || bad "engineering runs report distinct managed git worktrees"
     if docker compose exec -T paperclip git -C "$path_a" rev-parse --git-dir >/dev/null 2>&1 \
-      && docker compose exec -T paperclip git -C "$path_b" rev-parse --git-dir >/dev/null 2>&1 \
-      && [[ "$path_a" == */.paperclip-runtime/runs/* ]] \
-      && [[ "$path_b" == */.paperclip-runtime/runs/* ]]; then
-      ok "engineering records are managed git worktrees"
+      && docker compose exec -T paperclip git -C "$path_b" rev-parse --git-dir >/dev/null 2>&1; then
+      ok "execution workspace paths are real Git worktrees"
     else
-      bad "engineering records are managed git worktrees"
+      bad "execution workspace paths are real Git worktrees"
     fi
   else
     echo "BLOCKER process adapter produced no workspace records; live run state follows:"
@@ -428,11 +456,13 @@ AGENT_SCRIPT
   issue_payload="$(jq -nc --arg p "$prototype_id" --arg w "$prototype_ws" --arg a "$test_agent_p1" \
     '{title:"prototype serialization A",description:"prototype serialization A",status:"todo",
       projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
-  prototype_issue_a="$(create_issue "$issue_payload")" || { bad "create prototype issue A"; return 1; }
+  create_issue "$issue_payload" || { bad "create prototype issue A"; return 1; }
+  prototype_issue_a="$LIVE_CREATED_ISSUE_ID"
   issue_payload="$(jq -nc --arg p "$prototype_id" --arg w "$prototype_ws" --arg a "$test_agent_p2" \
     '{title:"prototype serialization B",description:"prototype serialization B",status:"todo",
       projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
-  prototype_issue_b="$(create_issue "$issue_payload")" || { bad "create prototype issue B"; return 1; }
+  create_issue "$issue_payload" || { bad "create prototype issue B"; return 1; }
+  prototype_issue_b="$LIVE_CREATED_ISSUE_ID"
   LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $prototype_issue_a $prototype_issue_b"
   wake_issue "$test_agent_p1" "$prototype_issue_a" || return 1
   for _ in $(seq 1 30); do
@@ -456,7 +486,8 @@ AGENT_SCRIPT
   issue_payload="$(jq -nc --arg p "$prototype_two_id" --arg w "$prototype_two_ws" --arg a "$test_agent_p3" \
     '{title:"prototype concurrency C",description:"prototype concurrency C",status:"todo",
       projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
-  prototype_issue_c="$(create_issue "$issue_payload")" || { bad "create prototype issue C"; return 1; }
+  create_issue "$issue_payload" || { bad "create prototype issue C"; return 1; }
+  prototype_issue_c="$LIVE_CREATED_ISSUE_ID"
   LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $prototype_issue_c"
   wake_issue "$test_agent_p3" "$prototype_issue_c" || return 1
   concurrent=0
