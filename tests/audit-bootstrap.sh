@@ -114,6 +114,16 @@ hasall "managed prompts clear legacy prompt authority" patches/paperclip/opc-pap
 hasall "engineering routing supports custom executor names" patches/buzz/skills/paperclip-api/SKILL.md \
     'role == "engineer"' \
     'exactly one'
+hasall "Hermes knows Paperclip workspace modes" patches/buzz/skills/paperclip-api/SKILL.md \
+    'shared_workspace' 'isolated_workspace' 'operator_branch' 'adapter_default' \
+    'reuse_existing' 'git_worktree' 'project_primary'
+hasall "Hermes knows concurrency scopes" patches/buzz/skills/paperclip-api/SKILL.md \
+    'maxConcurrentRuns' 'agent-global' 'sharedWorkspaceConcurrency' 'serialize'
+hasall "Hermes uses deterministic ticket routing" patches/buzz/skills/paperclip-api/SKILL.md \
+    'opc-paperclip engineering-ticket create' \
+    'opc-paperclip prototype-ticket create'
+hasall "workspace changes require direct operator authority" patches/buzz/skills/paperclip-api/SKILL.md \
+    'direct operator request' 'memory'
 has "frontdoor installs Paperclip CLI" patches/buzz/Dockerfile \
     'COPY opc/opc-paperclip /usr/local/bin/opc-paperclip'
 has "gateway installs Paperclip CLI" patches/hermes/Dockerfile \

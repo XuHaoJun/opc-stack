@@ -265,6 +265,42 @@ How it works: entrypoints set `GIT_SSH_COMMAND` / `GH_CONFIG_DIR` /
 Buzz via the buzz CLI when the issue reaches `done`. The frontdoor entrypoint
 re-attaches watchers for surviving tickets on every boot.
 
+### Paperclip workspace and concurrency operator commands
+
+The `opc-paperclip` helper is installed in Buzz and Hermes. Run these
+inspection and mutation commands inside the `hermes` container as the runtime
+user; it uses the existing Paperclip credential environment/mirror already
+loaded by the Hermes entrypoint. Do not replace these with hand-written curl
+payloads:
+
+```bash
+docker compose exec -u 10000 hermes opc-paperclip agent concurrency show --role engineer
+docker compose exec -u 10000 hermes opc-paperclip agent concurrency set --role engineer --max 6
+docker compose exec -u 10000 hermes opc-paperclip agent concurrency reset --role engineer
+docker compose exec -u 10000 hermes opc-paperclip project workspace show --repo owner/repo
+docker compose exec -u 10000 hermes opc-paperclip project workspace set --repo owner/repo --mode shared_workspace --shared-concurrency serialize
+docker compose exec -u 10000 hermes opc-paperclip project workspace reset --repo owner/repo --lane engineering
+docker compose exec -u 10000 hermes opc-paperclip project workspace reset --repo owner/repo --lane prototype
+```
+
+The exact managed lane defaults are:
+
+| Lane | Project mode | Strategy | Same-project concurrency |
+|---|---|---|---|
+| Fullstack Engineer | `isolated_workspace` | `git_worktree` | Separate worktrees may run concurrently |
+| Prototyper | `shared_workspace` | `project_primary` | `serialize` per prototype project |
+| Scientist | Unchanged | Unchanged | Unchanged |
+
+Fullstack Engineer `maxConcurrentRuns` is **4 globally per agent**, not four
+per project. A direct operator `set` is an override and a direct `reset`
+restores 4; bootstrap preserves explicit overrides. The supported project
+modes are `shared_workspace`, `isolated_workspace`, `operator_branch`, and
+`adapter_default`. Changing engineering to a shared checkout risks concurrent
+ticket mutations unless serialized; changing a prototype to isolation detaches
+changes from its canonical preview workspace. Missing or ambiguous
+`owner/repo` identity must stop for clarification, and a memory recall never
+authorizes a mutation.
+
 Verify / troubleshoot:
 
 ```bash
