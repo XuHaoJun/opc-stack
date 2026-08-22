@@ -324,7 +324,7 @@ reconcile_agent() {
 # `{canCreateAgents:false, canCreateSkills:true}`, the managed AGENTS.md
 # instructions bundle (paperclip writes instructions* on first run), the
 # company membership and the `tasks:assign` grant (both minted at create).
-PROTOTYPER_SKILLS='["prototype","prototype-workspace","devenv","container-tools"]'
+PROTOTYPER_SKILLS='["prototype","prototype-workspace","devenv","podenv","container-tools"]'
 PROTOTYPER_DEVENV_OWNER="${PAPERCLIP_PROTOTYPER_DEVENV_OWNER:-prototyper}"
 
 # DEVENV_OWNER is the friendly label devenv stamps on leases. It is written

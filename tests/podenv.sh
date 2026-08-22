@@ -836,6 +836,17 @@ fi
 docker compose exec -T -u node paperclip sh -c \
     'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f3_netns_host >/dev/null 2>&1'
 
+echo "── skill ──"
+
+check "podenv skill is on disk in the image" \
+    docker compose exec -T paperclip test -s /opt/opc-skills/podenv/SKILL.md
+expect "the decision table has exactly one home" "1" \
+    sh -c 'grep -rl "devenv 已提供就優先" patches/paperclip/skills/ | wc -l | tr -d " "'
+expect "devenv skill points forward without copying the table" "1" \
+    sh -c 'grep -c "podenv" patches/paperclip/skills/devenv/SKILL.md | tr -d " "'
+check "Prototyper lists podenv in desiredSkills" \
+    sh -c 'grep -q "podenv" patches/paperclip/opc-paperclip-bootstrap.sh'
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
