@@ -81,7 +81,7 @@ unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES \
       TENCENTDB_PANEL_PORT TENCENTDB_KNOWLEDGE_PORT TENCENTDB_PROXY_PORT \
       DEVENV_HTTP_PORT_BASE DEVENV_HTTP_PORT_COUNT DEVENV_HTTP_PORT_RANGE_END \
       DEVENV_HTTP_BIND DEVENV_SECRET_SALT \
-      PODENV_PORT_BASE PODENV_PORT_COUNT PODENV_PORT_RANGE_END 2>/dev/null || true
+      PODENV_PORT_BASE PODENV_PORT_COUNT PODENV_PORT_RANGE_END DEVENV_S3_PORT 2>/dev/null || true
 
 # env_value <file> <key> — read ONE value with the same parser the stack uses.
 #
@@ -172,7 +172,7 @@ fi
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/scientist.sh tests/podenv.sh"
+GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
@@ -200,7 +200,8 @@ DEVENV_VALKEY_PORT:6380
 TENCENTDB_CORE_PORT:8420
 TENCENTDB_PANEL_PORT:8125
 TENCENTDB_KNOWLEDGE_PORT:8424
-TENCENTDB_PROXY_PORT:8096"
+TENCENTDB_PROXY_PORT:8096
+DEVENV_S3_PORT:9002"
 
 base_port() { # <key> <fallback>
     local v; v="$(env_value "$REPO_ROOT/.env.example" "$1")"
@@ -457,7 +458,7 @@ done
 unset LIVE_OPENAI_KEY
 
 grep -vE '^(OPENAI_API_KEY|.*_PASSWORD|.*_SECRET|.*_KEY)=' "$CLONE/.env" \
-    | grep -E '^(COMPOSE_PROJECT_NAME|IMAGE_PREFIX|BUZZ_RELAY_URL|PAPERCLIP_PUBLIC_URL|PAPERCLIP_ALLOWED_HOSTNAMES|DEVENV_HTTP[A-Z_]*|PODENV_PORT[A-Z_]*|CLAUDE_CREDENTIALS_FILE|[A-Z_]*_PORT)=' \
+    | grep -E '^(COMPOSE_PROJECT_NAME|IMAGE_PREFIX|BUZZ_RELAY_URL|PAPERCLIP_PUBLIC_URL|PAPERCLIP_ALLOWED_HOSTNAMES|DEVENV_HTTP[A-Z_]*|PODENV_PORT[A-Z_]*|CLAUDE_CREDENTIALS_FILE|[A-Z0-9_]*_PORT)=' \
     | sed 's/^/  /' || true
 
 if [ "$DRY_RUN" = 1 ]; then

@@ -105,6 +105,10 @@ has "board agent: paperclip-bootstrap one-shot"       patches/paperclip/opc-pape
 # branch, so pointing the real command at another tenant left this row green
 # (RED-tested, fix round 1).
 has "devenv lease: devenv-expert-leases one-shot"     docker-compose.yml                     'devenv provision scientist --env-file /keys/devenv-scientist.env'
+has "devenv S3 durable volume" docker-compose.yml 'devenv-s3-data:/data'
+has "devenv S3 root credential source" docker-compose.yml 'DEVENV_S3_ROOT_PASSWORD'
+has "devenv S3 schema producer" patches/paperclip/devenv/bootstrap.sql 'ADD COLUMN IF NOT EXISTS s3_bucket'
+has "paperclip carries pinned mc" patches/paperclip/Dockerfile 'RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349e'
 has "api key ships in .env.example"                   .env.example                           'HERMES_SCIENTIST_API_KEY'
 
 echo "── ordering: nothing races its producer ──"
