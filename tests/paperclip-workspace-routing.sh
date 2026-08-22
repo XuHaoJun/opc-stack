@@ -90,17 +90,29 @@ wake_issue() {
     { bad "wakeup issue $issue (HTTP $LIVE_RESPONSE_STATUS)"; return 1; }
 }
 create_issue() {
-  local payload="$1" id title marker
+  local payload="$1" id project_id marker matches match_count
   live_mutation POST "/companies/$LIVE_COMPANY_ID/issues" "$payload" || return 1
   id="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.id // empty')"
   if [ -z "$id" ]; then
-    title="$(printf '%s' "$payload" | jq -r '.title // empty')"
-    marker="$(printf '%s' "$payload" | jq -r '.description // empty')"
-    id="$(live_api GET "/companies/$LIVE_COMPANY_ID/issues?limit=1000" 2>/dev/null \
-      | jq -r --arg t "$title" --arg m "$marker" --arg p "$LIVE_PROJECT_ID" \
-        '.[] | select(.title == $t and (.description // "") == $m and (($p == "") or .projectId == $p)) | .id' \
-      | head -n 1)"
-    [ -n "$id" ] && LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $id"
+    project_id="$(printf '%s' "$payload" | jq -er '.projectId // empty')" || return 1
+    marker="$(printf '%s' "$payload" | jq -er '.description // empty')" || return 1
+    [ -n "$project_id" ] && [ -n "$marker" ] || return 1
+    if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/issues?limit=1000"; then
+      return 1
+    fi
+    matches="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -c --arg m "$marker" --arg p "$project_id" '
+      if type != "array" then error("issue list is not an array") else
+        [.[] | select(.projectId == $p and (.description // "") == $m
+          and (.id | type == "string" and length > 0)) | .id]
+      end')" || return 1
+    match_count="$(printf '%s' "$matches" | jq -r 'length')" || return 1
+    if [ "$match_count" -gt 0 ]; then
+      LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $(printf '%s' "$matches" | jq -r '.[]')"
+    fi
+    if [ "$match_count" -ne 1 ]; then
+      return 1
+    fi
+    id="$(printf '%s' "$matches" | jq -r '.[0]')"
     return 1
   fi
   LIVE_CREATED_ISSUE_ID="$id"
