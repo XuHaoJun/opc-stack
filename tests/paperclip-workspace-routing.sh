@@ -174,6 +174,130 @@ cat >"$STATE" <<'JSON'
 {
   "experimental": {"enableIsolatedWorkspaces": false},
   "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+  "agents": [{
+    "id": "engineer-1",
+    "name": "Engineer One",
+    "role": "engineer",
+    "status": "idle"
+  }],
+  "projects": [],
+  "issues": []
+}
+JSON
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+printf '%s' 'Acceptance: tests pass' | \
+  "$CLI" engineering-ticket create \
+    --repo git@github.com:Owner/Repo.git --title 'Fix race' --priority high \
+    >"$TMPDIR/result.json"
+assert_eq "engineering project auto-created once" "1" \
+  "$(jq '[.projects[] | select(.primaryWorkspace.repoUrl == "https://github.com/owner/repo")] | length' "$STATE")"
+assert_eq "engineering project default mode" "isolated_workspace" \
+  "$(jq -r '.projects[0].executionWorkspacePolicy.defaultMode' "$STATE")"
+assert_eq "engineering strategy" "git_worktree" \
+  "$(jq -r '.projects[0].executionWorkspacePolicy.workspaceStrategy.type' "$STATE")"
+assert_eq "ticket inherits project policy" "inherit" \
+  "$(jq -r '.issues[0].executionWorkspaceSettings.mode' "$STATE")"
+assert_eq "ticket binds primary workspace" \
+  "$(jq -r '.projects[0].primaryWorkspace.id' "$STATE")" \
+  "$(jq -r '.issues[0].projectWorkspaceId' "$STATE")"
+printf x | "$CLI" engineering-ticket create \
+  --repo https://github.com/OWNER/REPO --title 'Second form' >/dev/null
+assert_eq "canonical-equivalent ticket reuses project" "1" \
+  "$(jq '[.projects[] | select(.primaryWorkspace.repoUrl == "https://github.com/owner/repo")] | length' "$STATE")"
+assert_eq "two tickets persisted" "2" "$(jq '.issues | length' "$STATE")"
+before_ambiguous_issues="$(jq '.issues | length' "$STATE")"
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["projects"].append({
+    "id": "project-ambiguous",
+    "name": "Ambiguous Engineering",
+    "primaryWorkspace": {
+        "id": "workspace-ambiguous",
+        "repoUrl": "https://github.com/owner/repo",
+        "isPrimary": True,
+    },
+    "workspaces": [{
+        "id": "workspace-ambiguous",
+        "repoUrl": "https://github.com/owner/repo",
+        "isPrimary": True,
+    }],
+})
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+stop_fixture
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+AMBIGUOUS_TICKET_ERR="$TMPDIR/engineering-ambiguous.err"
+if printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title ambiguous \
+  >/dev/null 2>"$AMBIGUOUS_TICKET_ERR"; then
+  bad "ambiguous engineering projects fail closed"
+else
+  ok "ambiguous engineering projects fail closed"
+fi
+assert_contains "engineering ambiguity lists first project" "project-1" "$(cat "$AMBIGUOUS_TICKET_ERR")"
+assert_contains "engineering ambiguity lists second project" "project-ambiguous" "$(cat "$AMBIGUOUS_TICKET_ERR")"
+assert_eq "ambiguous engineering creates no issue" "$before_ambiguous_issues" "$(jq '.issues | length' "$STATE")"
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["projects"] = [state["projects"][0]]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+stop_fixture
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+"$CLI" project workspace set --repo Owner/Repo --mode shared_workspace \
+  --shared-concurrency serialize --strategy project_primary >/dev/null
+assert_eq "workspace set preserves last-applied marker" "isolated_workspace" \
+  "$(jq -r '.projects[0].primaryWorkspace.metadata.opcWorkspaceDefaults.mode' "$STATE")"
+printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title override-preserved >/dev/null
+assert_eq "operator project override survives routing" "shared_workspace" \
+  "$(jq -r '.projects[0].executionWorkspacePolicy.defaultMode' "$STATE")"
+assert_eq "routed override ticket still inherits" "inherit" \
+  "$(jq -r '.issues[-1].executionWorkspaceSettings.mode' "$STATE")"
+"$CLI" project workspace reset --repo Owner/Repo --lane engineering >/dev/null
+assert_eq "engineering reset mode" "isolated_workspace" \
+  "$(jq -r '.projects[0].executionWorkspacePolicy.defaultMode' "$STATE")"
+assert_eq "engineering reset strategy" "git_worktree" \
+  "$(jq -r '.projects[0].executionWorkspacePolicy.workspaceStrategy.type' "$STATE")"
+policy_before_ticket_override="$(jq -c '.projects[0].executionWorkspacePolicy' "$STATE")"
+printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title one-ticket \
+  --mode shared_workspace >/dev/null
+assert_eq "one-ticket override mode" "shared_workspace" \
+  "$(jq -r '.issues[-1].executionWorkspaceSettings.mode' "$STATE")"
+assert_eq "one-ticket override does not mutate policy" "$policy_before_ticket_override" \
+  "$(jq -c '.projects[0].executionWorkspacePolicy' "$STATE")"
+before_reuse_issues="$(jq '.issues | length' "$STATE")"
+REUSE_ERR="$TMPDIR/reuse-existing.err"
+if printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title reuse \
+  --mode reuse_existing >/dev/null 2>"$REUSE_ERR"; then
+  bad "reuse_existing requires explicit execution workspace"
+else
+  ok "reuse_existing requires explicit execution workspace"
+fi
+assert_contains "reuse_existing error names required option" "--execution-workspace-id" "$(cat "$REUSE_ERR")"
+assert_eq "reuse_existing validation creates no issue" "$before_reuse_issues" "$(jq '.issues | length' "$STATE")"
+
+stop_fixture
+cat >"$STATE" <<'JSON'
+{
+  "experimental": {"enableIsolatedWorkspaces": false},
+  "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
   "agents": [],
   "projects": [{
     "id": "project-ambiguous",

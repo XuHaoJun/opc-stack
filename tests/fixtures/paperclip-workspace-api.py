@@ -118,6 +118,115 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(value, dict):
             raise ValueError("request body must be an object")
         return value
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if not self._authorized():
+            self._send_json(401, {"error": "unauthorized"})
+            return
+        path = [unquote(part) for part in urlsplit(self.path).path.split("/") if part]
+        if not path or path[0] != "api":
+            self._send_json(404, {"error": "not found"})
+            return
+        try:
+            payload = self._request_json()
+        except (ValueError, json.JSONDecodeError):
+            self._send_json(400, {"error": "invalid JSON object"})
+            return
+        with LOCK:
+            if len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "projects":
+                company_id = path[2]
+                if company_id != str(STATE.get("company", {}).get("id", "")):
+                    self._send_json(404, {"error": "company not found"})
+                    return
+                project = dict(payload)
+                project["id"] = self._next_id("project-", "projects")
+                workspace_payload = project.pop("workspace", None)
+                workspaces = project.get("workspaces")
+                if not isinstance(workspaces, list):
+                    workspaces = []
+                else:
+                    workspaces = [dict(workspace) for workspace in workspaces]
+                if isinstance(workspace_payload, dict):
+                    workspace = dict(workspace_payload)
+                    workspace["id"] = self._next_workspace_id()
+                    workspaces.append(workspace)
+                    project["primaryWorkspace"] = dict(workspace)
+                project["workspaces"] = workspaces
+                if "primaryWorkspace" not in project:
+                    primary = next(
+                        (workspace for workspace in workspaces if workspace.get("isPrimary") is True),
+                        None,
+                    )
+                    if primary is not None:
+                        project["primaryWorkspace"] = dict(primary)
+                STATE.setdefault("projects", []).append(project)
+                save_state()
+                self._send_json(201, project)
+                return
+            if len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "issues":
+                company_id = path[2]
+                if company_id != str(STATE.get("company", {}).get("id", "")):
+                    self._send_json(404, {"error": "company not found"})
+                    return
+                issue = dict(payload)
+                issue["id"] = self._next_id("issue-", "issues")
+                issue.setdefault("identifier", self._next_identifier())
+                issue.setdefault("status", "todo")
+                STATE.setdefault("issues", []).append(issue)
+                save_state()
+                self._send_json(201, issue)
+                return
+            self._send_json(404, {"error": "not found"})
+
+    @staticmethod
+    def _numeric_suffix(value: object, prefix: str) -> int:
+        text = str(value)
+        if text.startswith(prefix) and text[len(prefix):].isdigit():
+            return int(text[len(prefix):])
+        return 0
+
+    def _next_id(self, prefix: str, collection: str) -> str:
+        values = [
+            self._numeric_suffix(item.get("id", ""), prefix)
+            for item in STATE.get(collection, [])
+            if isinstance(item, dict)
+        ]
+        return f"{prefix}{max(values, default=0) + 1}"
+
+    def _next_workspace_id(self) -> str:
+        values = []
+        for project in STATE.get("projects", []):
+            if not isinstance(project, dict):
+                continue
+            workspaces = project.get("workspaces", [])
+            if isinstance(workspaces, list):
+                values.extend(
+                    self._numeric_suffix(workspace.get("id", ""), "workspace-")
+                    for workspace in workspaces
+                    if isinstance(workspace, dict)
+                )
+            primary = project.get("primaryWorkspace")
+            if isinstance(primary, dict):
+                values.append(self._numeric_suffix(primary.get("id", ""), "workspace-"))
+        return f"workspace-{max(values, default=0) + 1}"
+
+    def _next_identifier(self) -> str:
+        values = [
+            self._numeric_suffix(issue.get("identifier", ""), "FIX-")
+            for issue in STATE.get("issues", [])
+            if isinstance(issue, dict)
+        ]
+        return f"FIX-{max(values, default=0) + 1}"
+
+    def _find_project(self, project_id: str) -> dict | None:
+        return next(
+            (
+                project
+                for project in STATE.get("projects", [])
+                if isinstance(project, dict) and str(project.get("id", "")) == project_id
+            ),
+            None,
+        )
+
 
     def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
@@ -146,6 +255,47 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json(200, agent)
                         return
                 self._send_json(404, {"error": "agent not found"})
+            elif len(path) == 3 and path[:2] == ["api", "projects"]:
+                project = self._find_project(path[2])
+                if project is None:
+                    self._send_json(404, {"error": "project not found"})
+                    return
+                project.update(update)
+                save_state()
+                self._send_json(200, project)
+            elif (
+                len(path) == 5
+                and path[:2] == ["api", "projects"]
+                and path[3] == "workspaces"
+            ):
+                project = self._find_project(path[2])
+                if project is None:
+                    self._send_json(404, {"error": "project not found"})
+                    return
+                workspace = next(
+                    (
+                        workspace
+                        for workspace in project.get("workspaces", [])
+                        if isinstance(workspace, dict)
+                        and str(workspace.get("id", "")) == path[4]
+                    ),
+                    None,
+                )
+                if workspace is None and isinstance(project.get("primaryWorkspace"), dict):
+                    primary = project["primaryWorkspace"]
+                    if str(primary.get("id", "")) == path[4]:
+                        workspace = primary
+                if workspace is None:
+                    self._send_json(404, {"error": "workspace not found"})
+                    return
+                workspace.update(update)
+                if (
+                    isinstance(project.get("primaryWorkspace"), dict)
+                    and str(project["primaryWorkspace"].get("id", "")) == path[4]
+                ):
+                    project["primaryWorkspace"].update(update)
+                save_state()
+                self._send_json(200, workspace)
             else:
                 self._send_json(404, {"error": "not found"})
 
@@ -176,11 +326,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._company_collection(path[2], "projects")
             elif len(path) == 3 and path[:2] == ["api", "projects"]:
                 self._project(path[2])
+            elif len(path) == 3 and path[:2] == ["api", "issues"]:
+                for issue in STATE.get("issues", []):
+                    if str(issue.get("id", "")) == path[2]:
+                        self._send_json(200, issue)
+                        return
+                self._send_json(404, {"error": "issue not found"})
             elif len(path) == 4 and path[:2] == ["api", "projects"] and path[3] == "workspaces":
                 self._project_workspaces(path[2])
             else:
                 self._send_json(404, {"error": "not found"})
-
     def _company_collection(self, company_id: str, key: str) -> None:
         if company_id != str(STATE.get("company", {}).get("id", "")):
             self._send_json(404, {"error": "company not found"})
