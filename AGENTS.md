@@ -114,6 +114,12 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - 手動 build 單一 image: `docker build --target opc-relay -t ${IMAGE_PREFIX:-opc}/buzz:local -f upstream/buzz/opc/Dockerfile upstream/buzz` (其餘服務同理, 見 compose 的 build 區段)。
 - image prefix 由 `.env` `IMAGE_PREFIX` 控制 (預設 `opc`); compose project name 由 `COMPOSE_PROJECT_NAME` 控制 (預設 `opc`)。
 
+## Superpowers 開發分支規則
+
+- **不要使用 git worktree。** 使用 Superpowers 執行規劃或開發流程時, 一律在目前 checkout 以 `git switch -c <branch>` 建立一般 branch 後再工作。
+- **branch 名稱必須描述實際交付意圖。** 使用 `feat/<feature>`、`fix/<bug>`、`chore/<maintenance>` 等語意前綴; 例如開發 `x` 功能就用 `feat/x`。不要因為先寫 spec 或 plan, 就把功能分支命名成 `docs/...`、`spec/...` 或 `plan/...`；`docs/...` 只留給純文件變更。
+- 規劃階段產生的 spec / design / plan **盡量直接 commit 在同一條 new branch**, 再於該 branch 繼續實作, 不要先 commit 到 `main`。
+
 ## 不變量 (改動前必讀)
 
 1. **Buzz 一個 canonical host = 一個 community** (schema UNIQUE + NIP-42/98 以連線 host 驗簽名)。改 host → 改 `.env` `BUZZ_RELAY_URL` → 重啟 buzz + frontdoor → **重跑 add-member** (community 是新的)。Host 不要用 proxy 改寫 (會弄壞簽名驗證)。
