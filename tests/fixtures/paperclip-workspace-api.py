@@ -8,6 +8,7 @@ handlers can call save_state() for an atomic replacement.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import signal
@@ -183,14 +184,33 @@ class Handler(BaseHTTPRequestHandler):
                         return
                 if payload.get("allowDuplicate") is False:
                     title = " ".join(str(payload.get("title", "")).split()).lower()
+                    parent_id = payload.get("parentId")
+                    now = datetime.datetime.now(datetime.timezone.utc)
+
+                    def recent_open_same_scope(existing: dict) -> bool:
+                        if not isinstance(existing, dict):
+                            return False
+                        if (existing.get("status") or "") in {"done", "cancelled"}:
+                            return False
+                        if existing.get("hiddenAt") is not None:
+                            return False
+                        if existing.get("parentId") != parent_id:
+                            return False
+                        if " ".join(str(existing.get("title", "")).split()).lower() != title:
+                            return False
+                        created_at = existing.get("createdAt")
+                        if not isinstance(created_at, str):
+                            return False
+                        try:
+                            parsed = datetime.datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        except ValueError:
+                            return False
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+                        return now - parsed <= datetime.timedelta(hours=48)
+
                     replay = next(
-                        (
-                            existing
-                            for existing in STATE.get("issues", [])
-                            if isinstance(existing, dict)
-                            and (existing.get("status") or "") not in {"done", "cancelled"}
-                            and " ".join(str(existing.get("title", "")).split()).lower() == title
-                        ),
+                        (existing for existing in STATE.get("issues", []) if recent_open_same_scope(existing)),
                         None,
                     )
                     if replay is not None:
@@ -209,6 +229,7 @@ class Handler(BaseHTTPRequestHandler):
                 issue["id"] = self._next_id("issue-", "issues")
                 issue.setdefault("identifier", self._next_identifier())
                 issue.setdefault("status", "todo")
+                issue.setdefault("createdAt", datetime.datetime.now(datetime.timezone.utc).isoformat())
                 STATE.setdefault("issues", []).append(issue)
                 save_state()
                 self._send_json(201, issue)

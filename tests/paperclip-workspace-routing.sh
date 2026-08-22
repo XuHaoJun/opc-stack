@@ -681,14 +681,42 @@ cat >"$STATE" <<'JSON'
   "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
   "agents": [{"id": "00000000-0000-4000-8000-000000000010", "name": "Prototyper", "role": "prototyper", "status": "idle"}],
   "projects": [],
-  "issues": [{
-    "id": "00000000-0000-4000-8000-00000000dead",
-    "identifier": "FIX-900",
-    "title": "Old terminal",
-    "description": "Prototype: terminal-bot\nLane: prototype\n",
-    "status": "done",
-    "idempotencyKey": "opc-prototype-first:00000000-0000-4000-8000-000000000001:terminal-bot"
-  }]
+  "issues": [
+    {
+      "id": "00000000-0000-4000-8000-00000000dead",
+      "identifier": "FIX-900",
+      "title": "Old terminal",
+      "description": "Prototype: terminal-bot\nLane: prototype\n",
+      "status": "done",
+      "idempotencyKey": "opc-prototype-first:00000000-0000-4000-8000-000000000001:terminal-bot"
+    },
+    {
+      "id": "00000000-0000-4000-8000-00000000stale",
+      "identifier": "FIX-901",
+      "title": "Prototype: terminal-bot",
+      "description": "stale same-scope title",
+      "status": "todo",
+      "createdAt": "2020-01-01T00:00:00+00:00"
+    },
+    {
+      "id": "00000000-0000-4000-8000-00000000parent",
+      "identifier": "FIX-902",
+      "title": "Prototype: terminal-bot",
+      "description": "different parent title",
+      "status": "todo",
+      "parentId": "other-parent",
+      "createdAt": "2030-01-01T00:00:00+00:00"
+    },
+    {
+      "id": "00000000-0000-4000-8000-00000000fresh",
+      "identifier": "FIX-903",
+      "assigneeAgentId": "00000000-0000-4000-8000-000000000010",
+      "title": "Prototype: terminal-bot",
+      "description": "fresh same-scope title",
+      "status": "todo",
+      "createdAt": "2030-01-01T00:00:00+00:00"
+    }
+  ]
 }
 JSON
 start_fixture
@@ -698,11 +726,12 @@ printf 'Prototype: terminal-bot\nLane: prototype\n' |
   "$CLI" prototype-ticket create --name terminal-bot --title 'Retry epoch' >"$TMPDIR/prototype-terminal-retry.json"
 assert_not_contains "terminal retry does not replay old issue" "00000000-0000-4000-8000-00000000dead" \
   "$(jq -r '.id' "$TMPDIR/prototype-terminal-retry.json")"
-assert_eq "terminal retry creates new issue" "2" "$(jq '.issues | length' "$STATE")"
-assert_eq "terminal retry is non-terminal" "todo" "$(jq -r '.issues[-1].status' "$STATE")"
-assert_eq "terminal retry uses stable title" "Prototype: terminal-bot" "$(jq -r '.issues[-1].title' "$STATE")"
-assert_eq "terminal retry omits old idempotency key" "null" "$(jq -r '.issues[-1].idempotencyKey // null' "$STATE")"
-
+assert_eq "terminal retry ignores stale and different-parent titles" "00000000-0000-4000-8000-00000000fresh" \
+  "$(jq -r '.id' "$TMPDIR/prototype-terminal-retry.json")"
+assert_eq "terminal retry leaves title candidates unchanged" "4" "$(jq '.issues | length' "$STATE")"
+assert_eq "terminal retry is non-terminal" "todo" "$(jq -r '.issues[3].status' "$STATE")"
+assert_eq "terminal retry uses stable title" "Prototype: terminal-bot" "$(jq -r '.issues[3].title' "$STATE")"
+assert_eq "terminal retry omits old idempotency key" "null" "$(jq -r '.issues[3].idempotencyKey // null' "$STATE")"
 stop_fixture
 cat >"$STATE" <<'JSON'
 {
