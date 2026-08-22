@@ -27,7 +27,7 @@ an internal container name and is useless in a chat message.
 |---|---|
 | Find your company id | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies"` → `[0].id` (board key; agent keys: `/api/agents/me` → `.companyId`) |
 | Create engineering ticket | `printf '%s\n' 'ticket description' \| opc-paperclip engineering-ticket create --repo owner/repo --title '...'` (description is stdin) |
-| Create prototype ticket | `printf '%s\n' 'Prototype: recipe-bot\n...' \| opc-paperclip prototype-ticket create --name recipe-bot --title '...'` (description is stdin) |
+| Create prototype ticket | `printf '%s\n%s\n' 'Prototype: recipe-bot' '...' \| opc-paperclip prototype-ticket create --name recipe-bot --title '...'` (description is stdin) |
 | Get issue | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>"` → `.status`, `.title` |
 | Add comment | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"body":"..."}' "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | List comments | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
@@ -124,7 +124,7 @@ opc-paperclip agent concurrency reset --role engineer
 opc-paperclip project workspace show --repo owner/repo
 opc-paperclip project workspace set --repo owner/repo --mode shared_workspace --shared-concurrency serialize
 opc-paperclip project workspace reset --repo owner/repo --lane engineering
-opc-paperclip project workspace reset --repo owner/repo --lane prototype
+opc-paperclip project workspace reset --project-id <prototype-project-id> --lane prototype
 ```
 
 For a project request, canonicalize `owner/repo` and require exactly one
@@ -134,6 +134,12 @@ operator; never guess. A prototype request likewise requires its exact
 `[a-z][a-z0-9-]{1,40}` name. The prototype-ticket helper enforces exact-name
 lookup, continuation, and active-ticket deduplication; if the user says
 "that recipe" without a unique name, list prototypes and ask which one.
+
+Prototype projects use local-path primary workspaces, so do not resolve them
+with `--repo owner/repo`. Obtain the exact project ID from the Paperclip
+project listing (or the project's show response), then use
+`--project-id <prototype-project-id>` for prototype inspection/reset. The
+engineering repo form remains `--repo owner/repo`.
 
 Answer patterns:
 

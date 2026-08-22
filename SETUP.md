@@ -269,19 +269,26 @@ re-attaches watchers for surviving tickets on every boot.
 
 The `opc-paperclip` helper is installed in Buzz and Hermes. Run these
 inspection and mutation commands inside the `hermes` container as the runtime
-user; it uses the existing Paperclip credential environment/mirror already
-loaded by the Hermes entrypoint. Do not replace these with hand-written curl
-payloads:
+user. `docker compose exec` does not inherit Hermes PID1's board-key export, so
+each command reads the runtime-readable seeded expert-profile mirror into
+`PAPERCLIP_API_KEY` inside a nested shell without printing the key. Do not
+replace these with hand-written curl payloads:
 
 ```bash
-docker compose exec -u 10000 hermes opc-paperclip agent concurrency show --role engineer
-docker compose exec -u 10000 hermes opc-paperclip agent concurrency set --role engineer --max 6
-docker compose exec -u 10000 hermes opc-paperclip agent concurrency reset --role engineer
-docker compose exec -u 10000 hermes opc-paperclip project workspace show --repo owner/repo
-docker compose exec -u 10000 hermes opc-paperclip project workspace set --repo owner/repo --mode shared_workspace --shared-concurrency serialize
-docker compose exec -u 10000 hermes opc-paperclip project workspace reset --repo owner/repo --lane engineering
-docker compose exec -u 10000 hermes opc-paperclip project workspace reset --repo owner/repo --lane prototype
+docker compose exec -T -u 10000 hermes sh -c 'export PAPERCLIP_API_KEY="$(cat /opt/data/profiles/agt-scientist/.paperclip-api.key)" && exec opc-paperclip agent concurrency show --role engineer'
+docker compose exec -T -u 10000 hermes sh -c 'export PAPERCLIP_API_KEY="$(cat /opt/data/profiles/agt-scientist/.paperclip-api.key)" && exec opc-paperclip agent concurrency set --role engineer --max 6'
+docker compose exec -T -u 10000 hermes sh -c 'export PAPERCLIP_API_KEY="$(cat /opt/data/profiles/agt-scientist/.paperclip-api.key)" && exec opc-paperclip agent concurrency reset --role engineer'
+docker compose exec -T -u 10000 hermes sh -c 'export PAPERCLIP_API_KEY="$(cat /opt/data/profiles/agt-scientist/.paperclip-api.key)" && exec opc-paperclip project workspace show --repo owner/repo'
+docker compose exec -T -u 10000 hermes sh -c 'export PAPERCLIP_API_KEY="$(cat /opt/data/profiles/agt-scientist/.paperclip-api.key)" && exec opc-paperclip project workspace set --repo owner/repo --mode shared_workspace --shared-concurrency serialize'
+docker compose exec -T -u 10000 hermes sh -c 'export PAPERCLIP_API_KEY="$(cat /opt/data/profiles/agt-scientist/.paperclip-api.key)" && exec opc-paperclip project workspace reset --repo owner/repo --lane engineering'
+docker compose exec -T -u 10000 hermes sh -c 'export PAPERCLIP_API_KEY="$(cat /opt/data/profiles/agt-scientist/.paperclip-api.key)" && exec opc-paperclip project workspace reset --project-id <prototype-project-id> --lane prototype'
 ```
+
+Prototype projects use local-path primary workspaces, so do not use the
+`--repo owner/repo` form for their reset. Obtain the exact
+`<prototype-project-id>` from the Paperclip project listing or project show
+response, then pass it with `--project-id`. The engineering repo reset above
+remains the canonical form.
 
 The exact managed lane defaults are:
 
