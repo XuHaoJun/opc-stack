@@ -109,6 +109,9 @@ has "devenv S3 durable volume" docker-compose.yml 'devenv-s3-data:/data'
 has "devenv S3 root credential source" docker-compose.yml 'DEVENV_S3_ROOT_PASSWORD'
 has "devenv S3 schema producer" patches/paperclip/devenv/bootstrap.sql 'ADD COLUMN IF NOT EXISTS s3_bucket'
 has "paperclip carries pinned mc" patches/paperclip/Dockerfile 'RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349e'
+has "devenv RabbitMQ durable volume" docker-compose.yml 'devenv-rabbitmq-data:/var/lib/rabbitmq'
+has "devenv RabbitMQ admin credential source" docker-compose.yml 'DEVENV_RABBITMQ_ADMIN_PASSWORD'
+has "devenv RabbitMQ schema producer" patches/paperclip/devenv/bootstrap.sql 'ADD COLUMN IF NOT EXISTS rabbitmq_vhost'
 has "api key ships in .env.example"                   .env.example                           'HERMES_SCIENTIST_API_KEY'
 
 echo "── ordering: nothing races its producer ──"

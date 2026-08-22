@@ -705,6 +705,14 @@ services:
       DEVENV_S3_PORT: "9000"
       DEVENV_S3_ROOT_USER: ${DEVENV_S3_ROOT_USER:-devenv-admin}
       DEVENV_S3_ROOT_PASSWORD: ${DEVENV_S3_ROOT_PASSWORD:-devenv-object-storage}
+      DEVENV_RABBITMQ_HOST: devenv-rabbitmq
+      DEVENV_RABBITMQ_PORT: "5672"
+      DEVENV_RABBITMQ_API_PORT: "15672"
+      DEVENV_RABBITMQ_ADMIN_USER: ${DEVENV_RABBITMQ_ADMIN_USER:-devenv-admin}
+      DEVENV_RABBITMQ_ADMIN_PASSWORD: ${DEVENV_RABBITMQ_ADMIN_PASSWORD:-devenv-rabbitmq}
+      # Logical-tenant guardrails, not physical CPU/RAM/disk isolation.
+      DEVENV_RABBITMQ_MAX_CONNECTIONS: ${DEVENV_RABBITMQ_MAX_CONNECTIONS:-32}
+      DEVENV_RABBITMQ_MAX_QUEUES: ${DEVENV_RABBITMQ_MAX_QUEUES:-256}
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
       # Preview ports for prototype dev servers, leased by `devenv provision
@@ -998,6 +1006,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+
+  # RabbitMQ is natively multi-tenant by vhost. devenv gives every lease one
+  # vhost and one untagged user; the management API stays internal and is used
+  # only by the provider to reconcile those resources. AMQP is loopback-published
+  # so an operator can connect a local client without exposing scratch data.
+  devenv-rabbitmq:
+    image: rabbitmq:4.3.5-management-alpine@sha256:a1a5dd841347af3e32355fd58ac530e831fd394c49e299f862e2fd4ab331cd79
+    # RabbitMQ's on-disk database is keyed by node name. Docker's default
+    # hostname is the container id, so force-recreate otherwise boots a new,
+    # empty node against the same volume and silently hides every tenant.
+    hostname: devenv-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${DEVENV_RABBITMQ_ADMIN_USER:-devenv-admin}
+      RABBITMQ_DEFAULT_PASS: ${DEVENV_RABBITMQ_ADMIN_PASSWORD:-devenv-rabbitmq}
+    ports:
+      - "127.0.0.1:${DEVENV_RABBITMQ_PORT:-5673}:5672"
+    volumes:
+      - devenv-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
   # ══════════════════════ podenv (巢狀容器租約) ══════════════════════
   # devenv 蓋不到的那一半: 不能 multi-tenant 的 daemon, 以及很老舊的版本。
   # 設計 (含七條量測): docs/superpowers/specs/
@@ -1230,6 +1262,7 @@ volumes:
   devenv-pg-data:
   devenv-valkey-data:
   devenv-s3-data:
+  devenv-rabbitmq-data:
   buzz-pgdata:
   buzz-redisdata:
   buzz-miniodata:

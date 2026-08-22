@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS devenv_tenant (
   providers    text[] NOT NULL,
   valkey_db    int UNIQUE,          -- NULL = valkey not provisioned
   s3_bucket    text UNIQUE,          -- NULL = s3 not provisioned
+  rabbitmq_vhost text UNIQUE,       -- NULL = rabbitmq not provisioned
   -- HTTP preview ports: a tenant holds the CONTIGUOUS block
   -- [http_port_start, http_port_start + http_port_count).
   -- UNIQUE on the start alone is NOT sufficient to prevent overlap (A at
@@ -36,6 +37,7 @@ ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS http_port_start int UNIQUE;
 ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS http_port_count int NOT NULL DEFAULT 0;
 ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS http_exposed_at timestamptz;
 ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS s3_bucket text UNIQUE;
+ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS rabbitmq_vhost text UNIQUE;
 
 -- Sizes come from pg_database_size(), via a LEFT JOIN on pg_database rather
 -- than by name.
@@ -61,6 +63,7 @@ SELECT t.key,
        t.providers,
        t.valkey_db,
        t.s3_bucket,
+       t.rabbitmq_vhost,
        t.http_port_start,
        t.http_port_count,
        -- Leased a preview port but never ran `devenv expose` — the one cost of

@@ -81,7 +81,8 @@ unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES \
       TENCENTDB_PANEL_PORT TENCENTDB_KNOWLEDGE_PORT TENCENTDB_PROXY_PORT \
       DEVENV_HTTP_PORT_BASE DEVENV_HTTP_PORT_COUNT DEVENV_HTTP_PORT_RANGE_END \
       DEVENV_HTTP_BIND DEVENV_SECRET_SALT \
-      PODENV_PORT_BASE PODENV_PORT_COUNT PODENV_PORT_RANGE_END DEVENV_S3_PORT 2>/dev/null || true
+      PODENV_PORT_BASE PODENV_PORT_COUNT PODENV_PORT_RANGE_END \
+      DEVENV_S3_PORT DEVENV_RABBITMQ_PORT 2>/dev/null || true
 
 # env_value <file> <key> — read ONE value with the same parser the stack uses.
 #
@@ -165,14 +166,14 @@ if [ "$CLEAN_ONLY" = 1 ]; then
     exit 0
 fi
 
-# ── the three gates must follow the CLONE's .env, not this repo's ────────
+# ── every gate must follow the CLONE's .env, not this repo's ─────────────
 # The whole design rests on it: they are invoked inside the clone and are
 # expected to pick up its project name and its ports. Both halves are load
 # bearing — the `cd` to their own repo root, and reading ./.env from there —
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh"
+GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
@@ -201,7 +202,8 @@ TENCENTDB_CORE_PORT:8420
 TENCENTDB_PANEL_PORT:8125
 TENCENTDB_KNOWLEDGE_PORT:8424
 TENCENTDB_PROXY_PORT:8096
-DEVENV_S3_PORT:9002"
+DEVENV_S3_PORT:9002
+DEVENV_RABBITMQ_PORT:5673"
 
 base_port() { # <key> <fallback>
     local v; v="$(env_value "$REPO_ROOT/.env.example" "$1")"

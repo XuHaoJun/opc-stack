@@ -1,16 +1,18 @@
 ---
 name: devenv
-description: Lease isolated development resources (PostgreSQL with pgvector, Valkey, S3 object storage, a preview port) inside the OPC stack. Use when a task needs a database, a cache, an S3 bucket, or an HTTP port that other work must not collide with.
+description: Lease isolated development resources (PostgreSQL with pgvector, Valkey, RabbitMQ, S3 object storage, a preview port) inside the OPC stack. Use when a task needs a database, cache, message broker, S3 bucket, or HTTP port that other work must not collide with.
 ---
 
 # devenv — development resource leases
 
-You have no Docker and no host access. When a task needs a database, a cache,
-or a reachable HTTP port, you lease one:
+You have no Docker and no host access. When a task needs a database, cache,
+message broker, object store, or reachable HTTP port, lease one:
 
 ```sh
 devenv provision <key> --with postgres,valkey,http
 devenv provision <key> --with s3
+devenv provision <key> --with rabbitmq
+devenv provision <key> --with postgres,rabbitmq
 devenv provision <key> --with postgres,s3
 ```
 
@@ -20,6 +22,7 @@ It writes standard names into `.env` in the current directory and prints them:
 |---|---|
 | `DATABASE_URL` | Your own PostgreSQL database, pgvector already enabled |
 | `VALKEY_URL` | Your own Valkey user, isolated to its own db index |
+| `AMQP_URL` | Your own RabbitMQ user and vhost |
 | `DEV_PORT` | A preview port that is published to the user's machine |
 | `DEV_URL` | The URL that port is reachable at |
 | `HOST` | `0.0.0.0` — see the warning below |
@@ -34,17 +37,34 @@ Then read them from `.env` like any application would. **Nothing else in your
 code should know devenv exists**; no devenv-specific config, no hardcoded
 hostnames, no hardcoded ports.
 
-`--with` is a comma list; take only what you need. `--with http=3` leases three
-consecutive ports (`DEV_PORT`, `DEV_PORT_2`, `DEV_PORT_3`).
+`--with` is a comma list; take only what you need. RabbitMQ is opt-in; default
+remains `postgres,valkey`. `--with http=3` leases three consecutive ports
+(`DEV_PORT`, `DEV_PORT_2`, `DEV_PORT_3`).
 
-Default remains postgres,valkey.
-Use: devenv provision <key> --with s3
-Use: devenv provision <key> --with postgres,s3
-Read: AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-      AWS_REGION, S3_BUCKET, S3_FORCE_PATH_STYLE.
-Wire S3_BUCKET and path-style explicitly; not every SDK reads those two names.
-Presigned URLs are internal/host-loopback only in this release.
-Never use buzz-minio and never run devenv release as an agent.
+RabbitMQ use:
+
+```sh
+devenv provision <key> --with rabbitmq
+```
+
+Read `AMQP_URL`; do not reconstruct credentials or hardcode
+`devenv-rabbitmq:5672`. Each lease gets one vhost and one user that has no
+global management tags and permissions only in that vhost. Vhosts isolate
+connections and broker objects, not CPU, memory, disk, or broker failures.
+Use the dedicated-container lane below when the task specifically requires its
+own RabbitMQ version, plugins, cluster topology, or failure domain.
+
+S3 use:
+
+```sh
+devenv provision <key> --with s3
+devenv provision <key> --with postgres,s3
+```
+
+Read `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`AWS_REGION`, `S3_BUCKET`, and `S3_FORCE_PATH_STYLE`. Wire `S3_BUCKET` and
+path-style explicitly; not every SDK reads those two names. Presigned URLs are
+internal/host-loopback only in this release. Never use buzz-minio.
 Exit 4 means the selected backend cannot complete; do not retry-loop or fall back.
 
 S3 wiring: set `S3_BUCKET` as the bucket name and force path-style addressing
@@ -82,11 +102,11 @@ decision, not a tidy-up step. Never use buzz-minio and never run devenv release 
 
 ## Inspecting
 
-`devenv list` shows every lease: owner, database size, s3 bucket, ports, idle
-time. A `!` next to a port means it was leased but never exposed. The bucket
-column is shown directly from the registry; `devenv list` does not contact
-RustFS for size or availability — if RustFS is down the listing still succeeds
-and S3 leases remain visible.
+`devenv list` shows every lease: owner, database size, Valkey db, S3 bucket,
+RabbitMQ vhost, ports, and idle time. A `!` next to a port means it was leased
+but never exposed. Provider identity comes from the control registry;
+`devenv list` does not contact S3 or RabbitMQ, so leases stay visible while an
+optional backend is down.
 
 ## Failure
 

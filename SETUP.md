@@ -347,25 +347,28 @@ docker compose exec hermes hermes --help
 docker compose exec frontdoor hermes --version
 ```
 
-## devenv — shared backends (postgres, valkey, s3)
+## devenv — shared backends (postgres, valkey, RabbitMQ, S3)
 
 `devenv` is the shared, multi-tenant lane: one PostgreSQL 18 + pgvector server,
-one Valkey 9.1 server, and one RustFS S3 server, each split into per-tenant
-credentials. Applications read the workspace `.env`; nothing else knows devenv
+one Valkey 9.1 server, one RabbitMQ 4.3 broker, and one RustFS S3 server. Each
+lease gets backend-specific credentials; RabbitMQ uses one untagged user and
+one vhost. Applications read the workspace `.env`; nothing else knows devenv
 exists.
 
 Provision is opt-in per backend. Default remains `postgres,valkey`:
 
 ```bash
+docker compose exec -u node paperclip devenv provision demo --with rabbitmq
 docker compose exec -u node paperclip devenv provision demo --with s3
-docker compose exec -u node paperclip devenv provision demo --with postgres,s3
+docker compose exec -u node paperclip devenv provision demo --with postgres,rabbitmq,s3
 docker compose exec -u node paperclip devenv list
 docker compose exec -it paperclip devenv release demo
 ```
 
-`devenv list` shows the bucket (from the registry) but does not contact RustFS
-for size — bucket listing stays visible even when RustFS is down. Host
-inspection uses the tenant `.env` with the loopback endpoint substituted:
+`devenv list` shows the S3 bucket and RabbitMQ vhost from the control registry;
+it does not contact either optional backend. Leases therefore stay visible
+when RustFS or RabbitMQ is down. Host S3 inspection uses the tenant `.env`
+with the loopback endpoint substituted:
 
 ```bash
 docker compose exec -u node paperclip devenv provision demo --with s3 --env-file /tmp/demo.env
@@ -379,18 +382,24 @@ mc ls "demo/$S3_BUCKET"
 AWS_ENDPOINT_URL="http://127.0.0.1:${DEVENV_S3_PORT:-9002}" aws --endpoint-url "$AWS_ENDPOINT_URL" s3 ls "s3://$S3_BUCKET"
 ```
 
-`devenv release demo` force-deletes all objects in `devenv-demo`, then removes
-the bucket, IAM user, and policy. It is operator-only and remains manual — no
-GC, no idle expiry.
+RabbitMQ writes `AMQP_URL`. From the host, keep its tenant credentials and
+vhost but replace `devenv-rabbitmq:5672` with
+`127.0.0.1:${DEVENV_RABBITMQ_PORT:-5673}`. The management API is not published.
+Vhosts isolate connections, names, permissions, queues, exchanges, bindings,
+and messages; they do not isolate CPU, RAM, disk, or broker failures.
 
-For the single existing deployment, the S3 service is new and needs no
-migration script; recreate the images and start RustFS with one pasteable
-sequence:
+`devenv release demo` drops the RabbitMQ vhost and user, force-deletes all
+objects in `devenv-demo`, then removes the S3 bucket, IAM user, and policy.
+It is operator-only and remains manual — no GC, no idle expiry.
+
+For the single existing deployment, RabbitMQ and S3 need no migration script;
+rebuild Paperclip so it carries the new provider/client, then start both
+backends:
 
 ```bash
 scripts/prepare.sh
 docker compose up -d --build paperclip
-docker compose up -d devenv-s3
+docker compose up -d devenv-s3 devenv-rabbitmq
 ```
 
 ## podenv — nested container leases
@@ -406,9 +415,10 @@ devenv usage details live in the `devenv` agent skill (`patches/paperclip/skills
 and in `AGENTS.md` 架構; operator commands for list/release are shown above.
 
 **Always try devenv first.** The CLI enforces this mechanically: asking
-podenv for a postgres/pgvector/valkey/redis image (by name, tag, digest, or
-registry alias) is refused with the devenv command to run instead. S3 image
-families (`s3`, `minio`, `rustfs`) are likewise routed to `devenv provision --with s3`.
+podenv for a postgres/pgvector/valkey/redis/RabbitMQ image (by name, tag,
+digest, or registry alias) is refused with the devenv command to run instead.
+S3 image families (`s3`, `minio`, `rustfs`) are likewise routed to
+`devenv provision --with s3`.
 Common commands (run inside the `paperclip` container, same as `devenv`):
 
 ```bash

@@ -1,7 +1,7 @@
 #!/bin/sh
 # devenv — development environment resource leases for Paperclip agents.
 #
-#   devenv provision <key> [--with postgres,valkey,http[=N]] [--lifecycle keep] [--env-file PATH]
+#   devenv provision <key> [--with postgres,valkey,rabbitmq,http[=N]] [--lifecycle keep] [--env-file PATH]
 #   devenv release   <key>
 #   devenv list
 #
@@ -30,6 +30,14 @@ DEVENV_VALKEY_PORT="${DEVENV_VALKEY_PORT:-6379}"
 DEVENV_VALKEY_PASSWORD="${DEVENV_VALKEY_PASSWORD:-}"
 # Slot 0 is reserved for devenv itself, so usable ids are 1..DATABASES-1.
 DEVENV_VALKEY_DATABASES="${DEVENV_VALKEY_DATABASES:-64}"
+
+DEVENV_RABBITMQ_HOST="${DEVENV_RABBITMQ_HOST:-devenv-rabbitmq}"
+DEVENV_RABBITMQ_PORT="${DEVENV_RABBITMQ_PORT:-5672}"
+DEVENV_RABBITMQ_API_PORT="${DEVENV_RABBITMQ_API_PORT:-15672}"
+DEVENV_RABBITMQ_ADMIN_USER="${DEVENV_RABBITMQ_ADMIN_USER:-devenv-admin}"
+DEVENV_RABBITMQ_ADMIN_PASSWORD="${DEVENV_RABBITMQ_ADMIN_PASSWORD:-devenv-rabbitmq}"
+DEVENV_RABBITMQ_MAX_CONNECTIONS="${DEVENV_RABBITMQ_MAX_CONNECTIONS:-32}"
+DEVENV_RABBITMQ_MAX_QUEUES="${DEVENV_RABBITMQ_MAX_QUEUES:-256}"
 
 DEVENV_SECRET_SALT="${DEVENV_SECRET_SALT:-}"
 
@@ -125,7 +133,8 @@ devenv_registry_provider_remove() {
              http_port_start = CASE WHEN '$_rpr_provider' = 'http' THEN NULL ELSE http_port_start END,
              http_port_count = CASE WHEN '$_rpr_provider' = 'http' THEN 0 ELSE http_port_count END,
              http_exposed_at = CASE WHEN '$_rpr_provider' = 'http' THEN NULL ELSE http_exposed_at END,
-             s3_bucket = CASE WHEN '$_rpr_provider' = 's3' THEN NULL ELSE s3_bucket END
+             s3_bucket = CASE WHEN '$_rpr_provider' = 's3' THEN NULL ELSE s3_bucket END,
+             rabbitmq_vhost = CASE WHEN '$_rpr_provider' = 'rabbitmq' THEN NULL ELSE rabbitmq_vhost END
        WHERE key = '$_rpr_key'" >/dev/null
 }
 
@@ -206,7 +215,7 @@ cmd_provision() {
         arg=""
         [ "$spec" = "$prov" ] || arg="${spec#*=}"
         case "$prov" in
-            postgres|valkey|s3)
+            postgres|valkey|s3|rabbitmq)
                 [ -z "$arg" ] || die "provider '$prov' takes no '=' argument" 2 ;;
             http)
                 if [ -n "$arg" ]; then
@@ -219,7 +228,7 @@ cmd_provision() {
                     DEVENV_HTTP_COUNT=1
                 fi
                 export DEVENV_HTTP_COUNT ;;
-            *) die "unknown provider '$prov' (known: postgres, valkey, http, s3). For anything else (MySQL, Milvus, an old version of one of these, or any other daemon devenv does not serve), use podenv instead — 'podenv provision $key --image <ref> --port <n>'." 2 ;;
+            *) die "unknown provider '$prov' (known: postgres, valkey, rabbitmq, http, s3). For anything else (MySQL, Milvus, an old version of one of these, or any other daemon devenv does not serve), use podenv instead — 'podenv provision $key --image <ref> --port <n>'." 2 ;;
         esac
         providers="$providers $prov"
     done
@@ -233,6 +242,9 @@ cmd_provision() {
     esac
     case " $providers " in *" s3 "*)
         s3_probe || die "devenv-s3 unreachable at $DEVENV_S3_HOST:$DEVENV_S3_PORT" 4 ;;
+    esac
+    case " $providers " in *" rabbitmq "*)
+        rabbitmq_probe || die "devenv-rabbitmq unreachable at $DEVENV_RABBITMQ_HOST:$DEVENV_RABBITMQ_API_PORT" 4 ;;
     esac
 
     existing="$(devenv_registry_get "$key" key)"
@@ -279,8 +291,16 @@ cmd_provision() {
                      ),
                      last_seen_at = now()
                WHERE key = '$key'" >/dev/null
-        elif [ "$prov" = http ]; then
-            devenv_registry_provider_add "$key" "$prov"
+        elif [ "$prov" = rabbitmq ]; then
+            devenv_psql_control -v ON_ERROR_STOP=1 -c "
+              UPDATE devenv_tenant
+                 SET rabbitmq_vhost = '$slug',
+                     providers = ARRAY(
+                       SELECT DISTINCT p FROM unnest(providers || ARRAY['rabbitmq']) AS p
+                       ORDER BY p
+                     ),
+                     last_seen_at = now()
+               WHERE key = '$key'" >/dev/null
         else
             devenv_registry_provider_add "$key" "$prov"
         fi
@@ -341,7 +361,7 @@ cmd_list() {
     devenv_require_control_schema
     # Same view the humans query from a SQL client — one definition, no drift.
     devenv_psql_control -c \
-        "SELECT key, created_by, pg_size, valkey_db, s3_bucket,
+        "SELECT key, created_by, pg_size, valkey_db, s3_bucket, rabbitmq_vhost,
                 CASE WHEN http_port_start IS NULL THEN NULL
                      WHEN http_port_count > 1
                        THEN http_port_start || '-' || (http_port_start + http_port_count - 1)
