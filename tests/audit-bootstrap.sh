@@ -122,6 +122,13 @@ hasall "Paperclip CLI copies are drift guarded" scripts/prepare.sh \
     'check_identical "paperclip CLI (buzz/hermes)"' \
     'patches/buzz/opc-paperclip' \
     'patches/hermes/opc-paperclip'
+hasall "Paperclip isolated workspaces are enabled" patches/paperclip/opc-paperclip-bootstrap.sh \
+    'enableIsolatedWorkspaces' \
+    '/instance/settings/experimental'
+hasall "Fullstack concurrency has a managed default" patches/paperclip/opc-paperclip-bootstrap.sh \
+    'FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT=4' \
+    'fullstackMaxConcurrentRuns' \
+    'maxConcurrentRuns'
 # Asserts the real producer action, not just that a service block named
 # devenv-expert-leases exists somewhere in the compose file. The full
 # invocation (with --env-file) is required because the bare

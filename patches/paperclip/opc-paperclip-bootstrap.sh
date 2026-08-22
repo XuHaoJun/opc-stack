@@ -35,6 +35,25 @@ SKILLS_SRC="${OPC_SKILLS_DIR:-/opt/opc-skills}"
 FULLSTACK_PROMPT="/opt/opc-agent-prompts/fullstack-engineer.md"
 PROTOTYPER_PROMPT="/opt/opc-agent-prompts/prototyper.md"
 KEY_NAME="${PAPERCLIP_KEY_NAME:-frontdoor}"
+FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT=4
+
+opc_managed_concurrency_action() { # current marker default
+    _omca_current="$1"
+    _omca_marker="$2"
+    _omca_default="$3"
+    if [ -z "$_omca_marker" ]; then
+        printf '%s\n' apply
+    elif [ "$_omca_current" = "$_omca_default" ] &&
+         [ "$_omca_marker" = "$_omca_default" ]; then
+        printf '%s\n' keep
+    else
+        printf '%s\n' preserve
+    fi
+}
+if [ "${OPC_PAPERCLIP_BOOTSTRAP_LIB_ONLY:-0}" = 1 ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 JAR=/tmp/pc-cookies.txt
 
 [ -n "$ADMIN_PASSWORD" ] || { echo "PAPERCLIP_ADMIN_PASSWORD is required (set in .env)"; exit 1; }
@@ -95,6 +114,7 @@ api_put_raw() { # path  (body on stdin)
             -H "Origin: $ORIGIN" -X PUT "$API$1" --data-binary @- 2>/dev/null || true
     fi
 }
+
 
 reconcile_agent_instructions() { # agent-id source-file
     _rai_id="$1"
@@ -166,6 +186,27 @@ else
     esac
 fi
 
+# ── 2. Instance experimental features ──
+_experimental_live="$(api_get "/instance/settings/experimental")"
+if ! printf '%s' "$_experimental_live" \
+    | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
+    _experimental_response="$(jq -nc \
+        '{enableIsolatedWorkspaces:true}' \
+        | api_patch_raw "/instance/settings/experimental")"
+    if ! printf '%s' "$_experimental_response" \
+        | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] isolated workspaces enable failed" >&2
+        exit 1
+    fi
+fi
+_experimental_live="$(api_get "/instance/settings/experimental")"
+if ! printf '%s' "$_experimental_live" \
+    | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
+    echo "[pc-bootstrap] isolated workspaces verification failed" >&2
+    exit 1
+fi
+echo "[pc-bootstrap] instance isolated workspaces: enabled/current"
+
 # ── 2. Company ──
 company_id="$(api_get "/companies" | jq -r '.[0].id // empty' 2>/dev/null)"
 if [ -z "$company_id" ]; then
@@ -227,7 +268,9 @@ if [ -z "$agent_id" ]; then
         --arg c "$EXECUTOR_CAPABILITIES" \
         '{name:$n, role:$r, title:$t, capabilities:$c,
           adapterType:"claude_local",
-          adapterConfig:{engine:"acp", agentCommand:"omp acp --yolo"}}' \
+          adapterConfig:{engine:"acp", agentCommand:"omp acp --yolo"},
+          runtimeConfig:{heartbeat:{maxConcurrentRuns:4}},
+          metadata:{opcManagedDefaults:{fullstackMaxConcurrentRuns:4}}}' \
         | api_post_raw "/companies/$company_id/agents")"
     agent_id="$(printf '%s' "$_create_response" | jq -r '.id // empty')"
     if [ -z "$agent_id" ] || ! printf '%s' "$_create_response" | jq -e \
@@ -266,6 +309,56 @@ else
         echo "[pc-bootstrap] executor metadata reconciled: $agent_id"
     fi
 fi
+
+_executor_live="$(api_get "/companies/$company_id/agents" | \
+    jq -c --arg id "$agent_id" '.[]? | select(.id == $id)' 2>/dev/null | head -1)"
+if ! printf '%s' "$_executor_live" | jq -e --arg id "$agent_id" '.id == $id' >/dev/null 2>&1; then
+    echo "[pc-bootstrap] executor concurrency lookup failed: $agent_id" >&2
+    exit 1
+fi
+_executor_current="$(printf '%s' "$_executor_live" | \
+    jq -r '.runtimeConfig.heartbeat.maxConcurrentRuns // empty')"
+_executor_marker="$(printf '%s' "$_executor_live" | \
+    jq -r '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns // empty')"
+_executor_action="$(opc_managed_concurrency_action \
+    "$_executor_current" "$_executor_marker" "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT")"
+if [ "$_executor_action" = apply ]; then
+    _new_runtime="$(printf '%s' "$_executor_live" | jq \
+        --argjson n "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" '
+        (.runtimeConfig // {}) as $r
+        | $r * {heartbeat:(($r.heartbeat // {})
+          * {maxConcurrentRuns:$n})}
+    ')"
+    _new_metadata="$(printf '%s' "$_executor_live" | jq \
+        --argjson n "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" '
+        (.metadata // {}) as $m
+        | $m * {opcManagedDefaults:(($m.opcManagedDefaults // {})
+          * {fullstackMaxConcurrentRuns:$n})}
+    ')"
+    _executor_response="$(jq -nc \
+        --argjson runtime "$_new_runtime" --argjson metadata "$_new_metadata" \
+        '{runtimeConfig:$runtime, metadata:$metadata}' \
+        | api_patch_raw "/agents/$agent_id")"
+    if ! printf '%s' "$_executor_response" | jq -e \
+        --argjson n "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" \
+        '.runtimeConfig.heartbeat.maxConcurrentRuns == $n
+         and .metadata.opcManagedDefaults.fullstackMaxConcurrentRuns == $n' \
+        >/dev/null 2>&1; then
+        echo "[pc-bootstrap] executor concurrency reconciliation failed: $agent_id" >&2
+        exit 1
+    fi
+fi
+_executor_live="$(api_get "/companies/$company_id/agents" | \
+    jq -c --arg id "$agent_id" '.[]? | select(.id == $id)' 2>/dev/null | head -1)"
+if ! printf '%s' "$_executor_live" | jq -e \
+    --arg id "$agent_id" \
+    '.id == $id and (.runtimeConfig.heartbeat.maxConcurrentRuns | type == "number")' \
+    >/dev/null 2>&1; then
+    echo "[pc-bootstrap] executor concurrency verification failed: $agent_id" >&2
+    exit 1
+fi
+echo "[pc-bootstrap] executor concurrency: $_executor_action ($agent_id)"
+
 
 reconcile_agent_instructions "$agent_id" "$FULLSTACK_PROMPT" || true
 

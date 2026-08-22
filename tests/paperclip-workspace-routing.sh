@@ -27,6 +27,17 @@ done
 cmp -s patches/buzz/opc-paperclip patches/hermes/opc-paperclip \
   && ok "CLI copies are identical" || bad "CLI copies are identical"
 
+for decision_case in "20||4|apply" "4|4|4|keep" "6|4|4|preserve" "4|3|4|preserve"; do
+  IFS='|' read -r current marker default expected <<<"$decision_case"
+  actual="$(
+    OPC_PAPERCLIP_BOOTSTRAP_LIB_ONLY=1 sh -c \
+      '. patches/paperclip/opc-paperclip-bootstrap.sh
+       opc_managed_concurrency_action "$1" "$2" "$3"' \
+      sh "$current" "$marker" "$default"
+  )"
+  assert_eq "managed concurrency decision $current/$marker/$default" "$expected" "$actual"
+done
+
 TMPDIR="$(mktemp -d)"
 STATE="$TMPDIR/state.json"
 LOG="$TMPDIR/fixture.log"
@@ -55,12 +66,18 @@ done
   bad "fixture starts on caller-supplied loopback port"
   return 1
 }
-
 cat >"$STATE" <<'JSON'
 {
   "experimental": {"enableIsolatedWorkspaces": false},
   "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
-  "agents": [],
+  "agents": [{
+    "id": "00000000-0000-4000-8000-000000000010",
+    "name": "Fullstack Engineer",
+    "role": "engineer",
+    "status": "idle",
+    "runtimeConfig": {"heartbeat": {"maxConcurrentRuns": 4, "fixtureKeep": true}},
+    "metadata": {"opcManagedDefaults": {"fullstackMaxConcurrentRuns": 4}, "fixtureKeep": "yes"}
+  }],
   "projects": [{
     "id": "project-1",
     "name": "Display Name Is Not Identity",
@@ -83,14 +100,28 @@ JSON
 start_fixture
 export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
 export PAPERCLIP_API_KEY="$TOKEN"
+assert_eq "experimental GET starts disabled" "false" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/instance/settings/experimental" | jq -r .enableIsolatedWorkspaces)"
+EXPERIMENTAL_PATCH="$(curl -fsS -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  "$PAPERCLIP_API_URL/api/instance/settings/experimental" \
+  -d '{"enableIsolatedWorkspaces":true,"fixtureKeep":"yes"}')"
+assert_eq "experimental PATCH enables workspaces" "true" \
+  "$(printf '%s' "$EXPERIMENTAL_PATCH" | jq -r .enableIsolatedWorkspaces)"
+assert_eq "experimental PATCH preserves unrelated key" "yes" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/instance/settings/experimental" | jq -r .fixtureKeep)"
 SHOW_ERR="$TMPDIR/show.err"
 if SHOW="$($CLI project workspace show --repo https://github.com/owner/repo/ 2>"$SHOW_ERR")"; then
+
   ok "project workspace show succeeds for canonical-equivalent SSH URL"
   assert_eq "show project id" "project-1" "$(printf '%s' "$SHOW" | jq -r .project.id)"
   assert_eq "show project display name" "Display Name Is Not Identity" "$(printf '%s' "$SHOW" | jq -r .project.name)"
   assert_eq "show workspace id" "workspace-1" "$(printf '%s' "$SHOW" | jq -r .workspace.id)"
   assert_eq "show workspace URL" "ssh://git@github.com/Owner/Repo.git" "$(printf '%s' "$SHOW" | jq -r .workspace.repoUrl)"
   assert_eq "show primary marker" "true" "$(printf '%s' "$SHOW" | jq -r .workspace.isPrimary)"
+
   assert_eq "show policy mode" "isolated_workspace" "$(printf '%s' "$SHOW" | jq -r .policy.defaultMode)"
   assert_eq "show policy strategy" "git_worktree" "$(printf '%s' "$SHOW" | jq -r .policy.workspaceStrategy.type)"
   assert_eq "show preserves workspace metadata" "kept" "$(printf '%s' "$SHOW" | jq -r .workspace.metadata.fixture)"
@@ -98,6 +129,34 @@ else
   bad "project workspace show succeeds for canonical-equivalent SSH URL"
 fi
 assert_not_contains "fixture log omits bearer token" "$TOKEN" "$(cat "$LOG")"
+assert_eq "engineer concurrency show" "4" \
+  "$($CLI agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
+$CLI agent concurrency set --role engineer --max 6 >/dev/null
+assert_eq "operator concurrency set" "6" \
+  "$($CLI agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
+assert_eq "set is marked override" "operator_override" \
+  "$($CLI agent concurrency show --role engineer | jq -r .source)"
+assert_eq "agent PATCH preserves runtime sibling" "true" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].runtimeConfig.heartbeat.fixtureKeep')"
+assert_eq "agent PATCH preserves metadata sibling" "yes" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].metadata.fixtureKeep')"
+
+$CLI agent concurrency reset --role engineer >/dev/null
+assert_eq "concurrency reset" "4" \
+  "$($CLI agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
+for invalid_max in 0 51; do
+  before="$(cat "$STATE")"
+  if $CLI agent concurrency set --role engineer --max "$invalid_max" >/dev/null 2>&1; then
+    bad "concurrency rejects max $invalid_max"
+  else
+    ok "concurrency rejects max $invalid_max"
+  fi
+  assert_eq "invalid max $invalid_max does not PATCH" "$before" "$(cat "$STATE")"
+done
 
 stop_fixture
 cat >"$STATE" <<'JSON'
@@ -136,6 +195,7 @@ cat >"$STATE" <<'JSON'
   "projects": [
     {
       "id": "project-a",
+
       "name": "Alpha",
       "workspaces": [
         {"id": "workspace-a", "repoUrl": "https://github.com/owner/repo", "isPrimary": true}
@@ -163,6 +223,28 @@ assert_contains "duplicate error includes first project ID/name" "project-a Alph
 assert_contains "duplicate error includes second project ID/name" "project-b Beta" "$(cat "$DUPLICATE_ERR")"
 assert_not_contains "duplicate stderr omits bearer token" "$TOKEN" "$(cat "$DUPLICATE_ERR")"
 assert_not_contains "duplicate fixture log omits bearer token" "$TOKEN" "$(cat "$LOG")"
+stop_fixture
+cat >"$STATE" <<'JSON'
+{
+  "experimental": {"enableIsolatedWorkspaces": false},
+  "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+  "agents": [
+    {"id": "engineer-a", "name": "Engineer A", "role": "engineer"},
+    {"id": "engineer-b", "name": "Engineer B", "role": "engineer"}
+  ],
+  "projects": [],
+  "issues": []
+}
+JSON
+start_fixture
+AGENT_AMBIGUOUS_ERR="$TMPDIR/agent-ambiguous.err"
+if $CLI agent concurrency show --role engineer >/dev/null 2>"$AGENT_AMBIGUOUS_ERR"; then
+  bad "multiple engineer agents fail closed"
+else
+  ok "multiple engineer agents fail closed"
+fi
+assert_contains "multiple-engineer error is actionable" "multiple Paperclip agents match role engineer" "$(cat "$AGENT_AMBIGUOUS_ERR")"
+assert_not_contains "multiple-engineer stderr omits bearer token" "$TOKEN" "$(cat "$AGENT_AMBIGUOUS_ERR")"
 
 echo "result: $PASS pass, $FAIL fail"
 [ "$FAIL" -eq 0 ]

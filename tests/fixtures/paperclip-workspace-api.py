@@ -19,13 +19,22 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 
+DEFAULT_ENGINEER = {
+    "id": "00000000-0000-4000-8000-000000000010",
+    "name": "Fullstack Engineer",
+    "role": "engineer",
+    "status": "idle",
+    "runtimeConfig": {"heartbeat": {"maxConcurrentRuns": 4}},
+    "metadata": {"opcManagedDefaults": {"fullstackMaxConcurrentRuns": 4}},
+}
+
 DEFAULT_STATE = {
     "experimental": {"enableIsolatedWorkspaces": False},
     "company": {
         "id": "00000000-0000-4000-8000-000000000001",
         "name": "Fixture",
     },
-    "agents": [],
+    "agents": [DEFAULT_ENGINEER],
     "projects": [],
     "issues": [],
 }
@@ -102,6 +111,44 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         return self.headers.get("Authorization", "") == "Bearer fixture-key"
 
+    def _request_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        value = json.loads(body or b"{}")
+        if not isinstance(value, dict):
+            raise ValueError("request body must be an object")
+        return value
+
+    def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if not self._authorized():
+            self._send_json(401, {"error": "unauthorized"})
+            return
+        path = [unquote(part) for part in urlsplit(self.path).path.split("/") if part]
+        if not path or path[0] != "api":
+            self._send_json(404, {"error": "not found"})
+            return
+        try:
+            update = self._request_json()
+        except (ValueError, json.JSONDecodeError):
+            self._send_json(400, {"error": "invalid JSON object"})
+            return
+        with LOCK:
+            if path == ["api", "instance", "settings", "experimental"]:
+                experimental = STATE.setdefault("experimental", {})
+                experimental.update(update)
+                save_state()
+                self._send_json(200, experimental)
+            elif len(path) == 3 and path[:2] == ["api", "agents"]:
+                for agent in STATE.get("agents", []):
+                    if str(agent.get("id", "")) == path[2]:
+                        agent.update(update)
+                        save_state()
+                        self._send_json(200, agent)
+                        return
+                self._send_json(404, {"error": "agent not found"})
+            else:
+                self._send_json(404, {"error": "not found"})
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
             self._send_json(401, {"error": "unauthorized"})
@@ -115,8 +162,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"status": "ok"})
             elif path == ["api", "companies"]:
                 self._send_json(200, [STATE["company"]])
+            elif path == ["api", "instance", "settings", "experimental"]:
+                self._send_json(200, STATE.get("experimental", {}))
             elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "agents":
                 self._company_collection(path[2], "agents")
+            elif len(path) == 3 and path[:2] == ["api", "agents"]:
+                for agent in STATE.get("agents", []):
+                    if str(agent.get("id", "")) == path[2]:
+                        self._send_json(200, agent)
+                        return
+                self._send_json(404, {"error": "agent not found"})
             elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "projects":
                 self._company_collection(path[2], "projects")
             elif len(path) == 3 and path[:2] == ["api", "projects"]:

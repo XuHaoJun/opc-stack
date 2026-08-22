@@ -159,6 +159,122 @@ verify_json_field() {
     [ "$_actual" = "$_want" ] || die "Paperclip response field $_filter was $_actual, expected $_want" 4
 }
 
+FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT=4
+
+agent_by_role() {
+    _role="$1"
+    _agents="$(api_request GET "/companies/$(company_id)/agents")" ||
+        die "failed to list Paperclip agents" 4
+    _matches="$(printf '%s' "$_agents" | jq -c --arg role "$_role" '
+        if type == "array" then [.[] | select(.role == $role)] else [] end
+    ' 2>/dev/null)" || die "Paperclip agents response is not an array" 4
+    _count="$(printf '%s' "$_matches" | jq -r 'length')"
+    case "$_count" in
+        0) die "no Paperclip agent matches role $_role" 3 ;;
+        1) printf '%s' "$_matches" | jq -c '.[0]' ;;
+        *) die "multiple Paperclip agents match role $_role" 3 ;;
+    esac
+}
+
+validate_concurrency_max() {
+    _max="$1"
+    if ! jq -en --arg value "$_max" \
+        '$value | test("^[0-9]+$") and (tonumber >= 1 and tonumber <= 50)' \
+        >/dev/null 2>&1; then
+        die "maxConcurrentRuns must be an integer from 1 to 50" 2
+    fi
+}
+
+concurrency_show_json() {
+    _agent="$1"
+    _current="$(printf '%s' "$_agent" | jq -r '.runtimeConfig.heartbeat.maxConcurrentRuns // empty')"
+    case "$_current" in
+        ''|*[!0-9]*) die "agent has no valid runtimeConfig heartbeat maxConcurrentRuns" 4 ;;
+    esac
+    _marker="$(printf '%s' "$_agent" | jq -r \
+        '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns // empty')"
+    case "$_marker" in
+        ''|"$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT")
+            if [ "$_current" = "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" ]; then
+                _source=managed_default
+            else
+                _source=operator_override
+            fi
+            ;;
+        *) _source=operator_override ;;
+    esac
+    jq -nc --argjson agent "$_agent" \
+        --argjson max "$_current" \
+        --argjson managed "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" \
+        --arg source "$_source" \
+        '{agentId:$agent.id, name:$agent.name, scope:"agent_global",
+          maxConcurrentRuns:$max, managedDefault:$managed, source:$source}'
+}
+cmd_agent_concurrency_show() {
+    _role=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --role) [ "$#" -ge 2 ] || die "--role requires a value" 2; _role="$2"; shift 2 ;;
+            *) die "usage: opc-paperclip agent concurrency show --role <role>" 2 ;;
+        esac
+    done
+    [ -n "$_role" ] || die "--role is required" 2
+    concurrency_show_json "$(agent_by_role "$_role")"
+}
+
+cmd_agent_concurrency_write() {
+    _role="$1"
+    _max="$2"
+    _agent="$(agent_by_role "$_role")"
+    _id="$(printf '%s' "$_agent" | jq -r '.id // empty')"
+    [ -n "$_id" ] || die "Paperclip agent has no id" 4
+    _payload="$(printf '%s' "$_agent" | jq --arg value "$_max" '
+        (.runtimeConfig // {}) as $r
+        | (.metadata // {}) as $m
+        | {runtimeConfig: ($r * {heartbeat:(($r.heartbeat // {})
+              * {maxConcurrentRuns:($value | tonumber)})}),
+           metadata: $m}
+    ')"
+    _response="$(api_request PATCH "/agents/$_id" "$_payload")" ||
+        die "failed to update Paperclip agent concurrency" 4
+    printf '%s' "$_response" | jq -e --arg max "$_max" \
+        '.runtimeConfig.heartbeat.maxConcurrentRuns == ($max | tonumber)' >/dev/null 2>&1 ||
+        die "Paperclip agent concurrency update was not verified" 4
+    _live="$(agent_by_role "$_role")"
+    printf '%s' "$_live" | jq -e --arg max "$_max" \
+        '.runtimeConfig.heartbeat.maxConcurrentRuns == ($max | tonumber)' >/dev/null 2>&1 ||
+        die "Paperclip agent concurrency did not persist" 4
+    concurrency_show_json "$_live"
+}
+
+cmd_agent_concurrency_reset() {
+    _role=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --role) [ "$#" -ge 2 ] || die "--role requires a value" 2; _role="$2"; shift 2 ;;
+            *) die "usage: opc-paperclip agent concurrency reset --role <role>" 2 ;;
+        esac
+    done
+    [ -n "$_role" ] || die "--role is required" 2
+    cmd_agent_concurrency_write "$_role" "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT"
+}
+
+cmd_agent_concurrency_set() {
+    _role=""
+    _max=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --role) [ "$#" -ge 2 ] || die "--role requires a value" 2; _role="$2"; shift 2 ;;
+            --max) [ "$#" -ge 2 ] || die "--max requires a value" 2; _max="$2"; shift 2 ;;
+            *) die "usage: opc-paperclip agent concurrency set --role <role> --max <1..50>" 2 ;;
+        esac
+    done
+    [ -n "$_role" ] || die "--role is required" 2
+    [ -n "$_max" ] || die "--max is required" 2
+    validate_concurrency_max "$_max"
+    cmd_agent_concurrency_write "$_role" "$_max"
+}
+
 cmd_repo_normalize() {
     [ "$#" -eq 1 ] || die "usage: opc-paperclip repo normalize <repo>" 2
     canonical_repo_json "$1"
@@ -186,6 +302,17 @@ cmd_project_workspace_show() {
 main() {
     [ "$#" -gt 0 ] || die "usage: opc-paperclip <command>" 2
     case "$1" in
+        agent)
+            shift
+            [ "${1-}" = concurrency ] || die "usage: opc-paperclip agent concurrency <show|set|reset> ..." 2
+            shift
+            case "${1-}" in
+                show) shift; cmd_agent_concurrency_show "$@" ;;
+                set) shift; cmd_agent_concurrency_set "$@" ;;
+                reset) shift; cmd_agent_concurrency_reset "$@" ;;
+                *) die "usage: opc-paperclip agent concurrency <show|set|reset> ..." 2 ;;
+            esac
+            ;;
         repo)
             shift
             [ "${1-}" = normalize ] || die "usage: opc-paperclip repo normalize <repo>" 2
