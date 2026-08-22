@@ -1250,6 +1250,135 @@ expect "re-running with IDENTICAL parameters stays exit 0 (F1 regression guard �
 docker compose exec -T -u node paperclip sh -c \
     'podenv release review-drift >/dev/null 2>&1; rm -f /tmp/podenv-f1drift.env /tmp/podenv-f1drift.out' >/dev/null 2>&1
 
+echo "── task-8: an omitted flag adopts the stored value, not the default (F-omit) ──"
+
+# BACKGROUND (fix, this task): the F1 mismatch check above compared every
+# field against what THIS call's flags evaluated to — including --as's and
+# --netns's DEFAULTS when the caller never passed them. --as defaults to a
+# name derived from --image, and --netns defaults to "pasta"; omitting
+# either on the documented pick-it-back-up path therefore read as "asking to
+# change it" and refused, and the refusal's only suggested remedy
+# ('podenv release') is the one action the podenv skill forbids running
+# unprompted. RED-proved live against the pre-fix binary still deployed at
+# the time this section was written (see final-review-fixes.md): a lease
+# created with `--as MY_CUSTOM_ADDR` refused a bare re-provision that only
+# omitted `--as`, reporting the derived `WHOAMI_ADDR` default as a changed
+# identity; the same refusal fired when only `--netns host` was omitted on a
+# host-netns lease. Fix: an omitted --as/--netns now adopts the STORED value
+# before comparing, so omitting one can never itself produce a mismatch.
+docker compose exec -T -u node paperclip sh -c 'rm -f /tmp/podenv-fomit.env /tmp/podenv-fomit.out'
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision fomit-gate --image docker.io/traefik/whoami --port 80 \
+        --as MY_CUSTOM_ADDR --env-file /tmp/podenv-fomit.env >/dev/null 2>&1'
+
+_fomit_before="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_fomit_gate --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+
+# (a) re-provision with fully IDENTICAL explicit parameters: exit 0, and the
+# lease must not be disturbed at all (StartedAt+pid unchanged) — probe-first
+# staying non-disruptive on this path is the whole point of the fix, not
+# just "eventually returns 0".
+expect "(a) identical explicit parameters stay exit 0" "0" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision fomit-gate --image docker.io/traefik/whoami --port 80 \
+        --as MY_CUSTOM_ADDR --env-file /tmp/podenv-fomit.env >/dev/null 2>&1; echo $?'
+
+_fomit_after_a="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_fomit_gate --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+
+if [ -n "$_fomit_before" ] && [ "$_fomit_before" = "$_fomit_after_a" ]; then
+    pass "(a) identical explicit parameters do not disturb the lease (StartedAt+pid unchanged)"
+else
+    fail "(a) identical explicit parameters disturbed the lease — StartedAt+pid changed from '$_fomit_before' to '$_fomit_after_a'"
+fi
+
+# (b) re-provision OMITTING --as: must stay exit 0 (the dead end this whole
+# fix closes), and the .env line must use the STORED variable name
+# (MY_CUSTOM_ADDR), never a freshly derived default (WHOAMI_ADDR) — that
+# derived-default write for a DIFFERENT name is exactly the silent-drift
+# shape task-7's F1 guard exists to catch, just reached through omission
+# instead of an explicit --as.
+expect "(b) omitting --as on reprovision stays exit 0 (the dead end this fix closes)" "0" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision fomit-gate --image docker.io/traefik/whoami --port 80 \
+        --env-file /tmp/podenv-fomit.env >/tmp/podenv-fomit.out 2>&1; echo $?'
+
+expect "(b) the .env line still uses the STORED variable name (MY_CUSTOM_ADDR)" "MY_CUSTOM_ADDR" \
+    docker compose exec -T -u node paperclip sh -c \
+    "sed 's/=.*//' /tmp/podenv-fomit.env | grep -x MY_CUSTOM_ADDR"
+
+check_absent_from "(b) omitting --as never wrote the derived-default name (WHOAMI_ADDR)" "WHOAMI_ADDR=" \
+    docker compose exec -T -u node paperclip cat /tmp/podenv-fomit.env
+
+_fomit_after_b="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_fomit_gate --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+if [ -n "$_fomit_before" ] && [ "$_fomit_before" = "$_fomit_after_b" ]; then
+    pass "(b) omitting --as does not disturb the lease (StartedAt+pid unchanged)"
+else
+    fail "(b) omitting --as disturbed the lease — StartedAt+pid changed from '$_fomit_before' to '$_fomit_after_b'"
+fi
+
+# (d) re-provision with an EXPLICITLY different --image: must still refuse
+# (exit 2), naming the actual difference — omission adopting the stored
+# value must not have opened a hole where a REAL identity change slips
+# through unrefused.
+expect "(d) an explicitly different --image is still refused, naming the difference" "2" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision fomit-gate --image docker.io/library/nginx:alpine --port 80 \
+        --env-file /tmp/podenv-fomit.env >/tmp/podenv-fomit-d.out 2>&1; echo $?'
+
+check "(d) the refusal names the image the lease already holds" \
+    sh -c "docker compose exec -T -u node paperclip sh -c 'grep -qF traefik/whoami /tmp/podenv-fomit-d.out'"
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release fomit-gate >/dev/null 2>&1
+     rm -f /tmp/podenv-fomit.env /tmp/podenv-fomit.out /tmp/podenv-fomit-d.out' >/dev/null 2>&1
+
+# (c) same trap, --netns host side: omitting --netns on a host-netns lease
+# must adopt "host" from the stored row, not silently default to "pasta" and
+# refuse. Needs its own daemon-bound port (host netns has no remapping), a
+# fresh port to avoid colliding with other host-netns leases in this file.
+docker compose exec -T -u node paperclip sh -c 'rm -f /tmp/podenv-fomit-host.env'
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision fomit-host-gate --image docker.io/traefik/whoami --port 8195 \
+        --netns host --env WHOAMI_PORT_NUMBER=8195 \
+        --as FOMITHOST_ADDR --env-file /tmp/podenv-fomit-host.env' >/dev/null 2>&1
+
+_fomith_addr="$(docker compose exec -T -u node paperclip sh -c \
+    'grep "^FOMITHOST_ADDR=" /tmp/podenv-fomit-host.env | cut -d= -f2-' 2>/dev/null | tr -d '\r')"
+
+expect_ok "(c) the --netns host lease genuinely serves before the omitted-flag reprovision" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "[ -n '$_fomith_addr' ] || exit 1
+     curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_fomith_addr/'"
+
+_fomith_before="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_fomit_host_gate --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+
+expect "(c) omitting --netns on a --netns host lease stays exit 0" "0" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision fomit-host-gate --image docker.io/traefik/whoami --port 8195 \
+        --env WHOAMI_PORT_NUMBER=8195 \
+        --as FOMITHOST_ADDR --env-file /tmp/podenv-fomit-host.env >/dev/null 2>&1; echo $?'
+
+_fomith_after="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_fomit_host_gate --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+
+if [ -n "$_fomith_before" ] && [ "$_fomith_before" = "$_fomith_after" ]; then
+    pass "(c) omitting --netns on a --netns host lease does not disturb it (StartedAt+pid unchanged)"
+else
+    fail "(c) omitting --netns on a --netns host lease disturbed it — StartedAt+pid changed from '$_fomith_before' to '$_fomith_after'"
+fi
+
+expect_ok "(c) the --netns host lease still serves after the omitted-flag reprovision" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_fomith_addr/'"
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release fomit-host-gate >/dev/null 2>&1; rm -f /tmp/podenv-fomit-host.env' >/dev/null 2>&1
+
 echo "── task-7: --netns host reprovision refuses a changed --port before probing/disrupting (F1 destructive sub-case) ──"
 
 # The destructive sub-case named in the review: under --netns host, hport

@@ -94,6 +94,20 @@ gets stopped and started to try to revive it — and if that does not bring it
 back, `provision` now FAILS (exit 5) instead of reporting success; nothing is
 left half-registered when that happens.
 
+**But `provision` never CHANGES an existing lease.** Picking a lease back up
+and changing it are different operations, and only the first one is safe to
+run freely. Omit a flag on a re-run and it means "whatever this lease
+already has" — omitting `--as` keeps its existing `.env` variable name,
+omitting `--netns` keeps its existing network mode, so a plain re-run with
+no memory of your exact original flags still just picks it back up. But
+explicitly passing a DIFFERENT `--image`, `--port`, `--netns`, or `--as` than
+what the lease was created with is refused (exit 2) — provision will not
+swap the image or move the port out from under a live lease. If you
+genuinely need different parameters for this key, use a different key. Do
+**not** reach for `podenv release` to clear the way — see the next rule:
+releasing is the user's decision, not something you do to unblock yourself.
+Ask the user to release it if that is really what is needed.
+
 **Never run `podenv release`.** It deletes the container AND its data volumes.
 Releasing is the user's decision, not a tidy-up step. It also recycles the
 port without touching whatever `.env` the lease's address was written into:
@@ -132,7 +146,7 @@ anything.
 
 | Exit | Meaning |
 |---|---|
-| 2 | Bad usage. Three different cases share this code, and only one of them names a devenv command: the **route gate** (devenv already serves this image family) does — read the message and run the `devenv provision` command it gives you. A **reserved `.env` variable name** names a different `--as` instead, not a devenv command. Plain bad usage (missing `--image`, invalid `--netns`, a malformed `--port`) names neither — it just tells you what was wrong with the flags. Read the message; do not assume it always points at devenv. |
+| 2 | Bad usage. Four different cases share this code, and only one of them names a devenv command: the **route gate** (devenv already serves this image family) does — read the message and run the `devenv provision` command it gives you. A **reserved `.env` variable name** names a different `--as` instead, not a devenv command. A **reprovision that names a different `--image`/`--port`/`--netns`/`--as` than the lease already holds** names your two actual options instead: use a different key, or ask the user to release this one — see "provision never changes an existing lease" above; do not run `podenv release` yourself over this. Plain bad usage (missing `--image`, invalid `--netns`, a malformed `--port`) names none of that — it just tells you what was wrong with the flags. Read the message; do not assume it always points at devenv. |
 | 3 | Three different exhaustion/collision cases share this code, and only two of them are the operator's call. The pool-exhaustion sites (no free port in `PODENV_PORT_BASE`-`PODENV_PORT_RANGE_END`, or the port-claim race lost 5 times running) mean report it to the user; they decide what to release. The third — a **`--netns host` port collision** (two host-netns leases both wanting the same container port, which that mode cannot remap around) — is yours to fix without asking: the message itself says to pick a different `--port` or release the other lease (`podenv list`). Don't burn a round-trip asking permission for something the message already told you how to resolve. |
 | 4 | The runtime host or the registry is unreachable. Report it — this is not something you can fix. |
 | 5 | The runtime host refused to start (or revive) the lease's container — a bad image, a command that exits immediately, or a daemon that never came back up after a restart attempt. No registry row and no `.env` entry are left behind when this happens on a fresh `provision`. Read the container's logs before retrying blindly. |
