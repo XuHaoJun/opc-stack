@@ -73,6 +73,9 @@ check_identical "nix client seed (buzz/hermes)" \
 check_identical "nix client seed (hermes/paperclip)" \
   patches/hermes/nix-seed.sh \
   patches/paperclip/nix-seed.sh
+check_identical "paperclip CLI (buzz/hermes)" \
+  patches/buzz/opc-paperclip \
+  patches/hermes/opc-paperclip
 
 apply_patch buzz
 apply_patch hermes
