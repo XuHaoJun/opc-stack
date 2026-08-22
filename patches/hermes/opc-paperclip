@@ -380,12 +380,15 @@ workspace_marker_payload() {
     _lane="$3"
     _mode="$4"
     _strategy="$5"
+    _shared="${6-}"
     printf '%s' "$_workspace" | jq -c \
-        --arg lane "$_lane" --arg mode "$_mode" --arg strategy "$_strategy" '
+        --arg lane "$_lane" --arg mode "$_mode" --arg strategy "$_strategy" \
+        --arg shared "$_shared" '
         (.metadata // {}) as $metadata
         | $metadata * {opcWorkspaceDefaults:
             (($metadata.opcWorkspaceDefaults // {})
-             * {lane:$lane, mode:$mode, strategyType:$strategy})}
+             * {lane:$lane, mode:$mode, strategyType:$strategy}
+             | if $shared == "" then . else .sharedWorkspaceConcurrency = $shared end)}
     '
 }
 
@@ -408,16 +411,19 @@ verify_workspace_marker() {
     _lane="$3"
     _mode="$4"
     _strategy="$5"
+    _shared="${6-}"
     _project="$(api_request GET "/projects/$_project_id")" ||
         die "failed to verify Paperclip workspace marker" 4
     _workspace="$(primary_workspace_json "$_project")"
     printf '%s' "$_workspace" | jq -e \
         --arg workspace "$_workspace_id" --arg lane "$_lane" \
-        --arg mode "$_mode" --arg strategy "$_strategy" '
+        --arg mode "$_mode" --arg strategy "$_strategy" --arg shared "$_shared" '
         .id == $workspace
         and .metadata.opcWorkspaceDefaults.lane == $lane
         and .metadata.opcWorkspaceDefaults.mode == $mode
         and .metadata.opcWorkspaceDefaults.strategyType == $strategy
+        and (if $shared == "" then true
+             else .metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency == $shared end)
     ' >/dev/null 2>&1 || die "Paperclip workspace marker did not persist" 4
 }
 
@@ -649,7 +655,7 @@ cmd_project_workspace_reset() {
     _response="$(api_request GET "/projects/$_id")" || die "failed to verify Paperclip project workspace reset" 4
     verify_project_policy "$_response" "$_workspace_id" "$_mode" "$_strategy"
     _workspace="$(primary_workspace_json "$_response")"
-    _metadata="$(workspace_marker_payload "$_response" "$_workspace" "$_lane" "$_mode" "$_strategy")"
+    _metadata="$(workspace_marker_payload "$_response" "$_workspace" "$_lane" "$_mode" "$_strategy" "$_shared")"
     _response="$(api_request PATCH "/projects/$_id/workspaces/$_workspace_id" "$(
         jq -nc --argjson metadata "$_metadata" '{metadata:$metadata}'
     )")" || die "failed to reset Paperclip workspace marker" 4
@@ -659,8 +665,129 @@ cmd_project_workspace_reset() {
         and .metadata.opcWorkspaceDefaults.mode == $mode
         and .metadata.opcWorkspaceDefaults.strategyType == $strategy
     ' >/dev/null 2>&1 || die "Paperclip workspace reset marker was not verified" 4
-    verify_workspace_marker "$_id" "$_workspace_id" "$_lane" "$_mode" "$_strategy"
+    verify_workspace_marker "$_id" "$_workspace_id" "$_lane" "$_mode" "$_strategy" "$_shared"
     printf '%s' "$_response" | jq -c '{id,metadata}'
+}
+
+prototype_project_matches() {
+    _name="$1"
+    list_projects | jq -c --arg n "$_name" '[.[] | select(.name == $n)]'
+}
+
+prototype_primary_workspace_id() {
+    _project="$1"
+    _workspace="$(primary_workspace_json "$_project")"
+    [ "$_workspace" != null ] || return 0
+    printf '%s' "$_workspace" | jq -r '.id // empty'
+}
+
+prototyper_agent() {
+    _agents="$(api_request GET "/companies/$(company_id)/agents")" ||
+        die "failed to list Paperclip agents" 4
+    _matches="$(printf '%s' "$_agents" | jq -c --arg n Prototyper '
+        if type == "array" then [.[] | select(.name == $n)] else [] end
+    ' 2>/dev/null)" || die "Paperclip agents response is not an array" 4
+    _count="$(printf '%s' "$_matches" | jq -r 'length')"
+    case "$_count" in
+        0) die "no Paperclip agent named Prototyper" 3 ;;
+        1) printf '%s' "$_matches" | jq -c '.[0]' ;;
+        *) die "multiple Paperclip agents named Prototyper" 3 ;;
+    esac
+}
+
+prototype_ticket_create() {
+    _name=""
+    _title=""
+    _priority=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --name) [ "$#" -ge 2 ] || die "--name requires a value" 2; _name="$2"; shift 2 ;;
+            --title) [ "$#" -ge 2 ] || die "--title requires a value" 2; _title="$2"; shift 2 ;;
+            --priority) [ "$#" -ge 2 ] || die "--priority requires a value" 2; _priority="$2"; shift 2 ;;
+            *) die "usage: opc-paperclip prototype-ticket create --name <name> --title <title> [--priority <p>]" 2 ;;
+        esac
+    done
+    [ -n "$_name" ] || die "--name is required" 2
+    [ -n "$_title" ] || die "--title is required" 2
+    printf '%s' "$_name" | grep -Eq '^[a-z][a-z0-9-]{1,40}$' ||
+        die "invalid prototype name '$_name' — must match ^[a-z][a-z0-9-]{1,40}\$" 2
+
+    _description_file="$(mktemp "${TMPDIR:-/tmp}/opc-paperclip-prototype-description.XXXXXX")" ||
+        die "failed to allocate description buffer" 4
+    cat >"$_description_file"
+    _first_line="$(sed -n '1p' "$_description_file")"
+    [ "$_first_line" = "Prototype: $_name" ] ||
+        die "description must start with exactly 'Prototype: $_name'" 2
+
+    _matches="$(prototype_project_matches "$_name")" ||
+        die "failed to list Paperclip projects" 4
+    _project_count="$(printf '%s' "$_matches" | jq -r 'length')"
+    case "$_project_count" in
+        0)
+            _issues="$(api_request GET "/companies/$(company_id)/issues")" ||
+                die "failed to list Paperclip issues" 4
+            _active="$(printf '%s' "$_issues" | jq -c --arg marker "Prototype: $_name" '
+                if type == "array" then
+                  [.[] | select((.status // "") != "done" and (.status // "") != "cancelled")
+                    | select((.description // "" | split("\n")[0]) == $marker)]
+                else [] end
+            ' 2>/dev/null)" || die "Paperclip issues response is not an array" 4
+            _active_count="$(printf '%s' "$_active" | jq -r 'length')"
+            case "$_active_count" in
+                0) ;;
+                1)
+                    _existing_id="$(printf '%s' "$_active" | jq -r '.[0].id // empty')"
+                    [ -n "$_existing_id" ] || die "existing prototype ticket has no id" 4
+                    rm -f "$_description_file"
+                    api_request GET "/issues/$_existing_id" ||
+                        die "failed to read existing prototype ticket" 4
+                    return 0
+                    ;;
+                *) _details="$(printf '%s' "$_active" | jq -r '.[] | "\(.id // "<no-id>") \(.identifier // "<no-identifier>")"' \
+                       | tr '\n' ';' | sed 's/;$//')"
+                   die "multiple active prototype tickets for $_name: $_details" 3 ;;
+            esac
+            _project_id=""
+            _workspace_id=""
+            ;;
+        1)
+            _project="$(printf '%s' "$_matches" | jq -c '.[0]')"
+            _project_id="$(printf '%s' "$_project" | jq -r '.id // empty')"
+            [ -n "$_project_id" ] || die "prototype project has no id" 4
+            _workspace_id="$(prototype_primary_workspace_id "$_project")"
+            [ -n "$_workspace_id" ] ||
+                die "prototype project has no primary workspace" 3
+            ;;
+        *) _details="$(printf '%s' "$_matches" | jq -r '.[] | "\(.id // "<no-id>") \(.name // "<unnamed>")"' \
+               | tr '\n' ';' | sed 's/;$//')"
+           die "multiple Paperclip projects named $_name: $_details" 3 ;;
+    esac
+
+    _agent="$(prototyper_agent)"
+    _agent_id="$(printf '%s' "$_agent" | jq -r '.id // empty')"
+    [ -n "$_agent_id" ] || die "Prototyper agent has no id" 4
+    _company="$(company_id)"
+    _payload="$(jq -nc --rawfile description "$_description_file" \
+        --arg title "$_title" --arg priority "$_priority" --arg agent "$_agent_id" \
+        --arg project "$_project_id" --arg workspace "$_workspace_id" '
+        {title:$title,description:$description,assigneeAgentId:$agent}
+        | if $priority == "" then . else .priority=$priority end
+        | if $project == "" then . else .projectId=$project | .projectWorkspaceId=$workspace end
+    ')"
+    _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
+        die "failed to create prototype ticket" 4
+    rm -f "$_description_file"
+    _issue_id="$(printf '%s' "$_created" | jq -r '.id // empty')"
+    [ -n "$_issue_id" ] || die "Paperclip prototype ticket response has no id" 4
+    _issue="$(api_request GET "/issues/$_issue_id")" ||
+        die "failed to verify prototype ticket" 4
+    printf '%s' "$_issue" | jq -e --arg agent "$_agent_id" --arg project "$_project_id" \
+        --arg workspace "$_workspace_id" '
+        .assigneeAgentId == $agent
+        and (if $project == "" then (.projectId // null) == null
+             else .projectId == $project and .projectWorkspaceId == $workspace end)
+    ' >/dev/null 2>&1 || die "Paperclip prototype ticket response was not verified" 4
+    printf '%s' "$_issue"
 }
 
 active_engineer() {
@@ -815,6 +942,12 @@ main() {
                 reset) shift; cmd_project_workspace_reset "$@" ;;
                 *) die "usage: opc-paperclip project workspace <show|set|reset> ..." 2 ;;
             esac
+            ;;
+        prototype-ticket)
+            shift
+            [ "${1-}" = create ] || die "usage: opc-paperclip prototype-ticket create ..." 2
+            shift
+            prototype_ticket_create "$@"
             ;;
         engineering-ticket)
             shift

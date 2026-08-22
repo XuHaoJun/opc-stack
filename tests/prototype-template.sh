@@ -32,6 +32,10 @@ PCN="docker compose exec -T -u node paperclip"
 
 pass=0; fail=0
 ok()   { echo "PASS  $1"; pass=$((pass+1)); }
+assert_eq() {
+  local label="$1" want="$2" got="$3"
+  [ "$want" = "$got" ] && ok "$label" || bad "$label (want=$want got=$got)"
+}
 bad()  { echo "FAIL  $1"; fail=$((fail+1)); }
 step() { echo; echo "── $1 ──"; }
 
@@ -48,6 +52,64 @@ $PC prototype create "$NAME" --template "$TEMPLATE" 2>&1 | sed 's/^/  /' \
 
 URL="$($PC sh -c "sed -n 's/^DEV_URL=//p' /prototypes/$NAME/.env" | tr -d '\r\n')"
 [ -n "$URL" ] && ok "lease issued DEV_URL ($URL)" || { bad "no DEV_URL"; exit 1; }
+
+paperclip_projects() {
+  $PC sh -c 'key=$(cat /paperclip/.opc/board-api.key); cid=$(curl -fsS -H "Authorization: Bearer $key" http://paperclip:3100/api/companies | jq -r ".[0].id"); curl -fsS -H "Authorization: Bearer $key" "http://paperclip:3100/api/companies/$cid/projects"'
+}
+
+project_json="$(paperclip_projects | jq -c --arg n "$NAME" '[.[] | select(.name == $n)][0]')"
+project_id="$(printf '%s' "$project_json" | jq -r '.id // empty')"
+workspace_id="$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .id // empty')"
+workspace_cwd="$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .cwd // empty')"
+assert_eq "prototype primary workspace directory" "/prototypes/$NAME" "$workspace_cwd"
+if [ -n "$project_id" ] && [ -n "$workspace_id" ]; then
+  ok "prototype project and primary workspace exist"
+else
+  bad "prototype project and primary workspace exist"
+fi
+assert_eq "prototype policy shared mode" "shared_workspace" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultMode')"
+assert_eq "prototype policy serialize" "serialize" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.sharedWorkspaceConcurrency')"
+assert_eq "prototype policy project-primary" "project_primary" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type')"
+assert_eq "prototype policy default workspace" "$workspace_id" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId')"
+
+board_key="$($PC sh -c 'cat /paperclip/.opc/board-api.key' | tr -d '\r\n')"
+override_payload="$(jq -nc --arg workspace "$workspace_id" '{executionWorkspacePolicy:{enabled:true,defaultMode:"isolated_workspace",sharedWorkspaceConcurrency:"allow",defaultProjectWorkspaceId:$workspace,workspaceStrategy:{type:"git_worktree"},workspaceRuntime:{keep:true}}}')"
+curl -fsS -X PATCH -H "Authorization: Bearer $board_key" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:3100/api/projects/$project_id" -d "$override_payload" >/dev/null
+$PC prototype create "$NAME" >/dev/null 2>&1 \
+  && ok "prototype resume succeeds with operator override" \
+  || bad "prototype resume succeeds with operator override"
+project_json="$(paperclip_projects | jq -c --arg n "$NAME" '[.[] | select(.name == $n)][0]')"
+assert_eq "prototype workspace directory survives resume" "$workspace_cwd" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .cwd // empty')"
+assert_eq "prototype workspace ID survives resume" "$workspace_id" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .id // empty')"
+assert_eq "prototype operator mode survives resume" "isolated_workspace" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultMode')"
+assert_eq "prototype operator concurrency survives resume" "allow" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.sharedWorkspaceConcurrency')"
+assert_eq "prototype operator strategy survives resume" "git_worktree" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type')"
+assert_eq "prototype operator metadata survives resume" "true" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceRuntime.keep')"
+
+PAPERCLIP_API_URL=http://127.0.0.1:3100 PAPERCLIP_API_KEY="$board_key" \
+  patches/hermes/opc-paperclip project workspace reset \
+    --project-id "$project_id" --lane prototype >/dev/null \
+    && ok "prototype policy reset command" || bad "prototype policy reset command"
+project_json="$(paperclip_projects | jq -c --arg n "$NAME" '[.[] | select(.name == $n)][0]')"
+assert_eq "prototype reset shared mode" "shared_workspace" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultMode')"
+assert_eq "prototype reset serialize" "serialize" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.sharedWorkspaceConcurrency')"
+assert_eq "prototype reset project-primary" "project_primary" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type')"
+assert_eq "prototype reset workspace remains primary" "$workspace_id" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId')"
 
 step "install (slow: a cold store fetches the whole tree)"
 $PCN sh -c "cd /prototypes/$NAME && pnpm install --silent" >/dev/null 2>&1 \

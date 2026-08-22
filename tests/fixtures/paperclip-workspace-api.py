@@ -337,6 +337,8 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json(200, agent)
                         return
                 self._send_json(404, {"error": "agent not found"})
+            elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "issues":
+                self._company_collection(path[2], "issues")
             elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "projects":
                 self._company_collection(path[2], "projects")
             elif len(path) == 3 and path[:2] == ["api", "projects"]:

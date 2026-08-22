@@ -466,5 +466,125 @@ fi
 assert_contains "multiple-engineer error is actionable" "multiple Paperclip agents match role engineer" "$(cat "$AGENT_AMBIGUOUS_ERR")"
 assert_not_contains "multiple-engineer stderr omits bearer token" "$TOKEN" "$(cat "$AGENT_AMBIGUOUS_ERR")"
 
+stop_fixture
+cat >"$STATE" <<'JSON'
+{
+  "experimental": {"enableIsolatedWorkspaces": false},
+  "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+  "agents": [{
+    "id": "00000000-0000-4000-8000-000000000010",
+    "name": "Prototyper",
+    "role": "prototyper",
+    "status": "idle"
+  }],
+  "projects": [],
+  "issues": []
+}
+JSON
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+printf 'Prototype: recipe-bot\nLane: prototype\nAcceptance: preview URL is posted\n' |
+  "$CLI" prototype-ticket create --name recipe-bot --title 'Recipe preview' >"$TMPDIR/prototype-first.json"
+assert_eq "prototype first ticket has no project" "null" \
+  "$(jq -r '.projectId // null' "$TMPDIR/prototype-first.json")"
+first_prototype_id="$(jq -r '.id' "$TMPDIR/prototype-first.json")"
+printf 'Prototype: recipe-bot\nLane: prototype\nAcceptance: preview URL is posted\n' |
+  "$CLI" prototype-ticket create --name recipe-bot --title 'Duplicate' >"$TMPDIR/prototype-duplicate.json"
+assert_eq "prototype duplicate returns first issue" "$first_prototype_id" \
+  "$(jq -r '.id' "$TMPDIR/prototype-duplicate.json")"
+assert_eq "prototype duplicate does not create issue" "1" "$(jq '.issues | length' "$STATE")"
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["projects"].append({
+    "id": "00000000-0000-4000-8000-000000000121",
+    "name": "recipe-bot",
+    "primaryWorkspace": {
+        "id": "00000000-0000-4000-8000-000000000221",
+        "cwd": "/prototypes/recipe-bot",
+        "isPrimary": True
+    },
+    "workspaces": [{
+        "id": "00000000-0000-4000-8000-000000000221",
+        "cwd": "/prototypes/recipe-bot",
+        "isPrimary": True
+    }]
+})
+state["projects"].append({
+    "id": "00000000-0000-4000-8000-000000000122",
+    "name": "recipe-bot-2",
+    "primaryWorkspace": {
+        "id": "00000000-0000-4000-8000-000000000222",
+        "cwd": "/prototypes/recipe-bot-2",
+        "isPrimary": True
+    },
+    "workspaces": [{
+        "id": "00000000-0000-4000-8000-000000000222",
+        "cwd": "/prototypes/recipe-bot-2",
+        "isPrimary": True
+    }]
+})
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+stop_fixture
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+printf 'Prototype: recipe-bot\nLane: prototype\nAcceptance: preview URL is posted\n' |
+  "$CLI" prototype-ticket create --name recipe-bot --title 'Recipe continuation' >"$TMPDIR/prototype-continuation.json"
+assert_eq "prototype continuation binds exact project" \
+  "00000000-0000-4000-8000-000000000121" \
+  "$(jq -r '.projectId' "$TMPDIR/prototype-continuation.json")"
+assert_eq "prototype continuation binds primary workspace" \
+  "00000000-0000-4000-8000-000000000221" \
+  "$(jq -r '.projectWorkspaceId' "$TMPDIR/prototype-continuation.json")"
+assert_eq "prototype near-miss does not match" "null" \
+  "$(printf 'Prototype: fresh-bot\nLane: prototype\n' | "$CLI" prototype-ticket create --name fresh-bot --title 'Fresh' | jq -r '.projectId // null')"
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+for ordinal in (123, 124):
+    state["projects"].append({
+        "id": f"00000000-0000-4000-8000-000000000{ordinal}",
+        "name": "ambiguous-bot",
+        "primaryWorkspace": {
+            "id": f"00000000-0000-4000-8000-000000000{ordinal + 100}",
+            "cwd": "/prototypes/ambiguous-bot",
+            "isPrimary": True
+        },
+        "workspaces": [{
+            "id": f"00000000-0000-4000-8000-000000000{ordinal + 100}",
+            "cwd": "/prototypes/ambiguous-bot",
+            "isPrimary": True
+        }]
+    })
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+stop_fixture
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+PROTOTYPE_AMBIGUOUS_ERR="$TMPDIR/prototype-ambiguous.err"
+if printf 'Prototype: ambiguous-bot\nLane: prototype\n' |
+  "$CLI" prototype-ticket create --name ambiguous-bot --title ambiguous \
+  >/dev/null 2>"$PROTOTYPE_AMBIGUOUS_ERR"; then
+  bad "ambiguous prototype projects fail closed"
+else
+  ok "ambiguous prototype projects fail closed"
+fi
+assert_contains "prototype ambiguity lists first project" "00000000-0000-4000-8000-000000000123" "$(cat "$PROTOTYPE_AMBIGUOUS_ERR")"
+assert_contains "prototype ambiguity lists second project" "00000000-0000-4000-8000-000000000124" "$(cat "$PROTOTYPE_AMBIGUOUS_ERR")"
+
 echo "result: $PASS pass, $FAIL fail"
 [ "$FAIL" -eq 0 ]

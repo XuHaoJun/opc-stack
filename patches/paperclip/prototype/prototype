@@ -87,17 +87,117 @@ company_id() {
     api GET "/companies" | jq -r '.[0].id // empty'
 }
 
-# name -> project. The whole "say the name and keep working on it" mechanism is
-# this one lookup; create and resume take the same path, which is why resume
-# cannot drift from create.
 find_project() {
-    api GET "/companies/$(company_id)/projects" \
-        | jq -r --arg n "$1" '.[] | select(.name == $n) | .id' | head -1
+    _name="$1"
+    _matches="$(api GET "/companies/$(company_id)/projects" \
+        | jq -c --arg n "$_name" '[.[] | select(.name == $n)]')" ||
+        die "failed to list Paperclip projects" 4
+    _count="$(printf '%s' "$_matches" | jq -r 'length')"
+    case "$_count" in
+        0) ;;
+        1) printf '%s' "$_matches" | jq -r '.[0].id // empty' ;;
+        *) _details="$(printf '%s' "$_matches" | jq -r '.[] | "\(.id // "<no-id>") \(.name // "<unnamed>")"' \
+               | tr '\n' ';' | sed 's/;$//')"
+           die "multiple Paperclip projects named $_name: $_details" 3 ;;
+    esac
+}
+
+primary_workspace_json() {
+    _project="$1"
+    if [ "$(printf '%s' "$_project" | jq -r 'if (.primaryWorkspace? | type) == "object" then 1 else 0 end')" -eq 1 ]; then
+        printf '%s' "$_project" | jq -c '.primaryWorkspace'
+        return
+    fi
+    _count="$(printf '%s' "$_project" | jq '[.workspaces // [] | .[] | select(.isPrimary == true)] | length')"
+    case "$_count" in
+        0) printf '%s\n' null ;;
+        1) printf '%s' "$_project" | jq -c '(.workspaces // [])[] | select(.isPrimary == true)' ;;
+        *) die "multiple primary workspaces ($_count); expected exactly one" 3 ;;
+    esac
+}
+
+reconcile_workspace_policy() {
+    _project_id="$1"
+    _project="$(api GET "/projects/$_project_id")" ||
+        die "failed to read prototype project $_project_id" 4
+    _workspace="$(primary_workspace_json "$_project")"
+    [ "$_workspace" != null ] || die "prototype project has no primary workspace" 3
+    _workspace_id="$(printf '%s' "$_workspace" | jq -r '.id // empty')"
+    [ -n "$_workspace_id" ] || die "prototype primary workspace has no id" 4
+
+    _marker_type="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults | type')"
+    _marker_lane="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.lane // empty')"
+    _marker_mode="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.mode // empty')"
+    _marker_strategy="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.strategyType // empty')"
+    _marker_shared="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency // empty')"
+    _live_enabled="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.enabled // false')"
+    _live_mode="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.defaultMode // empty')"
+    _live_shared="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.sharedWorkspaceConcurrency // empty')"
+    _live_strategy="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type // empty')"
+    _live_workspace="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId // empty')"
+
+    if [ "$_marker_type" = object ] &&
+       [ "$_marker_lane" = prototype ] &&
+       [ "$_marker_mode" = shared_workspace ] &&
+       [ "$_marker_strategy" = project_primary ] &&
+       [ "$_marker_shared" = serialize ]; then
+        if [ "$_live_enabled" != true ] ||
+           [ "$_live_mode" != "$_marker_mode" ] ||
+           [ "$_live_shared" != "$_marker_shared" ] ||
+           [ "$_live_strategy" != "$_marker_strategy" ] ||
+           [ "$_live_workspace" != "$_workspace_id" ]; then
+            note "prototype: workspace policy operator override preserved"
+        fi
+        return 0
+    fi
+
+    _policy="$(printf '%s' "$_project" | jq -c --arg workspace "$_workspace_id" '
+        (.executionWorkspacePolicy // {}) as $policy
+        | $policy
+        * {enabled:true, defaultMode:"shared_workspace",
+           sharedWorkspaceConcurrency:"serialize",
+           defaultProjectWorkspaceId:$workspace,
+           workspaceStrategy:(($policy.workspaceStrategy // {}) * {type:"project_primary"})}
+    ')"
+    api PATCH "/projects/$_project_id" <<EOF >/dev/null
+$(jq -nc --argjson policy "$_policy" '{executionWorkspacePolicy:$policy}')
+EOF
+    _project="$(api GET "/projects/$_project_id")" ||
+        die "failed to verify prototype project workspace policy" 4
+    printf '%s' "$_project" | jq -e --arg workspace "$_workspace_id" '
+        .executionWorkspacePolicy.enabled == true
+        and .executionWorkspacePolicy.defaultMode == "shared_workspace"
+        and .executionWorkspacePolicy.sharedWorkspaceConcurrency == "serialize"
+        and .executionWorkspacePolicy.defaultProjectWorkspaceId == $workspace
+        and .executionWorkspacePolicy.workspaceStrategy.type == "project_primary"
+    ' >/dev/null 2>&1 || die "prototype workspace policy was not verified" 4
+
+    _workspace="$(primary_workspace_json "$_project")"
+    _metadata="$(printf '%s' "$_workspace" | jq -c '
+        (.metadata // {}) as $metadata
+        | $metadata * {opcWorkspaceDefaults:
+            (($metadata.opcWorkspaceDefaults // {})
+             * {lane:"prototype", mode:"shared_workspace",
+                strategyType:"project_primary",
+                sharedWorkspaceConcurrency:"serialize"})}
+    ')"
+    api PATCH "/projects/$_project_id/workspaces/$_workspace_id" <<EOF >/dev/null
+$(jq -nc --argjson metadata "$_metadata" '{metadata:$metadata}')
+EOF
+    _project="$(api GET "/projects/$_project_id")" ||
+        die "failed to verify prototype workspace marker" 4
+    _workspace="$(primary_workspace_json "$_project")"
+    printf '%s' "$_workspace" | jq -e '
+        .metadata.opcWorkspaceDefaults.lane == "prototype"
+        and .metadata.opcWorkspaceDefaults.mode == "shared_workspace"
+        and .metadata.opcWorkspaceDefaults.strategyType == "project_primary"
+        and .metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency == "serialize"
+    ' >/dev/null 2>&1 || die "prototype workspace marker was not verified" 4
 }
 
 primary_workspace_id() {
-    api GET "/projects/$1" \
-        | jq -r '(.workspaces // [])[] | select(.isPrimary == true) | .id' | head -1
+    _project="$(api GET "/projects/$1")"
+    primary_workspace_json "$_project" | jq -r '.id // empty'
 }
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -239,6 +339,8 @@ cmd_create() {
     else
         note "prototype: Paperclip project exists ($project)"
     fi
+
+    reconcile_workspace_policy "$project"
 
     # Attach the current ticket to the project. Paperclip does not do this for
     # us — an issue created before the project existed keeps projectId null, so
