@@ -358,13 +358,70 @@ is valkey 9.1), say why and it will be recorded on the lease:
     }
     trap 'podenv_provision_cleanup' EXIT INT TERM
 
-    # Idempotent container creation. `podman ps -a` is authoritative for its
-    # own containers, unlike prototype-restore's problem where a DB row claimed
-    # `running` after the process was long gone — the containers ARE this
-    # service's child processes, so if it is up and they are listed, they exist.
+    # Idempotent container creation.
+    #
+    # CORRECTED (previous claim measured false — see task-5-report.md; this
+    # is the SIBLING of the bug fixed in podenv's own opc-podenv-restore.sh,
+    # and the two must stay in agreement — read that script's header too
+    # before touching either). This comment used to say `podman ps -a` is
+    # authoritative for its own containers, unlike prototype-restore's
+    # problem where a DB row claimed `running` after the process was long
+    # gone, because the containers ARE this service's child processes: if it
+    # is up and they are listed, they exist. Measured false: after `docker
+    # compose restart podenv`, the outer container's PID namespace is torn
+    # down (killing every lease's real process) but its writable layer
+    # survives, and podman's rootless runtime state under /run/user/<uid>
+    # lives THERE (not a tmpfs mount) — so podman keeps reporting the lease
+    # "running" and a plain `podman start` on it returns SUCCESS while the
+    # container stays dead. `podman restart` is not the fix either: measured
+    # to fail outright on exactly this state ("conmon exited prematurely").
+    #
+    # This branch is worse than the restore script's version of the same bug
+    # was, because it is the DOCUMENTED, routine path: the podenv skill tells
+    # agents `provision` is idempotent and safe to run freely to "pick a
+    # lease back up." An agent doing exactly that after any podenv restart
+    # got the "(existing)" note, a freshly written .env, and exit 0 — the
+    # happy path silently handing back a dead address. Fixed the same way
+    # opc-podenv-restore.sh was: never trust podman's recorded state here.
+    # Force a real transition (`stop -t 0` — harmless if it really is already
+    # stopped, loud-but-ignored otherwise) then `start`, and verify the lease
+    # is actually alive — by probing the SAME host_port that goes into the
+    # .env below, which conveniently already equals the real reachable
+    # address in both netns modes (F7 sets hport=cport for --netns host) —
+    # before reporting success. `start` returning 0 is still not proof of
+    # life (same reasoning as the restore script), so this polls a few times
+    # rather than trusting the first attempt: a service that starts cleanly
+    # can take a moment past `start` returning before it actually answers.
+    #
+    # curl, not a bare /dev/tcp connect: this runs in the paperclip image
+    # under dash (no bashisms), which has no /dev/tcp redirection, and no
+    # nc/socat/python3 is guaranteed present — curl is (existing gates rely
+    # on it). `%{time_connect}` is populated by curl the moment the TCP
+    # handshake completes, BEFORE it evaluates the response as HTTP — it
+    # stays the literal string "0.000000" if the handshake never completed.
+    # That makes it a reasonable proxy for "something is listening" even for
+    # a lease that is not actually speaking HTTP (mysql, postgres, ...): a
+    # foreign protocol's unsolicited bytes may confuse curl's HTTP parser
+    # afterward, but the connect already succeeded and time_connect already
+    # recorded it. Measured against a real dead port: time_connect reads
+    # "0.000000" and curl exits 7.
     if podman_remote container exists "$slug" 2>/dev/null; then
+        podman_remote stop -t 0 "$slug" >/dev/null 2>&1 || true
         podman_remote start "$slug" >/dev/null 2>&1 \
             || die "podman could not (re)start the existing container '$slug' for lease '$key'. See why: docker compose exec podenv podman logs $slug" 5
+        _prov_alive=0
+        _prov_n=0
+        while [ "$_prov_n" -lt 15 ]; do
+            _prov_tc="$(curl -s -o /dev/null --connect-timeout 2 --max-time 3 \
+                -w '%{time_connect}' "http://${PODENV_HOST_NAME}:${hport}/" 2>/dev/null || true)"
+            if [ -n "$_prov_tc" ] && [ "$_prov_tc" != "0.000000" ]; then
+                _prov_alive=1
+                break
+            fi
+            _prov_n=$((_prov_n + 1)); sleep 2
+        done
+        [ "$_prov_alive" = 1 ] \
+            || die "podman reports '$slug' running for lease '$key', but nothing answered at ${PODENV_HOST_NAME}:${hport} after 30s — the (re)start did not actually revive it. See why: docker compose exec podenv podman logs $slug" 5
     else
         set -- run -d --name "$slug" \
             --label "opc.podenv.lease=$slug" \

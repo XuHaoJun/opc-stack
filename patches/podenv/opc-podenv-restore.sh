@@ -32,6 +32,18 @@
 #
 # Never fatal: this is recovery. Every lease is also restartable by hand with
 # `podman start <slug>`.
+#
+# SIBLING BUG, SIBLING FIX — the two must stay in agreement: the exact same
+# false-authoritative-state bug existed in `podenv provision`'s idempotent
+# re-provision branch (patches/paperclip/podenv/podenv, "container exists"
+# branch), and was worse there because it is the DOCUMENTED, routine path an
+# agent is told to run freely. It is fixed there the same way: force
+# `stop -t 0` then `start`, then verify liveness before reporting success,
+# never `podman restart`. The two cannot share a file (different images), so
+# if the measured behaviour above ever needs revising, revise the comment in
+# both places — this repo has been burned by exactly this kind of drift
+# before (see AGENTS.md's note on the two `SOUL.md` and two `paperclip-api`
+# SKILL.md copies).
 set -u
 
 PODENV_UID="${PODENV_UID:-1000}"

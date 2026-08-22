@@ -523,6 +523,75 @@ podenv_restore_probe "a lease genuinely serves traffic after '--force-recreate p
 docker compose exec -T -u node paperclip sh -c \
     'podenv release restore-probe >/dev/null 2>&1; rm -f /tmp/podenv-restore.env' >/dev/null 2>&1
 
+echo "── provision re-run after restart (not restore's fix) ──"
+
+# task-5: cmd_provision's OWN idempotent "container exists" branch had the
+# identical false-authoritative-state bug the "restore" section above
+# guards — a bare `podman start` on a stale-"running" container measured to
+# return success without reviving anything (see opc-podenv-restore.sh's
+# header and patches/paperclip/podenv/podenv's comment above the "container
+# exists" branch). This is worse than the restore path: `provision` is the
+# DOCUMENTED, routine way an agent picks a lease back up, so a silent false
+# success here hands back a dead address on the happy path.
+#
+# opc-podenv-restore.sh ALSO revives every podenv-labelled container on the
+# podenv service's own boot (backgrounded from its entrypoint, gated on the
+# socket appearing). A check driven through `docker compose restart podenv`
+# therefore risks measuring restore's fix instead of provision's own —
+# exactly the ambiguity this section has to rule out, not just tolerate.
+# Distinguished by racing on wall-clock time, not by lease shape: podman's
+# own socket takes a beat to come back up after the restart, and restore's
+# boot-time pass cannot even start until it does (its own poll loop checks
+# every 2s); `podenv provision` from paperclip has to clear the exact same
+# socket-readiness gate, so calling it IMMEDIATELY after `docker compose
+# restart podenv` returns races provision's own path against restore's
+# rather than against a pre-revived container. Measured (task-5-report.md):
+# multiple trials against the pre-fix CLI this way all reproduced the bug —
+# provision exited 0 while the address was still dead — with the restore
+# script's own log line for this exact lease landing 2-4 SECONDS AFTER the
+# provision call had already returned, confirming the race was won every
+# time it was tried. This is an empirical guarantee, not a structural one:
+# nothing here forces the ordering, it is only reliably fast enough that
+# restore has not gotten there yet. If this ever starts flaking, that is
+# itself a real signal, not a test bug to silence.
+docker compose exec -T -u node paperclip sh -c 'rm -f /tmp/podenv-race.env'
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision race-probe --image docker.io/traefik/whoami --port 80 \
+        --as RACE_ADDR --env-file /tmp/podenv-race.env' >/dev/null
+
+docker compose restart podenv >/dev/null 2>&1
+
+_race_out="$(docker compose exec -T -u node paperclip sh -c \
+    'podenv provision race-probe --image docker.io/traefik/whoami --port 80 \
+        --as RACE_ADDR --env-file /tmp/podenv-race.env >/tmp/podenv-race.out 2>&1
+     echo "RC=$?"' 2>/dev/null | tr -d '\r')"
+_race_rc="$(printf '%s\n' "$_race_out" | sed -n 's/^RC=//p' | tail -1)"
+_race_addr="$(docker compose exec -T -u node paperclip sh -c \
+    'grep "^RACE_ADDR=" /tmp/podenv-race.env 2>/dev/null | cut -d= -f2-' 2>/dev/null | tr -d '\r')"
+
+if [ "$_race_rc" = "0" ]; then
+    if [ -z "$_race_addr" ]; then
+        fail "provision re-run after restart: exit 0 but wrote no RACE_ADDR (nothing to probe)"
+    else
+        _race_code="$(docker compose exec -T -u node paperclip sh -c \
+            "curl -s -o /dev/null -w '%{http_code}' --max-time 3 'http://$_race_addr/'" 2>/dev/null | tr -d '\r')"
+        if [ "$_race_code" = "200" ]; then
+            pass "provision re-run after restart: exit 0 AND the address genuinely answers (HTTP 200)"
+        else
+            fail "provision re-run after restart reported SUCCESS (exit 0) for a DEAD lease (http '$_race_code' through $_race_addr) — the exact bug this gate exists to catch"
+        fi
+    fi
+elif [ "$_race_rc" = "5" ]; then
+    pass "provision re-run after restart failed loudly (exit 5, the documented code) instead of claiming success"
+else
+    _race_msg="$(docker compose exec -T -u node paperclip cat /tmp/podenv-race.out 2>/dev/null)"
+    fail "provision re-run after restart returned an undocumented exit ('$_race_rc') — output: $_race_msg"
+fi
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release race-probe >/dev/null 2>&1
+     rm -f /tmp/podenv-race.env /tmp/podenv-race.out' >/dev/null 2>&1
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
