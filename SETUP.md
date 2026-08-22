@@ -349,7 +349,7 @@ docker compose exec frontdoor hermes --version
 
 ## podenv — nested container leases
 
-`devenv` (above/below) is the shared, multi-tenant, modern lane: one
+`devenv` is the shared, multi-tenant, modern lane: one
 PostgreSQL 18 + pgvector server, one Valkey 9.1 server, each split into
 per-tenant credentials. `podenv` is the other half — **a whole container,
 all yours**, from any OCI image — for the cases devenv structurally cannot
@@ -357,6 +357,10 @@ serve: a daemon that refuses to be multi-tenant, or a version so old it only
 exists as an image (MySQL 5.7, Postgres 9.6, …). It runs a rootless `podman`
 daemon nested inside the `podenv` service container (docker-in-docker is not
 used or needed).
+
+devenv itself is not documented in this file — its usage lives in the `devenv`
+agent skill and in AGENTS.md's 架構 section; the operator-facing commands are
+`docker compose exec paperclip devenv list` and `devenv release <key>`.
 
 **Always try devenv first.** The CLI enforces this mechanically: asking
 podenv for a postgres/pgvector/valkey/redis image (by name, tag, digest, or
