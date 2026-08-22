@@ -140,6 +140,34 @@ reconcile_workspace_policy() {
        [ "$_marker_lane" = prototype ] &&
        [ "$_marker_mode" = shared_workspace ] &&
        [ "$_marker_strategy" = project_primary ] &&
+       [ -z "$_marker_shared" ]; then
+        _metadata="$(printf '%s' "$_workspace" | jq -c '
+            (.metadata // {}) as $metadata
+            | $metadata * {opcWorkspaceDefaults:
+                (($metadata.opcWorkspaceDefaults // {})
+                 * {sharedWorkspaceConcurrency:"serialize"})}
+        ')"
+        api PATCH "/projects/$_project_id/workspaces/$_workspace_id" <<EOF >/dev/null
+$(jq -nc --argjson metadata "$_metadata" '{metadata:$metadata}')
+EOF
+        _project="$(api GET "/projects/$_project_id")" ||
+            die "failed to verify legacy prototype workspace marker" 4
+        _workspace="$(primary_workspace_json "$_project")"
+        [ "$(printf '%s' "$_workspace" | jq -r '.id // empty')" = "$_workspace_id" ] ||
+            die "prototype primary workspace changed while marking legacy defaults" 4
+        printf '%s' "$_workspace" | jq -e '
+            .metadata.opcWorkspaceDefaults.lane == "prototype"
+            and .metadata.opcWorkspaceDefaults.mode == "shared_workspace"
+            and .metadata.opcWorkspaceDefaults.strategyType == "project_primary"
+            and .metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency == "serialize"
+        ' >/dev/null 2>&1 || die "legacy prototype workspace marker was not verified" 4
+        return 0
+    fi
+
+    if [ "$_marker_type" = object ] &&
+       [ "$_marker_lane" = prototype ] &&
+       [ "$_marker_mode" = shared_workspace ] &&
+       [ "$_marker_strategy" = project_primary ] &&
        [ "$_marker_shared" = serialize ]; then
         if [ "$_live_enabled" != true ] ||
            [ "$_live_mode" != "$_marker_mode" ] ||
@@ -187,6 +215,8 @@ EOF
     _project="$(api GET "/projects/$_project_id")" ||
         die "failed to verify prototype workspace marker" 4
     _workspace="$(primary_workspace_json "$_project")"
+    [ "$(printf '%s' "$_workspace" | jq -r '.id // empty')" = "$_workspace_id" ] ||
+        die "prototype primary workspace changed while marking defaults" 4
     printf '%s' "$_workspace" | jq -e '
         .metadata.opcWorkspaceDefaults.lane == "prototype"
         and .metadata.opcWorkspaceDefaults.mode == "shared_workspace"

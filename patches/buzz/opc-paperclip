@@ -654,6 +654,16 @@ cmd_project_workspace_reset() {
     )")" || die "failed to reset Paperclip project workspace policy" 4
     _response="$(api_request GET "/projects/$_id")" || die "failed to verify Paperclip project workspace reset" 4
     verify_project_policy "$_response" "$_workspace_id" "$_mode" "$_strategy"
+    printf '%s' "$_response" | jq -e \
+        --arg workspace "$_workspace_id" --arg mode "$_mode" \
+        --arg strategy "$_strategy" --arg shared "$_shared" '
+        .executionWorkspacePolicy.enabled == true
+        and .executionWorkspacePolicy.defaultMode == $mode
+        and .executionWorkspacePolicy.workspaceStrategy.type == $strategy
+        and .executionWorkspacePolicy.defaultProjectWorkspaceId == $workspace
+        and (if $shared == "" then true
+             else .executionWorkspacePolicy.sharedWorkspaceConcurrency == $shared end)
+    ' >/dev/null 2>&1 || die "Paperclip project workspace reset policy was not verified" 4
     _workspace="$(primary_workspace_json "$_response")"
     _metadata="$(workspace_marker_payload "$_response" "$_workspace" "$_lane" "$_mode" "$_strategy" "$_shared")"
     _response="$(api_request PATCH "/projects/$_id/workspaces/$_workspace_id" "$(
@@ -672,6 +682,24 @@ cmd_project_workspace_reset() {
 prototype_project_matches() {
     _name="$1"
     list_projects | jq -c --arg n "$_name" '[.[] | select(.name == $n)]'
+}
+
+list_prototype_issues() {
+    _company="$1"
+    _offset=0
+    _all='[]'
+    while :; do
+        _page="$(api_request GET "/companies/$_company/issues?limit=500&offset=$_offset")" ||
+            die "failed to list Paperclip issues" 4
+        _page_count="$(printf '%s' "$_page" | jq -r 'if type == "array" then length else -1 end' 2>/dev/null)" ||
+            die "Paperclip issues response is not an array" 4
+        [ "$_page_count" -ge 0 ] ||
+            die "Paperclip issues response is not an array" 4
+        _all="$(jq -nc --argjson all "$_all" --argjson page "$_page" '$all + $page')"
+        [ "$_page_count" -lt 500 ] && break
+        _offset=$((_offset + _page_count))
+    done
+    printf '%s' "$_all"
 }
 
 prototype_primary_workspace_id() {
@@ -719,18 +747,16 @@ prototype_ticket_create() {
     [ "$_first_line" = "Prototype: $_name" ] ||
         die "description must start with exactly 'Prototype: $_name'" 2
 
+    _company="$(company_id)"
     _matches="$(prototype_project_matches "$_name")" ||
         die "failed to list Paperclip projects" 4
     _project_count="$(printf '%s' "$_matches" | jq -r 'length')"
     case "$_project_count" in
         0)
-            _issues="$(api_request GET "/companies/$(company_id)/issues")" ||
-                die "failed to list Paperclip issues" 4
+            _issues="$(list_prototype_issues "$_company")"
             _active="$(printf '%s' "$_issues" | jq -c --arg marker "Prototype: $_name" '
-                if type == "array" then
-                  [.[] | select((.status // "") != "done" and (.status // "") != "cancelled")
-                    | select((.description // "" | split("\n")[0]) == $marker)]
-                else [] end
+                [.[] | select((.status // "") != "done" and (.status // "") != "cancelled")
+                  | select((.description // "" | split("\n")[0]) == $marker)]
             ' 2>/dev/null)" || die "Paperclip issues response is not an array" 4
             _active_count="$(printf '%s' "$_active" | jq -r 'length')"
             case "$_active_count" in
@@ -766,13 +792,14 @@ prototype_ticket_create() {
     _agent="$(prototyper_agent)"
     _agent_id="$(printf '%s' "$_agent" | jq -r '.id // empty')"
     [ -n "$_agent_id" ] || die "Prototyper agent has no id" 4
-    _company="$(company_id)"
     _payload="$(jq -nc --rawfile description "$_description_file" \
         --arg title "$_title" --arg priority "$_priority" --arg agent "$_agent_id" \
-        --arg project "$_project_id" --arg workspace "$_workspace_id" '
+        --arg project "$_project_id" --arg workspace "$_workspace_id" \
+        --arg idempotency "opc-prototype-first:$_company:$_name" '
         {title:$title,description:$description,assigneeAgentId:$agent}
         | if $priority == "" then . else .priority=$priority end
-        | if $project == "" then . else .projectId=$project | .projectWorkspaceId=$workspace end
+        | if $project == "" then .idempotencyKey=$idempotency
+          else .projectId=$project | .projectWorkspaceId=$workspace end
     ')"
     _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
         die "failed to create prototype ticket" 4

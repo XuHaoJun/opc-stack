@@ -16,7 +16,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 DEFAULT_ENGINEER = {
@@ -167,6 +167,20 @@ class Handler(BaseHTTPRequestHandler):
                 if company_id != str(STATE.get("company", {}).get("id", "")):
                     self._send_json(404, {"error": "company not found"})
                     return
+                idempotency_key = payload.get("idempotencyKey")
+                if isinstance(idempotency_key, str) and idempotency_key:
+                    replay = next(
+                        (
+                            existing
+                            for existing in STATE.get("issues", [])
+                            if isinstance(existing, dict)
+                            and existing.get("idempotencyKey") == idempotency_key
+                        ),
+                        None,
+                    )
+                    if replay is not None:
+                        self._send_json(200, replay)
+                        return
                 issue = dict(payload)
                 settings = issue.get("executionWorkspaceSettings")
                 if isinstance(settings, dict) and settings.get("mode") == "reuse_existing":
@@ -318,7 +332,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._send_json(401, {"error": "unauthorized"})
             return
-        path = [unquote(part) for part in urlsplit(self.path).path.split("/") if part]
+        parsed = urlsplit(self.path)
+        query = parse_qs(parsed.query)
+        path = [unquote(part) for part in parsed.path.split("/") if part]
         if not path or path[0] != "api":
             self._send_json(404, {"error": "not found"})
             return
@@ -338,7 +354,19 @@ class Handler(BaseHTTPRequestHandler):
                         return
                 self._send_json(404, {"error": "agent not found"})
             elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "issues":
-                self._company_collection(path[2], "issues")
+                if path[2] != str(STATE.get("company", {}).get("id", "")):
+                    self._send_json(404, {"error": "company not found"})
+                elif "limit" not in query and "offset" not in query:
+                    self._company_collection(path[2], "issues")
+                else:
+                    try:
+                        limit = max(0, int(query.get("limit", ["500"])[0]))
+                        offset = max(0, int(query.get("offset", ["0"])[0]))
+                    except (TypeError, ValueError):
+                        self._send_json(400, {"error": "invalid pagination"})
+                    else:
+                        issues = STATE.get("issues", [])
+                        self._send_json(200, issues[offset : offset + limit])
             elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "projects":
                 self._company_collection(path[2], "projects")
             elif len(path) == 3 and path[:2] == ["api", "projects"]:

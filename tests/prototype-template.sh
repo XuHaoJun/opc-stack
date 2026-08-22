@@ -75,6 +75,37 @@ assert_eq "prototype policy project-primary" "project_primary" \
   "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type')"
 assert_eq "prototype policy default workspace" "$workspace_id" \
   "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId')"
+assert_eq "prototype marker lane" "prototype" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.lane')"
+assert_eq "prototype marker mode" "shared_workspace" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.mode')"
+assert_eq "prototype marker strategy" "project_primary" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.strategyType')"
+assert_eq "prototype marker concurrency" "serialize" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency')"
+
+board_key="$($PC sh -c 'cat /paperclip/.opc/board-api.key' | tr -d '\r\n')"
+legacy_metadata="$(printf '%s' "$project_json" | jq -c '
+  (.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])).metadata
+  | .markerKeep = "yes"
+  | .opcWorkspaceDefaults |= del(.sharedWorkspaceConcurrency)
+')"
+legacy_policy="$(jq -nc --arg workspace "$workspace_id" '{executionWorkspacePolicy:{enabled:true,defaultMode:"shared_workspace",sharedWorkspaceConcurrency:"allow",defaultProjectWorkspaceId:$workspace,workspaceStrategy:{type:"project_primary"}}}')"
+curl -fsS -X PATCH -H "Authorization: Bearer $board_key" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:3100/api/projects/$project_id" -d "$legacy_policy" >/dev/null
+legacy_workspace_payload="$(jq -nc --argjson metadata "$legacy_metadata" '{metadata:$metadata}')"
+curl -fsS -X PATCH -H "Authorization: Bearer $board_key" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:3100/api/projects/$project_id/workspaces/$workspace_id" -d "$legacy_workspace_payload" >/dev/null
+$PC prototype create "$NAME" >/dev/null 2>&1 \
+  && ok "prototype legacy marker resume succeeds" \
+  || bad "prototype legacy marker resume succeeds"
+project_json="$(paperclip_projects | jq -c --arg n "$NAME" '[.[] | select(.name == $n)][0]')"
+assert_eq "legacy operator concurrency survives" "allow" \
+  "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.sharedWorkspaceConcurrency')"
+assert_eq "legacy marker concurrency is augmented" "serialize" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency')"
+assert_eq "legacy marker preserves unrelated field" "yes" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.markerKeep')"
 
 board_key="$($PC sh -c 'cat /paperclip/.opc/board-api.key' | tr -d '\r\n')"
 override_payload="$(jq -nc --arg workspace "$workspace_id" '{executionWorkspacePolicy:{enabled:true,defaultMode:"isolated_workspace",sharedWorkspaceConcurrency:"allow",defaultProjectWorkspaceId:$workspace,workspaceStrategy:{type:"git_worktree"},workspaceRuntime:{keep:true}}}')"
@@ -110,6 +141,16 @@ assert_eq "prototype reset project-primary" "project_primary" \
   "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type')"
 assert_eq "prototype reset workspace remains primary" "$workspace_id" \
   "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId')"
+assert_eq "prototype reset marker lane" "prototype" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.lane')"
+assert_eq "prototype reset marker mode" "shared_workspace" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.mode')"
+assert_eq "prototype reset marker strategy" "project_primary" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.strategyType')"
+assert_eq "prototype reset marker concurrency" "serialize" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency')"
+assert_eq "prototype reset preserves unrelated marker field" "yes" \
+  "$(printf '%s' "$project_json" | jq -r '(.primaryWorkspace // (.workspaces // [] | map(select(.isPrimary == true))[0])) | .metadata.markerKeep')"
 
 step "install (slow: a cold store fetches the whole tree)"
 $PCN sh -c "cd /prototypes/$NAME && pnpm install --silent" >/dev/null 2>&1 \

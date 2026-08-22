@@ -575,6 +575,7 @@ stop_fixture
 start_fixture
 export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
 export PAPERCLIP_API_KEY="$TOKEN"
+before_prototype_ambiguous_issues="$(jq '.issues | length' "$STATE")"
 PROTOTYPE_AMBIGUOUS_ERR="$TMPDIR/prototype-ambiguous.err"
 if printf 'Prototype: ambiguous-bot\nLane: prototype\n' |
   "$CLI" prototype-ticket create --name ambiguous-bot --title ambiguous \
@@ -584,6 +585,95 @@ else
   ok "ambiguous prototype projects fail closed"
 fi
 assert_contains "prototype ambiguity lists first project" "00000000-0000-4000-8000-000000000123" "$(cat "$PROTOTYPE_AMBIGUOUS_ERR")"
+assert_eq "ambiguous prototype creates no issue" "$before_prototype_ambiguous_issues" "$(jq '.issues | length' "$STATE")"
+
+stop_fixture
+cat >"$STATE" <<'JSON'
+{
+  "experimental": {"enableIsolatedWorkspaces": false},
+  "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+  "agents": [{"id": "00000000-0000-4000-8000-000000000010", "name": "Prototyper", "role": "prototyper", "status": "idle"}],
+  "projects": [{
+    "id": "00000000-0000-4000-8000-000000000131",
+    "name": "recipe-bot-2",
+    "primaryWorkspace": {"id": "00000000-0000-4000-8000-000000000231", "cwd": "/prototypes/recipe-bot-2", "isPrimary": true},
+    "workspaces": [{"id": "00000000-0000-4000-8000-000000000231", "cwd": "/prototypes/recipe-bot-2", "isPrimary": true}]
+  }],
+  "issues": []
+}
+JSON
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+printf 'Prototype: recipe-bot\nLane: prototype\n' |
+  "$CLI" prototype-ticket create --name recipe-bot --title 'Near miss isolated' >"$TMPDIR/prototype-near-miss.json"
+assert_eq "isolated near-miss has no project" "null" \
+  "$(jq -r '.projectId // null' "$TMPDIR/prototype-near-miss.json")"
+
+stop_fixture
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+issues = [
+    {"id": f"00000000-0000-4000-8000-{index:012x}", "identifier": f"FIX-{index}", "title": "filler", "description": "filler", "status": "todo"}
+    for index in range(1, 501)
+]
+issues.append({
+    "id": "00000000-0000-4000-8000-00000000abcd",
+    "identifier": "FIX-501",
+    "title": "beyond first page",
+    "description": "Prototype: paged-bot\nLane: prototype\n",
+    "status": "todo",
+})
+state = {
+    "experimental": {"enableIsolatedWorkspaces": False},
+    "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+    "agents": [{"id": "00000000-0000-4000-8000-000000000010", "name": "Prototyper", "role": "prototyper", "status": "idle"}],
+    "projects": [],
+    "issues": issues,
+}
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+printf 'Prototype: paged-bot\nLane: prototype\n' |
+  "$CLI" prototype-ticket create --name paged-bot --title 'Paged marker' >"$TMPDIR/prototype-paged.json"
+assert_eq "prototype dedupe walks issue pages" "00000000-0000-4000-8000-00000000abcd" \
+  "$(jq -r '.id' "$TMPDIR/prototype-paged.json")"
+assert_eq "paged dedupe does not create issue" "501" "$(jq '.issues | length' "$STATE")"
+
+stop_fixture
+cat >"$STATE" <<'JSON'
+{
+  "experimental": {"enableIsolatedWorkspaces": false},
+  "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+  "agents": [{"id": "00000000-0000-4000-8000-000000000010", "name": "Prototyper", "role": "prototyper", "status": "idle"}],
+  "projects": [],
+  "issues": []
+}
+JSON
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+(printf 'Prototype: concurrent-bot\nLane: prototype\n' |
+  "$CLI" prototype-ticket create --name concurrent-bot --title 'Concurrent A' >"$TMPDIR/prototype-concurrent-a.json") &
+prototype_pid_a=$!
+(printf 'Prototype: concurrent-bot\nLane: prototype\n' |
+  "$CLI" prototype-ticket create --name concurrent-bot --title 'Concurrent B' >"$TMPDIR/prototype-concurrent-b.json") &
+prototype_pid_b=$!
+prototype_status_a=0; prototype_status_b=0
+wait "$prototype_pid_a" || prototype_status_a=$?
+wait "$prototype_pid_b" || prototype_status_b=$?
+assert_eq "concurrent prototype helper A succeeds" "0" "$prototype_status_a"
+assert_eq "concurrent prototype helper B succeeds" "0" "$prototype_status_b"
+assert_eq "idempotent concurrent first ticket count" "1" "$(jq '.issues | length' "$STATE")"
+assert_eq "idempotent concurrent helper IDs match" \
+  "$(jq -r '.id' "$TMPDIR/prototype-concurrent-a.json")" \
+  "$(jq -r '.id' "$TMPDIR/prototype-concurrent-b.json")"
 assert_contains "prototype ambiguity lists second project" "00000000-0000-4000-8000-000000000124" "$(cat "$PROTOTYPE_AMBIGUOUS_ERR")"
 
 echo "result: $PASS pass, $FAIL fail"
