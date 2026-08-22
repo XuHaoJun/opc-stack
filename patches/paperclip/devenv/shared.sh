@@ -18,7 +18,9 @@
 #
 # Derived by reading providers/*.sh: postgres.sh -> DATABASE_URL,
 # valkey.sh -> VALKEY_URL, http.sh -> DEV_PORT, DEV_PORT_<n>, DEV_URL,
-# DEV_HOST, HOST. DEV_PORT_ is a PREFIX rule, so callers must treat it as one
+# DEV_HOST, HOST, s3.sh -> AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY, AWS_REGION, S3_BUCKET, S3_FORCE_PATH_STYLE.
+# DEV_PORT_ is a PREFIX rule, so callers must treat it as one
 # (see devenv_env_name_reserved below).
 devenv_reserved_env_names() {
     cat <<'NAMES'
@@ -28,6 +30,12 @@ DEV_PORT
 DEV_URL
 DEV_HOST
 HOST
+AWS_ENDPOINT_URL
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_REGION
+S3_BUCKET
+S3_FORCE_PATH_STYLE
 NAMES
 }
 
@@ -41,12 +49,16 @@ devenv_env_name_reserved() {
 # Image families devenv already serves, as `family=provider` lines. podenv's
 # route gate reads this so "devenv already provides it, so prefer devenv" is a
 # mechanism and not just prose in a skill.
+# Derived by reading providers/*.sh: postgres.sh, valkey.sh, http.sh, s3.sh.
 devenv_provider_image_families() {
     cat <<'FAMILIES'
 postgres=postgres
 pgvector=postgres
 valkey=valkey
 redis=valkey
+s3=s3
+minio=s3
+rustfs=s3
 FAMILIES
 }
 

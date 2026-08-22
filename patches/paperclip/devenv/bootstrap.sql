@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS devenv_tenant (
                CHECK (lifecycle IN ('keep','ephemeral')),
   providers    text[] NOT NULL,
   valkey_db    int UNIQUE,          -- NULL = valkey not provisioned
+  s3_bucket    text UNIQUE,          -- NULL = s3 not provisioned
   -- HTTP preview ports: a tenant holds the CONTIGUOUS block
   -- [http_port_start, http_port_start + http_port_count).
   -- UNIQUE on the start alone is NOT sufficient to prevent overlap (A at
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS devenv_tenant (
 ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS http_port_start int UNIQUE;
 ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS http_port_count int NOT NULL DEFAULT 0;
 ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS http_exposed_at timestamptz;
+ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS s3_bucket text UNIQUE;
 
 -- Sizes come from pg_database_size(), via a LEFT JOIN on pg_database rather
 -- than by name.
@@ -49,7 +51,6 @@ ALTER TABLE devenv_tenant ADD COLUMN IF NOT EXISTS http_exposed_at timestamptz;
 -- DROP + CREATE rather than CREATE OR REPLACE: replacing a view may only
 -- APPEND columns, and grouping the http columns next to valkey_db reads far
 -- better than tacking them on the end. Nothing depends on this view (it is
--- rebuilt every boot), so dropping it is free.
 DROP VIEW IF EXISTS devenv_usage;
 CREATE VIEW devenv_usage AS
 SELECT t.key,
@@ -59,6 +60,7 @@ SELECT t.key,
        now() - t.last_seen_at                    AS idle,
        t.providers,
        t.valkey_db,
+       t.s3_bucket,
        t.http_port_start,
        t.http_port_count,
        -- Leased a preview port but never ran `devenv expose` — the one cost of
