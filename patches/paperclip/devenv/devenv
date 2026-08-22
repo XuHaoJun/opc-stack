@@ -188,7 +188,7 @@ cmd_provision() {
                     DEVENV_HTTP_COUNT=1
                 fi
                 export DEVENV_HTTP_COUNT ;;
-            *) die "unknown provider '$prov' (known: postgres, valkey, http)" 2 ;;
+            *) die "unknown provider '$prov' (known: postgres, valkey, http). For anything else (MySQL, Milvus, an old version of one of these, or any other daemon devenv does not serve), use podenv instead — 'podenv provision $key --image <ref> --port <n>'." 2 ;;
         esac
         providers="$providers $prov"
     done
