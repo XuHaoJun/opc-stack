@@ -110,6 +110,25 @@ devenv_registry_provider_add() {
        WHERE key = '$1'" >/dev/null
 }
 
+devenv_registry_providers() {
+    devenv_psql_control -tAc \
+      "SELECT array_to_string(providers, ' ') FROM devenv_tenant WHERE key = '$1'" \
+      | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+devenv_registry_provider_remove() {
+    _rpr_key="$1"; _rpr_provider="$2"
+    devenv_psql_control -v ON_ERROR_STOP=1 -c "
+      UPDATE devenv_tenant
+         SET providers = array_remove(providers, '$_rpr_provider'),
+             valkey_db = CASE WHEN '$_rpr_provider' = 'valkey' THEN NULL ELSE valkey_db END,
+             http_port_start = CASE WHEN '$_rpr_provider' = 'http' THEN NULL ELSE http_port_start END,
+             http_port_count = CASE WHEN '$_rpr_provider' = 'http' THEN 0 ELSE http_port_count END,
+             http_exposed_at = CASE WHEN '$_rpr_provider' = 'http' THEN NULL ELSE http_exposed_at END,
+             s3_bucket = CASE WHEN '$_rpr_provider' = 's3' THEN NULL ELSE s3_bucket END
+       WHERE key = '$_rpr_key'" >/dev/null
+}
+
 # Smallest free id in 1..N-1. UNIQUE(valkey_db) makes the DB the arbiter, so
 # concurrent callers race harmlessly — the loser retries.
 devenv_valkey_db_alloc() {
@@ -152,11 +171,14 @@ devenv_provision_cleanup() {
 # `release` and by provision's rollback so the two can never drift.
 devenv_teardown() {
     _td_key="$1"; _td_slug="$2"
-    s3_release       "$_td_key" "$_td_slug"
-    valkey_release   "$_td_key" "$_td_slug"
-    http_release     "$_td_key" "$_td_slug"
-    postgres_release "$_td_key" "$_td_slug"
-    devenv_psql_control -c "DELETE FROM devenv_tenant WHERE key = '$_td_key'" >/dev/null
+    _td_providers="$(devenv_registry_providers "$_td_key")"
+    for _td_provider in $_td_providers; do
+        "${_td_provider}_release" "$_td_key" "$_td_slug" \
+          || die "release of provider '$_td_provider' failed for '$_td_key'" 4
+        devenv_registry_provider_remove "$_td_key" "$_td_provider"
+    done
+    devenv_psql_control -v ON_ERROR_STOP=1 -c \
+      "DELETE FROM devenv_tenant WHERE key = '$_td_key' AND cardinality(providers) = 0" >/dev/null
 }
 
 cmd_provision() {

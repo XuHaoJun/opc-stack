@@ -52,9 +52,9 @@ SQL
 postgres_release() {
     _pgr_slug="$2"
     # Terminate stragglers first — DROP DATABASE fails while sessions remain.
-    devenv_psql_admin -c \
+    devenv_psql_admin -v ON_ERROR_STOP=1 -c \
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${_pgr_slug}'" \
-        >/dev/null 2>&1 || true
-    devenv_psql_admin -c "DROP DATABASE IF EXISTS ${_pgr_slug}" >/dev/null 2>&1 || true
-    devenv_psql_admin -c "DROP ROLE IF EXISTS ${_pgr_slug}" >/dev/null 2>&1 || true
+        >/dev/null
+    devenv_psql_admin -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${_pgr_slug}" >/dev/null
+    devenv_psql_admin -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS ${_pgr_slug}" >/dev/null
 }

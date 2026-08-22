@@ -22,7 +22,7 @@ s3_mc_init() {
 }
 
 s3_probe() {
-    s3_mc_init >/dev/null 2>&1 && mc ready devenv >/dev/null 2>&1
+    s3_mc_init >/dev/null 2>&1 && timeout 5 mc ready devenv >/dev/null 2>&1
 }
 
 s3_name() { printf 'devenv-%s\n' "$1"; }
@@ -88,14 +88,14 @@ s3_release() {
 
     # Bucket must be removed first (force empties it).
     if printf '%s\n' "$_buckets" | jq -e --arg name "$_s3r_name" 'select(.key == ($name + "/"))' >/dev/null 2>&1; then
-        mc rb --force "devenv/$_s3r_name" >/dev/null 2>&1 || die "cannot list S3 buckets" 4
+        mc rb --force "devenv/$_s3r_name" >/dev/null 2>&1 || die "cannot remove S3 bucket" 4
     fi
 
     if printf '%s\n' "$_users" | jq -e --arg name "$_s3r_name" 'select(.accessKey == $name)' >/dev/null 2>&1; then
-        mc admin user remove devenv "$_s3r_name" >/dev/null 2>&1 || die "cannot list S3 users" 4
+        mc admin user remove devenv "$_s3r_name" >/dev/null 2>&1 || die "cannot remove S3 user" 4
     fi
 
     if printf '%s\n' "$_policies" | jq -e --arg name "$_s3r_name" 'select(.policy == $name)' >/dev/null 2>&1; then
-        mc admin policy remove devenv "$_s3r_name" >/dev/null 2>&1 || die "cannot list S3 policies" 4
+        mc admin policy remove devenv "$_s3r_name" >/dev/null 2>&1 || die "cannot remove S3 policy" 4
     fi
 }

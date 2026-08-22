@@ -64,5 +64,48 @@ check "tenant A cannot list tenant B" pc sh -ec '
   ! mc ls "tenant/$other" >/tmp/cross.out 2>&1 && grep -qi "Access Denied" /tmp/cross.out
 '
 
+check "S3-only reprovision is byte-stable" pc sh -ec '
+  cp /tmp/s3-gate-a.env /tmp/s3-gate-a.before
+  devenv provision s3-gate-a --with s3 --env-file /tmp/s3-gate-a.env >/dev/null
+  cmp /tmp/s3-gate-a.before /tmp/s3-gate-a.env
+'
+
+check "Postgres-only provision ignores dead S3" docker compose exec -T -u node \
+  -e DEVENV_S3_HOST=127.0.0.1 -e DEVENV_S3_PORT=1 paperclip \
+  devenv provision s3-pg-only --with postgres --env-file /tmp/s3-pg-only.env
+
+check "default lease remains postgres,valkey" pc sh -ec '
+  devenv provision s3-default --env-file /tmp/s3-default.env >/dev/null
+  ! grep -q "^S3_" /tmp/s3-default.env
+  providers=$(PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" psql     -h "$DEVENV_PG_HOST" -p "$DEVENV_PG_PORT" -U "$DEVENV_PG_ADMIN_USER"     -d "${DEVENV_CONTROL_DB:-devenv_control}" -tAc     "SELECT array_to_string(providers, '"'"','"'"') FROM devenv_tenant WHERE key = '"'"'s3-default'"'"'")
+  [ "$(printf %s "$providers" | tr -d "[:space:]")" = "postgres,valkey" ]
+'
+
+check "failed S3 release retains registry truth" docker compose exec -T -u node \
+  paperclip sh -ec '
+    if DEVENV_S3_HOST=127.0.0.1 DEVENV_S3_PORT=1 devenv release s3-gate-a; then exit 1; fi
+    PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" psql       -h "$DEVENV_PG_HOST" -p "$DEVENV_PG_PORT" -U "$DEVENV_PG_ADMIN_USER"       -d "${DEVENV_CONTROL_DB:-devenv_control}" -tAc       "SELECT s3_bucket IS NOT NULL AND '"'"'s3'"'"' = ANY(providers)
+         FROM devenv_tenant WHERE key = '"'"'s3-gate-a'"'"'" | grep -q t
+  '
+
+check "dead S3 provision exits 4 without state" docker compose exec -T -u node \
+  paperclip sh -ec '
+    rm -f /tmp/s3-dead.env
+    set +e
+    DEVENV_S3_HOST=127.0.0.1 DEVENV_S3_PORT=1       devenv provision s3-dead --with s3 --env-file /tmp/s3-dead.env >/tmp/s3-dead.out 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 4 ] && [ ! -e /tmp/s3-dead.env ]
+    rows=$(PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" psql       -h "$DEVENV_PG_HOST" -p "$DEVENV_PG_PORT" -U "$DEVENV_PG_ADMIN_USER"       -d "${DEVENV_CONTROL_DB:-devenv_control}" -tAc       "SELECT count(*) FROM devenv_tenant WHERE key = '"'"'s3-dead'"'"'")
+    [ "$(printf %s "$rows" | tr -d "[:space:]")" = 0 ]
+  '
+
+check "devenv list ignores dead S3" docker compose exec -T -u node \
+  -e DEVENV_S3_HOST=127.0.0.1 -e DEVENV_S3_PORT=1 paperclip devenv list
+
+check "Postgres-only release ignores dead S3" docker compose exec -T -u node \
+  -e DEVENV_S3_HOST=127.0.0.1 -e DEVENV_S3_PORT=1 paperclip \
+  devenv release s3-pg-only
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
