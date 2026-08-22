@@ -99,6 +99,36 @@ devenv_registry_get() {
         "SELECT COALESCE($2::text,'') FROM devenv_tenant WHERE key = '$1'" 2>/dev/null || true
 }
 
+devenv_registry_provider_add() {
+    devenv_psql_control -v ON_ERROR_STOP=1 -c "
+      UPDATE devenv_tenant
+         SET providers = ARRAY(
+               SELECT DISTINCT p FROM unnest(providers || ARRAY['$2']) AS p
+               ORDER BY p
+             ),
+             last_seen_at = now()
+       WHERE key = '$1'" >/dev/null
+}
+
+devenv_registry_providers() {
+    devenv_psql_control -tAc \
+      "SELECT array_to_string(providers, ' ') FROM devenv_tenant WHERE key = '$1'" \
+      | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+devenv_registry_provider_remove() {
+    _rpr_key="$1"; _rpr_provider="$2"
+    devenv_psql_control -v ON_ERROR_STOP=1 -c "
+      UPDATE devenv_tenant
+         SET providers = array_remove(providers, '$_rpr_provider'),
+             valkey_db = CASE WHEN '$_rpr_provider' = 'valkey' THEN NULL ELSE valkey_db END,
+             http_port_start = CASE WHEN '$_rpr_provider' = 'http' THEN NULL ELSE http_port_start END,
+             http_port_count = CASE WHEN '$_rpr_provider' = 'http' THEN 0 ELSE http_port_count END,
+             http_exposed_at = CASE WHEN '$_rpr_provider' = 'http' THEN NULL ELSE http_exposed_at END,
+             s3_bucket = CASE WHEN '$_rpr_provider' = 's3' THEN NULL ELSE s3_bucket END
+       WHERE key = '$_rpr_key'" >/dev/null
+}
+
 # Smallest free id in 1..N-1. UNIQUE(valkey_db) makes the DB the arbiter, so
 # concurrent callers race harmlessly — the loser retries.
 devenv_valkey_db_alloc() {
@@ -141,10 +171,14 @@ devenv_provision_cleanup() {
 # `release` and by provision's rollback so the two can never drift.
 devenv_teardown() {
     _td_key="$1"; _td_slug="$2"
-    valkey_release   "$_td_key" "$_td_slug"
-    http_release     "$_td_key" "$_td_slug"
-    postgres_release "$_td_key" "$_td_slug"
-    devenv_psql_control -c "DELETE FROM devenv_tenant WHERE key = '$_td_key'" >/dev/null
+    _td_providers="$(devenv_registry_providers "$_td_key")"
+    for _td_provider in $_td_providers; do
+        "${_td_provider}_release" "$_td_key" "$_td_slug" \
+          || die "release of provider '$_td_provider' failed for '$_td_key'" 4
+        devenv_registry_provider_remove "$_td_key" "$_td_provider"
+    done
+    devenv_psql_control -v ON_ERROR_STOP=1 -c \
+      "DELETE FROM devenv_tenant WHERE key = '$_td_key' AND cardinality(providers) = 0" >/dev/null
 }
 
 cmd_provision() {
@@ -166,16 +200,13 @@ cmd_provision() {
 
     slug="$(devenv_slug "$key")"
 
-    # A provider entry is `name` or `name=arg`. Only http takes an arg (how
-    # many contiguous ports); anything else carrying one is an error rather
-    # than a silently ignored argument.
     providers=""
     for spec in $(echo "$with" | tr ',' ' '); do
         prov="${spec%%=*}"
         arg=""
         [ "$spec" = "$prov" ] || arg="${spec#*=}"
         case "$prov" in
-            postgres|valkey)
+            postgres|valkey|s3)
                 [ -z "$arg" ] || die "provider '$prov' takes no '=' argument" 2 ;;
             http)
                 if [ -n "$arg" ]; then
@@ -188,7 +219,7 @@ cmd_provision() {
                     DEVENV_HTTP_COUNT=1
                 fi
                 export DEVENV_HTTP_COUNT ;;
-            *) die "unknown provider '$prov' (known: postgres, valkey, http). For anything else (MySQL, Milvus, an old version of one of these, or any other daemon devenv does not serve), use podenv instead — 'podenv provision $key --image <ref> --port <n>'." 2 ;;
+            *) die "unknown provider '$prov' (known: postgres, valkey, http, s3). For anything else (MySQL, Milvus, an old version of one of these, or any other daemon devenv does not serve), use podenv instead — 'podenv provision $key --image <ref> --port <n>'." 2 ;;
         esac
         providers="$providers $prov"
     done
@@ -199,6 +230,9 @@ cmd_provision() {
     devenv_require_control_schema
     case " $providers " in *" valkey "*)
         valkey_probe || die "devenv-valkey unreachable at $DEVENV_VALKEY_HOST:$DEVENV_VALKEY_PORT" 4 ;;
+    esac
+    case " $providers " in *" s3 "*)
+        s3_probe || die "devenv-s3 unreachable at $DEVENV_S3_HOST:$DEVENV_S3_PORT" 4 ;;
     esac
 
     existing="$(devenv_registry_get "$key" key)"
@@ -219,7 +253,7 @@ cmd_provision() {
         devenv_psql_control -v ON_ERROR_STOP=1 -c "
             INSERT INTO devenv_tenant (key, slug, lifecycle, providers, created_by)
             VALUES ('$key', '$slug', '$lifecycle',
-                    ARRAY[$(echo "$providers" | sed "s/[^ ]*/'&'/g" | tr ' ' ',')],
+                    ARRAY[]::text[],
                     '$(devenv_owner)')" >/dev/null
     else
         devenv_psql_control -c \
@@ -234,7 +268,21 @@ cmd_provision() {
         if [ "$prov" = valkey ]; then
             db="$(echo "$out" | sed 's#.*/##')"
             devenv_psql_control -v ON_ERROR_STOP=1 -c \
-                "UPDATE devenv_tenant SET valkey_db = $db WHERE key = '$key'" >/dev/null
+                "UPDATE devenv_tenant SET valkey_db = $db, providers = ARRAY(SELECT DISTINCT p FROM unnest(providers || ARRAY['valkey']) AS p ORDER BY p), last_seen_at = now() WHERE key = '$key'" >/dev/null
+        elif [ "$prov" = s3 ]; then
+            devenv_psql_control -v ON_ERROR_STOP=1 -c "
+              UPDATE devenv_tenant
+                 SET s3_bucket = 'devenv-$key',
+                     providers = ARRAY(
+                       SELECT DISTINCT p FROM unnest(providers || ARRAY['s3']) AS p
+                       ORDER BY p
+                     ),
+                     last_seen_at = now()
+               WHERE key = '$key'" >/dev/null
+        elif [ "$prov" = http ]; then
+            devenv_registry_provider_add "$key" "$prov"
+        else
+            devenv_registry_provider_add "$key" "$prov"
         fi
         printf '%s\n' "$out" >> "$out_file"
     done
@@ -293,7 +341,7 @@ cmd_list() {
     devenv_require_control_schema
     # Same view the humans query from a SQL client — one definition, no drift.
     devenv_psql_control -c \
-        "SELECT key, created_by, pg_size, valkey_db,
+        "SELECT key, created_by, pg_size, valkey_db, s3_bucket,
                 CASE WHEN http_port_start IS NULL THEN NULL
                      WHEN http_port_count > 1
                        THEN http_port_start || '-' || (http_port_start + http_port_count - 1)
@@ -301,7 +349,6 @@ cmd_list() {
                   || CASE WHEN http_unexposed THEN ' !' ELSE '' END  AS ports,
                 date_trunc('second', idle) AS idle
          FROM devenv_usage"
-    # '!' = port leased but `devenv expose` never ran, so nothing is serving it.
     note "  ports '!' = leased but not exposed (run: devenv expose <name> --command ...)"
 
     # podenv leases live in the same database in their own table (devenv_tenant

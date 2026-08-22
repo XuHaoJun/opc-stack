@@ -30,11 +30,11 @@ valkey_provision() {
 
 valkey_release() {
     _vkr_slug="$2"
-    devenv_valkey_admin ACL DELUSER "$_vkr_slug" >/dev/null 2>&1 || true
+    devenv_valkey_admin ACL DELUSER "$_vkr_slug" >/dev/null
     # The db id is freed by the registry row deletion in the CLI; data left in
     # that numbered db would leak into the next tenant, so flush it here.
     _vkr_db="$(devenv_registry_get "$1" valkey_db)"
     if [ -n "$_vkr_db" ]; then
-        devenv_valkey_admin -n "$_vkr_db" FLUSHDB >/dev/null 2>&1 || true
+        devenv_valkey_admin -n "$_vkr_db" FLUSHDB >/dev/null
     fi
 }

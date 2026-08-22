@@ -347,25 +347,68 @@ docker compose exec hermes hermes --help
 docker compose exec frontdoor hermes --version
 ```
 
+## devenv — shared backends (postgres, valkey, s3)
+
+`devenv` is the shared, multi-tenant lane: one PostgreSQL 18 + pgvector server,
+one Valkey 9.1 server, and one RustFS S3 server, each split into per-tenant
+credentials. Applications read the workspace `.env`; nothing else knows devenv
+exists.
+
+Provision is opt-in per backend. Default remains `postgres,valkey`:
+
+```bash
+docker compose exec -u node paperclip devenv provision demo --with s3
+docker compose exec -u node paperclip devenv provision demo --with postgres,s3
+docker compose exec -u node paperclip devenv list
+docker compose exec -it paperclip devenv release demo
+```
+
+`devenv list` shows the bucket (from the registry) but does not contact RustFS
+for size — bucket listing stays visible even when RustFS is down. Host
+inspection uses the tenant `.env` with the loopback endpoint substituted:
+
+```bash
+docker compose exec -u node paperclip devenv provision demo --with s3 --env-file /tmp/demo.env
+docker compose exec -u node paperclip cat /tmp/demo.env
+# from the host, using the same credentials but the host-reachable endpoint:
+set -a; . /tmp/demo.env; set +a
+AWS_ENDPOINT_URL="http://127.0.0.1:${DEVENV_S3_PORT:-9002}" \
+  mc alias set demo "$AWS_ENDPOINT_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" --api S3v4 --path on
+mc ls "demo/$S3_BUCKET"
+# or with aws-cli:
+AWS_ENDPOINT_URL="http://127.0.0.1:${DEVENV_S3_PORT:-9002}" aws --endpoint-url "$AWS_ENDPOINT_URL" s3 ls "s3://$S3_BUCKET"
+```
+
+`devenv release demo` force-deletes all objects in `devenv-demo`, then removes
+the bucket, IAM user, and policy. It is operator-only and remains manual — no
+GC, no idle expiry.
+
+For the single existing deployment, the S3 service is new and needs no
+migration script; recreate the images and start RustFS with one pasteable
+sequence:
+
+```bash
+scripts/prepare.sh
+docker compose up -d --build paperclip
+docker compose up -d devenv-s3
+```
+
 ## podenv — nested container leases
 
-`devenv` is the shared, multi-tenant, modern lane: one
-PostgreSQL 18 + pgvector server, one Valkey 9.1 server, each split into
-per-tenant credentials. `podenv` is the other half — **a whole container,
+`devenv` above is the shared, multi-tenant, modern lane. `podenv` is the other half — **a whole container,
 all yours**, from any OCI image — for the cases devenv structurally cannot
 serve: a daemon that refuses to be multi-tenant, or a version so old it only
 exists as an image (MySQL 5.7, Postgres 9.6, …). It runs a rootless `podman`
 daemon nested inside the `podenv` service container (docker-in-docker is not
 used or needed).
 
-devenv itself is not documented in this file — its usage lives in the `devenv`
-agent skill and in AGENTS.md's 架構 section; the operator-facing commands are
-`docker compose exec paperclip devenv list` and `devenv release <key>`.
+devenv usage details live in the `devenv` agent skill (`patches/paperclip/skills/devenv/SKILL.md`)
+and in `AGENTS.md` 架構; operator commands for list/release are shown above.
 
 **Always try devenv first.** The CLI enforces this mechanically: asking
 podenv for a postgres/pgvector/valkey/redis image (by name, tag, digest, or
-registry alias) is refused with the devenv command to run instead.
-
+registry alias) is refused with the devenv command to run instead. S3 image
+families (`s3`, `minio`, `rustfs`) are likewise routed to `devenv provision --with s3`.
 Common commands (run inside the `paperclip` container, same as `devenv`):
 
 ```bash

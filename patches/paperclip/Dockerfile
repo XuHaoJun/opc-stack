@@ -30,6 +30,9 @@ ARG NIX_SEED_IMAGE=opc/nix-seed:local
 # in the runtime stage below consumes it.
 FROM ${NIX_SEED_IMAGE} AS nix-seed
 
+# RustFS provisioning client. This exact build is covered by tests/devenv-s3.sh.
+FROM minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 AS minio-client
+
 FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -218,6 +221,7 @@ RUN groupadd -r nixbld \
     && usermod -aG nixagents node \
     && mkdir -m 0755 /nix
 COPY --from=nix-seed /nix-seed /nix-seed
+COPY --from=minio-client /usr/bin/mc /usr/local/bin/mc
 # PATH order is load-bearing. The seed (system) profile stays FIRST so an
 # agent cannot shadow a system tool: nix-seed self-heal checks the system
 # profile by path, but everything else on the stack resolves through PATH.

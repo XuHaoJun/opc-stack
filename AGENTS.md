@@ -9,9 +9,9 @@ Buzz (對話) + Hermes (agent runtime) + Paperclip (work 控制面) + TencentDB-
 - **`patches/nix-seed/`** = 第一個不屬 submodule 的 build context (compose service `nix-seed`, one-shot)。pin nix 2.35.2 + nixpkgs `8be7bd0c83f1`, 建 `/nix-seed` (cp -al hardlink) 含 13 工具 (ripgrep jq fd htop bat just mise gh procps iproute2 lsof postgresql valkey — procps/iproute2/lsof 是 ps/pkill/ss/lsof, 沒有它們連「誰在跑」「誰佔著 port」都查不了; postgresql 是為了 **client** psql/pg_isready —— 每個 devenv 租戶 (prototype lane、現在加上 scientist expert) 都握著一個 postgres 租約, 操作者被要求直接拿 SQL client 接上去 (`devenv list` 那行「或 SQL client 連 127.0.0.1:5433」), client 因此屬於 seed, 與任何測試是否存在無關; nixpkgs 沒有 client-only 切分所以 server binary 一起進來 (量到的 closure ~166MB, 沒有單一依賴獨占多數 — icu4c ~40MB、postgresql 本體 ~26MB、其餘是 curl/openssl/glibc 系), valkey 同理且證據相同 —— 每個 devenv 租約都同時發 `VALKEY_URL`, 所以 client 該跟 `psql` 成對存在; 選 `valkey` 不選 `redis` 是因為伺服器是 valkey 9.1 而租戶隔離靠它 9.1+ 的 `db=<dbid>` ACL op, 何況這個 package 同時裝出 `valkey-*` 與 `redis-*` 兩套 binary, 是超集 (量到的邊際成本 ~100MB / 33 個 store path, 幾乎全是 seed 原本沒有的完整 systemd); 沒有任何東西會啟動它, 而這筆成本不只付在共用的 `opc-nix` volume 一次 —— `COPY --from=nix-seed /nix-seed /nix-seed` 把同一份 seed 烤進**每個** service image 的 layer, 所以也逐 image 付一次)。各 build service `depends_on nix-seed` + `FROM ${NIX_SEED_IMAGE} AS nix-seed` / `COPY --from=nix-seed` 取用 (BuildKit 不支援 `--from` 變數展開, 故用 stage alias)。改 seed 工具清單 = 改這個 Dockerfile, seed 只重裝 1 次。
   **`depends_on` 不排序 build, 只排序啟動** —— 而這裡的 seed 是別人的 base image。compose 把整組交給 buildx bake 當**一張平行圖**跑, 所以乾淨機器上 paperclip 的 `FROM` 會在 nix-seed 還在 build 時就去解析, 解不到就轉去 registry, 死在 `pull access denied for <prefix>/nix-seed` —— 一個看起來完全不像順序問題的授權錯誤。擋住它的是 compose 的 **`additional_contexts: nix-seed: "service:nix-seed"`** —— 每個 `FROM` nix-seed 的 service 的 build 區段都宣告它, 那才是 compose 認得的 build 排序邊 (`depends_on` 不是)。**`scripts/setup.sh` 裡沒有、也不需要單獨的 `docker compose build nix-seed` 步驟** (這句話曾經寫成有, 那是過期的敘述 —— 2026-08-22 逐一驗過 buzz/buzz-keys/frontdoor/hermes/paperclip 五個 service 的 resolved config, 全部帶著這個 context)。任何機器只要 build 過一次就再也看不到這個 bug (image 已在 store 裡), 它只咬乾淨安裝 —— 由 `tests/fresh-install.sh` 抓到。
 - **prototype lane** (`prototype` CLI, paperclip image): 一個 prototype = 一個 Paperclip project + `/prototypes/<name>` (自己的 git) + 一個 devenv 租約 + 一個掛在 **project workspace** 上的 runtime service。服務掛 project 層而非 execution workspace,所以沒有 issue 在跑時宣告仍在,**preview URL 跨 session 不變**。`prototype create` 冪等,同時是「建立」與「用名字接續」的路徑。設計見 `docs/superpowers/specs/2026-08-18-devenv-http-preview-design.md`。
-- **devenv** (`docker-compose.yml` 的 `devenv-pg` / `devenv-valkey`): agent 的開發資源租約, **兩類租戶**。(1) paperclip agent 自己跑 `devenv provision <key>`, 拿到獨立的 postgres DB (pgvector) + valkey ACL user, 寫進 workspace `.env` 的 `DATABASE_URL`/`VALKEY_URL`。(2) **hermes 專家 agent 有常駐租約**: one-shot `devenv-expert-leases` (跑 paperclip image, 因為 devenv CLI 只住在那裡) provision `scientist` 到 `/keys/devenv-scientist.env`, hermes entrypoint 的 `opc_seed_expert_profile()` 把它 merge 進 profile 的 `.env`。**租約壞掉只會降級專家, 不會擋 gateway 起來** —— one-shot 一律 exit 0, 失敗時印 WARNING (詳見不變量 8)。刻意不給 agent docker (不變量 6); 設計見 `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md`。
+- **devenv** (`docker-compose.yml` 的 `devenv-pg` / `devenv-valkey` / `devenv-s3`): agent 的開發資源租約, **三類後端**: postgres (pgvector) + valkey + S3 (RustFS `1.0.0-rc.3@sha256:800cf3f352a0a27e3275ca854a51f0027975d7acc7a0d52089a35bcc9fcbf0b5`, named volume `devenv-s3-data:/data`, `127.0.0.1:${DEVENV_S3_PORT:-9002}:9000`, console disabled)。**兩類租戶**。(1) paperclip agent 自己跑 `devenv provision <key> --with postgres,valkey` (default) 或 `devenv provision <key> --with s3` / `--with postgres,s3`, 每個租約得到獨立的 bucket/IAM user/policy (`devenv-<key>` 三者同名, `mc` pinned `RELEASE.2025-08-13T08-35-41Z`) 寫進 workspace `.env` 的 `AWS_*`/`S3_BUCKET`/`S3_FORCE_PATH_STYLE`。(2) **hermes 專家 agent 有常駐租約**: one-shot `devenv-expert-leases` (跑 paperclip image, 因為 devenv CLI 只住在那裡) provision `scientist` 到 `/keys/devenv-scientist.env`, hermes entrypoint 的 `opc_seed_expert_profile()` 把它 merge 進 profile 的 `.env`。**租約壞掉只會降級專家, 不會擋 gateway 起來** —— one-shot 一律 exit 0, 失敗時印 WARNING (詳見不變量 8)。S3 是 opt-in, RustFS 不健康不擋 paperclip 與非 S3 租約 (paperclip 沒有 `depends_on: devenv-s3: healthy`); 設計見 `docs/superpowers/specs/2026-08-18-devenv-resource-provisioning-design.md` 與 `2026-08-22-devenv-s3-rustfs-design.md`。
 - **podenv** (`docker-compose.yml` 的 `podenv` service): devenv 服務不了的兩類 daemon 的租約 —— 拒絕 multi-tenant 的 daemon、與只以 image 存在的超舊版本 (MySQL 5.7、Postgres 9.6…)。機制是 rootless podman 巢狀跑在 `podenv` 容器裡 (不是 docker-in-docker), paperclip 用 apt 裝的 `podman-remote` client 連過去。**先試 devenv** —— CLI 對 postgres/pgvector/valkey/redis 家族的 image 一律拒絕並印出對應的 devenv 指令。不變量 6 (無 host mount、無 privileged) 兩條都完好, 但多授予兩項 (`security_opt: seccomp=unconfined` 讓 rootless podman clone 得動、`/dev/net/tun` 讓 pasta 網路能跑), 由 `tests/podenv.sh` 的結構檢查釘住。設計見 `docs/superpowers/specs/2026-08-22-podenv-nested-container-lease-design.md`。
-- 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉; **專家 agent 的宿主** — multiplex 服務 `hermes-profiles` volume 上的每個 profile, 目前有 `agt-scientist`) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096。
+- 服務 (port): buzz relay 3000 (+pg/redis/minio) · frontdoor (buzz-acp→`hermes acp`, 與 buzz 共用 netns) · hermes gateway 8642 (API server; dashboard 關閉; **專家 agent 的宿主** — multiplex 服務 `hermes-profiles` volume 上的每個 profile, 目前有 `agt-scientist`) · hermes-dashboard 9119 (web UI, 掛 frontdoor 的 hermes home, 看 buzz 對話 session/thinking log) · paperclip 3100 · tencentdb core 8420 / panel 8125 / knowledge 8424 / proxy 8096 · devenv-s3 9002 (127.0.0.1 only, RustFS) · devenv-pg 5433 · devenv-valkey 6380 (both 127.0.0.1).
 - LLM: OpenCode Go (`https://opencode.ai/zen/go/v1`)。`.env` 填 `OPENAI_API_KEY` 一個 key 全棧通用;Hermes custom provider runtime 讀 `OPENAI_API_KEY` + `OPENAI_BASE_URL`。shared gateway/dashboard/Paperclip/TencentDB 的 model 用 `OPENAI_MODEL`（預設 deepseek-v4-flash）,frontdoor relay 用 `BUZZ_AGENT_MODEL`（預設 deepseek-v4-pro）;模型選擇以 `config.yaml` 為 source of truth。
 
 ## 運作模型 (為什麼派工長這樣)
@@ -75,11 +75,11 @@ Lean Mode (拿掉 Paperclip、Hermes Kanban 轉正) 是 PRD 允許的另一種�
 **最容易騙過自己的地方**: compose 的 one-shot 在**容器已存在且 exit 0 時不會重跑**。
 所以開發時「我 `docker compose up --force-recreate <bootstrap>` 過, 它會動」對**乾淨
 安裝完全沒有證明力** —— 那台機器上根本沒有那個容器, 走的是另一條路徑。真正算數的驗證
-只有真的從空狀態走一次 `setup.sh` 之後三條 gate 直接綠 —— 但**不要在這台上
+只有真的從空狀態走一次 `setup.sh` 之後五條 gate 直接綠 —— 但**不要在這台上
 `docker compose down -v`** (會毀掉 community/board/memory/prototype/租約)。
 跑 `tests/fresh-install.sh`: 它把 repo clone 出去、換 compose project /
 image prefix / 全部 port (+1000) / 自己的 Buzz relay, 在活著的 stack **旁邊**
-做完整排練, 再從 clone 裡跑 audit-bootstrap + test-connectivity + test-scientist。
+做完整排練, 再從 clone 裡跑 audit-bootstrap + connectivity + scientist + podenv + devenv-s3。
 `tests/audit-bootstrap.sh` 只是靜態稽核, 不是這件事的證明。
 
 ## 常用指令
@@ -95,11 +95,15 @@ docker compose logs -f <svc>
 docker compose down           # 停 (volume 保留); down -v 全清
 scripts/sync-gh-creds.sh      # host GitHub cred 變更後手動重同步 (自動同步已涵蓋 down -v 場景)
 scripts/sync-claude-creds.sh  # host Claude OAuth cred 重同步 (token 輪替後容器端失效時跑)
-docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL client 連 127.0.0.1:5433)
+docker compose exec paperclip devenv list   # agent 開發資源用量 (或 SQL client 連 127.0.0.1:5433); s3 bucket shown without RustFS probe
+docker compose exec -u node paperclip devenv provision demo --with s3             # opt-in S3 lease
+docker compose exec -u node paperclip devenv provision demo --with postgres,s3    # add S3 to existing lease
+# Host S3 inspection (loopback; presigned URLs same scope):
+# . /tmp/demo.env && AWS_ENDPOINT_URL="http://127.0.0.1:${DEVENV_S3_PORT:-9002}" mc ls "demo/$S3_BUCKET"
 docker compose exec paperclip podenv list             # 巢狀容器租約 (image / port / 變數 / idle / 磁碟用量)
 docker compose exec paperclip podenv release <key>    # 唯一的回收路徑 (刪容器連資料) —— 手動, 無 gc
 tests/podenv.sh        # podenv lane 的結構 + live gate
-docker compose exec paperclip prototype list          # 目前有哪些 prototype (名字 / port / URL)
+tests/devenv-s3.sh     # S3 provider 的結構 + live gate (RustFS, bucket/IAM isolation, presigned, durability)
 docker compose exec paperclip prototype restore       # 手動把該跑的 preview 叫回來 (開機時會自動跑)
 docker compose exec paperclip prototype templates     # 可用的 scaffold
 tests/prototype-template.sh nextjs [ui]        # template/layer smoke test (建→裝→migrate→serve→驗兩個後端→刪)
@@ -176,6 +180,8 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
    **dashboard 容器的 `command` argv[0] 必須是 `dashboard`** —— upstream 用
    `/proc/1/cmdline` 判斷要不要跳過 profile reconcile, 判錯就是兩個容器搶
    `logs/gateways/<profile>/lock` 的 s6-log restart storm。
+9. **devenv S3 是按需, 不進 default, 不擋非 S3 路徑。** `devenv provision <key>` 預設仍是 `postgres,valkey`; S3 只有 `--with s3` 或 `--with postgres,s3` 才會建立。`devenv-s3` 不健康時 `devenv provision --with postgres`、`devenv list`、`devenv release <non-s3-key>` 必須照常成功, `paperclip` service 沒有 `depends_on: devenv-s3: condition: service_healthy`。RustFS 壞掉只讓本次選到 `s3` 的 provision/release 以 exit 4 失敗, 不留半成品 (不寫 `.env`, 不留空 registry row)。偵測器是 `tests/devenv-s3.sh` 的 `Postgres-only provision ignores dead S3` / `devenv list ignores dead S3` / `dead S3 provision exits 4 without state` 三條。
+10. **devenv S3 的 lifecycle 是 named volume + 手動回收。** `devenv-s3-data:/data` 是唯一的 durable store; object 與 IAM 經 `devenv-s3` 重建/force-recreate 保留, 只有 `devenv release <key>` 會 force-empty bucket 再刪 user/policy (冪等, 失敗時 registry 保留 truth 供重試)。沒有 GC、沒有 idle expiry、沒有 quota。Salt 變更會使所有已發 S3 租約的 derived secret 失效, 與 postgres/valkey 相同。
 
 ## 已知坑 (踩過)
 
@@ -247,7 +253,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - **podman 的 socket 存取閘門是它的 OWNER uid, 不是 group**: podman 建好 listener **之後**才把 socket chmod 回 0600, 所以 podenv 的 runtime uid 必須等於 paperclip 的 `node` (1000) —— 別想用 setgid 目錄或共用 gid 繞過去, 帶驗證的重試迴圈量到的結果是「先報告成功, 然後被 podman 自己的 chmod 改回去」。
 - **`--netns host` 的租約沒有 port 重映射, 所以 daemon 自己要監聽那個被租出去的 port**: 這條在實務上會咬人 —— `traefik/whoami` 預設監聽 80, 用 host netns 租在別的 port 上會得到一個跑起來但永遠不回應的容器。
 - **podenv 的操作規則**: 回收是手動的 (`podenv release <key>`), 沒有排程 gc (不變量 6b); **沒有磁碟配額** —— 硬上限需要 `CAP_SYS_ADMIN` (等於 privileged), 這個 stack 不給; port pool 的邊界寫在兩個地方 (compose `ports:` 與 CLI 讀的 `PODENV_PORT_BASE`/`PODENV_PORT_COUNT`/`PODENV_PORT_RANGE_END`) 是因為 compose 不會算術, `opc-podenv-seed.sh` 在兩邊有落差時會警告; base 必須低於 32768 (kernel ephemeral range, 理由與 devenv 的 preview port 相同); 改發佈的 port range 需要 **recreate** podenv 容器 (docker 的發佈 port 在建立容器時固定)。
-
+- **devenv S3 必須 path-style, presigned 只能 loopback, `mc admin info` 不通但 IAM 必須通。** `S3_FORCE_PATH_STYLE=true` 是必要條件 —— 虛擬主機式會要求解析 `devenv-<key>.devenv-s3`, compose DNS 不提供 wildcard, 虛擬式一律失敗, 這不是效能選項, 是能否連上。Presigned URL 第一版只保證同 docker network 或 `127.0.0.1:${DEVENV_S3_PORT:-9002}` 可達; 遠端 browser 不可達是設計限制, 不是 bug。`mc admin info` 在此 RustFS release 上回 `Unable to get service info`, 屬已知不相容, 但 `mc mb` / `mc admin user` / `mc admin policy` 三條路徑必須通, 由 `tests/devenv-s3.sh` 的 live probe 釘住。永遠不要用 `buzz-minio` 當 S3 後端, 那是另一個 durable owner (buzz media)。
 ## 檔案地圖
 
 - `docker-compose.yml` / `.env.example` / `SETUP.md` — 部署核心
@@ -262,14 +268,14 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
 - `patches/paperclip/templates/<name>/` — `prototype create --template` 的 scaffold。**是程式碼不是文件**: env 覆蓋順序、`NODE_ENV`、`allowedDevOrigins`、valkey ready check 每一條都是一次除錯換來的, 讓 agent 照文件重打必然出錯 (已發生過)。改了跑 `tests/prototype-template.sh`
 - `patches/paperclip/prototype/` — `prototype` CLI (paperclip-aware 的工作流層: project + git + 租約)。**刻意不放進 devenv** — devenv 是通用資源租約, 不該認識 paperclip; 它只多一個 `mark-exposed` 供 `devenv list` 標記
 - `patches/paperclip/skills/{devenv,prototype-workspace}/` — first-party skill (租約用法 / prototype 工作流 + 覆寫 vendored `prototype` skill 的第 1、3、6 條規則)
-- `patches/paperclip/devenv/` — `devenv` CLI + `providers/{postgres,valkey}.sh` + `bootstrap.sql`;
-  image 內落在 `/usr/local/lib/devenv/`, symlink 到 `/usr/local/bin/devenv`。schema 由 `opc-devenv-seed.sh` 每次開機套用 (冪等, 後端不通只警告不擋 `up`)
+- `patches/paperclip/devenv/` — `devenv` CLI + `providers/{postgres,valkey,s3}.sh` + `bootstrap.sql`;
+  image 內落在 `/usr/local/lib/devenv/`, symlink 到 `/usr/local/bin/devenv`。schema 由 `opc-devenv-seed.sh` 每次開機套用 (冪等, 後端不通只警告不擋 `up`)。`providers/s3.sh` 用 pinned `mc` 對 `devenv-s3:9000` reconciles bucket/IAM/policy (`devenv-<key>`)。
 - `patches/podenv/` — podenv 巢狀容器 lane 的獨立 build context (`Dockerfile` + `containers.conf` override + entrypoint + restore script), 與 `patches/nix-seed/` 同一類 (compose service, 不是 submodule 的 `opc/` overlay); 消費者是跑著的 `podenv` service 本身, **paperclip 完全不 `FROM` 它** —— client 是 apt 裝的 `podman-remote`, 見 `patches/paperclip/Dockerfile` 裡的說明
 - `patches/paperclip/podenv/` — `podenv` CLI + `bootstrap.sql` (與 devenv 共用 control database, 只多自己的 table); image 內落在 `/usr/local/lib/podenv/`, symlink 到 `/usr/local/bin/podenv`。schema 由 `opc-podenv-seed.sh` 每次開機套用
 - `patches/paperclip/skills/podenv/` — first-party skill: 何時用 podenv 而非 devenv (機制強制, 不只是建議)、`provision`/`release`/`list` 用法、MySQL 5.7 完整範例
 - `scripts/prepare.sh` — 除了同步 patches, 還有**防漂移檢查**: 兩份 `paperclip-api` SKILL.md 與兩份 `SOUL.md` 必須逐字相同, 不同就中止 build (這條規則在本 repo 已經默默壞過三次)
 - `scripts/` — 操作用的一次性工具: setup / prepare / upgrade / load-env (`.env` 讀取器, 被 `scripts/setup.sh`、`scripts/upgrade.sh` 與 `tests/*.sh` 共用); `host-sync.sh` (通用 host→volume 鏡像 CLI) + `host-sync-worker.sh` (容器側 engine, 唯一邏輯) + `hooks/` (per-source 轉換, ssh/gitconfig/claude-cred) + `sync-gh-creds.sh` / `sync-claude-creds.sh` (場景薄 wrapper); compose `host-sync` (gh) 與 `host-sync-claude` (Claude cred) 兩個 one-shot 每次 up 自動跑
-- `tests/` — 測試與驗證腳本的慣例落腳處, 與 `scripts/` 分工: `scripts/` 是操作工具, `tests/` 是測試與驗證。移進來的檔案把冗餘的 `test-` 前綴拿掉 (目錄名已經說明性質了) —— 例外是 `tests/audit-bootstrap.sh` (本來就沒有前綴) 與 `tests/acp-smoke-test.mjs` (`-test` 是複合名稱的一部分而非前綴, 且它在 paperclip 容器內跑, 名稱與位置無關)。`tests/set-buzz-agent-owner.sh` 測的是 `scripts/set-buzz-agent-owner.sh` — 同名分屬 `scripts/`/`tests/` 兩個目錄是刻意的配對, 不是巧合, 其餘整合測試同理。四個 gate: `tests/audit-bootstrap.sh` (靜態: 每份狀態是否都有無人值守的產生者)、`tests/connectivity.sh` (live: 既有功能沒被弄壞)、`tests/scientist.sh` (live: 專家 lane 端到端)、`tests/podenv.sh` (live: 巢狀容器租約的結構 + 端到端); 外加偶爾才跑的 `tests/fresh-install.sh` (乾淨機器完整排練, 見「部署假設」一節, 現在也把 `tests/podenv.sh` 收進它的四個 gate 裡跑)。這是慣例, 不是強制關卡 —— `scripts/prepare.sh` 不對它 gate。
+- `tests/` — 測試與驗證腳本的慣例落腳處, 與 `scripts/` 分工: `scripts/` 是操作工具, `tests/` 是測試與驗證。移進來的檔案把冗餘的 `test-` 前綴拿掉 (目錄名已經說明性質了) —— 例外是 `tests/audit-bootstrap.sh` (本來就沒有前綴) 與 `tests/acp-smoke-test.mjs` (`-test` 是複合名稱的一部分而非前綴, 且它在 paperclip 容器內跑, 名稱與位置無關)。`tests/set-buzz-agent-owner.sh` 測的是 `scripts/set-buzz-agent-owner.sh` — 同名分屬 `scripts/`/`tests/` 兩個目錄是刻意的配對, 不是巧合, 其餘整合測試同理。五個 gate: `tests/audit-bootstrap.sh` (靜態: 每份狀態是否都有無人值守的產生者)、`tests/connectivity.sh` (live: 既有功能沒被弄壞)、`tests/scientist.sh` (live: 專家 lane 端到端)、`tests/podenv.sh` (live: 巢狀容器租約的結構 + 端到端)、`tests/devenv-s3.sh` (live: RustFS S3 bucket/IAM isolation, presigned, durability); 外加偶爾才跑的 `tests/fresh-install.sh` (乾淨機器完整排練, 見「部署假設」一節, 現在把 `tests/podenv.sh` 與 `tests/devenv-s3.sh` 收進它的五個 gate 裡跑)。這是慣例, 不是強制關卡 —— `scripts/prepare.sh` 不對它 gate。
 - `upstream/<proj>/opc/` — prepare.sh 產物, 勿手改
 - `tests/acp-smoke-test.mjs` — omp ACP handshake 驗證 script (在 paperclip 容器內跑)
 - `patches/hermes/profiles/<name>/SOUL.md` — 專家 agent 的身分。**不是** `patches/hermes/SOUL.md` 的副本: 那份帶著「你不是實作者」, 而專家的工作就是自己動手, 套上去會切斷探索迴圈
