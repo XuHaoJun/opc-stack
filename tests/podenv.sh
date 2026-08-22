@@ -110,6 +110,37 @@ expect_empty() {
         fail "$label (want empty, got '$got', exit $rc)"
     fi
 }
+# podenv_wait_runtime_ready <label> — bounded poll (45 attempts * 2s = 90s,
+# the same shape podenv_restore_probe below already uses for lease probes)
+# until a real `podman version` call answers over the socket. A section that
+# just restarted or force-recreated the podenv service must not hand its
+# very next check a runtime that is still coming back up — final review:
+# five checks in one gate run failed exactly that way ("Cannot connect to
+# Podman" exit 125; a create-path check got exit 4 "backend unreachable"
+# where it expected 5; a --dedicated reason came back empty because the
+# provision call that would have persisted it never got past
+# podenv_require_runtime) when the "provision re-run after restart" race
+# section below was immediately followed by sections that assume a ready
+# runtime. That race section's OWN restart is deliberately left unbarriered
+# (it exists to race provision against opc-podenv-restore.sh's own boot
+# pass — see its header comment), so the barrier belongs strictly AFTER it,
+# between that section's cleanup and whatever runs next — not on the
+# restart itself. This does not touch the "restore" section's two
+# `podenv_restore_probe` calls or the later `docker compose restart podenv`
+# further down: both already carry their own bounded-retry barrier (a
+# 45x2s serving-HTTP-200 loop, or an explicit socket-then-HTTP wait)
+# immediately after the disruption, for the same reason.
+podenv_wait_runtime_ready() {
+    label="$1"
+    for i in $(seq 1 45); do
+        docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+            podman --remote --url unix:///run/podenv/podman.sock version >/dev/null 2>&1 && \
+            { pass "$label"; return 0; }
+        sleep 2
+    done
+    fail "$label (runtime did not answer within 90s)"
+    return 1
+}
 
 echo "── structure ──"
 
@@ -213,8 +244,89 @@ if [ "$_node_rc" -eq 0 ] && [ "$_sock_rc" -eq 0 ] && [ -n "$_node_uid" ] && [ "$
 else
     fail "socket owner uid == paperclip node uid (want '$_node_uid' [rc=$_node_rc], got '$_sock_uid' [rc=$_sock_rc])"
 fi
-expect_empty "self-test left no diagnosis" \
+# CORRECTED (final review, this task — the eighth occurrence in this branch
+# of "a recorded state outlives its truth", this time about the diagnosis
+# FILE rather than something podman itself reports): the check this
+# replaces read /run/podenv/diagnosis directly and asserted it was empty,
+# which inherits whatever staleness the file carries. Measured live:
+# `docker compose up -d --force-recreate podenv` (which the restore checks
+# below drive routinely) starts the entrypoint's self-test the instant the
+# new container exists, while the PREVIOUS instance's namespaces/processes
+# may still be tearing down — a genuine boot-time race recorded "userns
+# nesting failed" once and never re-examined it, even though the runtime
+# was fine moments later. The property that actually matters is not "the
+# file is empty" but "the runtime is usable, and nothing stale gets blamed
+# for it" — assert THAT. podenv_require_runtime now self-heals a stale
+# userns-nesting record the instant a real `podman version` call proves the
+# daemon is up (see the CLI's own comment above that branch): the daemon
+# cannot even accept that connection without having survived the identical
+# namespace pivot the self-test exercises, so the record is provably
+# obsolete by then.
+#
+# RED-proved by hand while writing this fix (transcript in
+# final-review-fixes.md): with a FAKE "userns nesting failed" line written
+# directly into the LIVE diagnosis file while the runtime was genuinely
+# healthy, the OLD check (bare `expect_empty ... cat diagnosis`, still
+# reproducible by running that cat immediately after the write below)
+# fails — exactly the false-red this task closes. A copy of the CLI with
+# the diagnosis text stripped from the "socket refuses a connection" die
+# message (simulating "the warning got suppressed") was run against a
+# genuinely unreachable fake socket+diagnosis pair and printed exit 4
+# WITHOUT the diagnosis text — proving the "surfaced" check below, which
+# greps for that text, would catch a regression that silenced it.
+docker compose exec -T podenv sh -c \
+    'printf "userns nesting failed: fake line written by tests/podenv.sh\n" > /run/podenv/diagnosis'
+
+_diag_out="$(docker compose exec -T -u node paperclip sh -c \
+    'podenv provision selftest-heal-gate --image docker.io/traefik/whoami --port 80 \
+        --env-file /tmp/podenv-selftest-heal.env' 2>&1)"; _diag_rc=$?
+
+if [ "$_diag_rc" -eq 0 ] && ! printf '%s' "$_diag_out" | grep -qi 'self-test'; then
+    pass "a healthy runtime is not blamed for a stale self-test record (the property that matters, not raw file content)"
+else
+    fail "a healthy runtime is not blamed for a stale self-test record (rc=$_diag_rc, output: $(printf '%s' "$_diag_out" | head -3))"
+fi
+
+expect_empty "the self-heal actually cleared the stale record, not merely skipped warning about it" \
     docker compose exec -T podenv cat /run/podenv/diagnosis
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release selftest-heal-gate >/dev/null 2>&1; rm -f /tmp/podenv-selftest-heal.env' >/dev/null 2>&1
+
+# The other direction, kept as its own check so the fix above cannot be read
+# as "the diagnosis is never surfaced any more": a GENUINELY unreachable
+# runtime must still report a recorded diagnosis verbatim, with exit 4 —
+# reachability is what disqualifies the record, and this case is not
+# reachable. Built with python3 (already a dependency of this file, see
+# podenv_field above) rather than a plain regular file: a bare file fails
+# `test -S` and takes the WRONG ("no socket at all", no diagnosis in the
+# message) branch, never reaching the code under test. PODENV_SOCK/
+# PODENV_DIAG overrides target throwaway scratch paths, so this never
+# touches the real socket or the real diagnosis file.
+docker compose exec -T -u node paperclip sh -c '
+    rm -f /tmp/podenv-fake.sock
+    python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(\"/tmp/podenv-fake.sock\")
+s.listen(1)
+"
+    echo "FAKE: userns nesting failed: synthetic RED surfaced-check test" > /tmp/podenv-fake-diag
+'
+
+_surface_out="$(docker compose exec -T -u node paperclip env \
+    PODENV_SOCK=/tmp/podenv-fake.sock PODENV_DIAG=/tmp/podenv-fake-diag \
+    sh -c 'podenv provision selftest-surface-gate --image docker.io/traefik/whoami --port 80 \
+        --env-file /tmp/podenv-selftest-surface.env' 2>&1)"; _surface_rc=$?
+
+if [ "$_surface_rc" -eq 4 ] && printf '%s' "$_surface_out" | grep -qF 'synthetic RED surfaced-check test'; then
+    pass "a genuinely unreachable runtime still surfaces its recorded diagnosis verbatim (exit 4)"
+else
+    fail "a genuinely unreachable runtime still surfaces its recorded diagnosis verbatim (exit 4) (rc=$_surface_rc, output: $(printf '%s' "$_surface_out" | head -3))"
+fi
+
+docker compose exec -T -u node paperclip sh -c \
+    'rm -f /tmp/podenv-fake.sock /tmp/podenv-fake-diag /tmp/podenv-selftest-surface.env' >/dev/null 2>&1
 expect "nested podman run works" "NESTED_OK" \
     docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
     podman run --rm docker.io/library/alpine:3.20 echo NESTED_OK
@@ -697,6 +809,16 @@ fi
 docker compose exec -T -u node paperclip sh -c \
     'podenv release race-probe >/dev/null 2>&1
      rm -f /tmp/podenv-race.env /tmp/podenv-race.out' >/dev/null 2>&1
+
+# Readiness barrier (final review, item 4): the section above deliberately
+# raced `podenv provision` against the restart it just drove and tolerates
+# either outcome (exit 0+200 or exit 5) — it is not safe to assume the
+# runtime is fully back by the time that race resolves. Every section from
+# here on DOES assume a ready runtime (task-6's create-path liveness expects
+# a specific exit code, not "whichever one a still-settling backend
+# happens to return"), so settle that assumption explicitly, once, instead
+# of leaving it to each section's own first call to discover the hard way.
+podenv_wait_runtime_ready "runtime is ready again after the race section's restart"
 
 echo "── task-6: create-path liveness (F1) ──"
 

@@ -42,9 +42,37 @@ as_runtime_user() {
 : > "$PODENV_DIAG"
 chown "$PODENV_UID:$PODENV_GID" "$PODENV_DIAG"
 
-if ! _st_out="$(as_runtime_user podman unshare true 2>&1)"; then
+# Bounded retry, not one shot (final review: the eighth occurrence in this
+# branch of "a recorded state outlives its truth" — this time the RECORD
+# ITSELF, not something podman reports). Measured live against this stack's
+# own gate: `docker compose up -d --force-recreate podenv` (which the restore
+# checks in tests/podenv.sh drive routinely) starts this entrypoint the
+# instant the new container exists, while the PREVIOUS instance's namespaces
+# and processes may still be tearing down — `podman unshare true` failed once
+# with "cannot set user namespace" in exactly that window, and by the time the
+# next command touched the runtime seconds later it was already healthy
+# (`podman unshare true` back to exit 0, host `max_user_namespaces` unchanged
+# at 94963 with 2 in use). A one-shot self-test cannot tell that transient
+# race apart from a genuinely broken host; it just picks whichever attempt it
+# happened to run first. Retrying does: it costs a few bounded seconds only on
+# the (rare) failing path, and only concludes failure once every attempt in
+# the window agrees.
+_st_tries=0
+_st_max=5
+_st_ok=0
+_st_out=""
+while [ "$_st_tries" -lt "$_st_max" ]; do
+    if _st_out="$(as_runtime_user podman unshare true 2>&1)"; then
+        _st_ok=1
+        break
+    fi
+    _st_tries=$((_st_tries + 1))
+    [ "$_st_tries" -lt "$_st_max" ] && sleep 1
+done
+
+if [ "$_st_ok" != 1 ]; then
     printf 'userns nesting failed: %s\n' "$_st_out" > "$PODENV_DIAG"
-    echo "[podenv] WARNING userns nesting failed — every lease will fail." >&2
+    echo "[podenv] WARNING userns nesting failed after $_st_max attempts — every lease will fail." >&2
     echo "[podenv] WARNING   $_st_out" >&2
     echo "[podenv] WARNING   Check that this service still has security_opt: [seccomp=unconfined]," >&2
     echo "[podenv] WARNING   and that the host allows unprivileged user namespaces." >&2

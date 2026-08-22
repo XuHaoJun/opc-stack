@@ -127,7 +127,37 @@ podenv_provision_alive() {
 podenv_require_runtime() {
     if podenv_runtime_reachable; then
         if [ -s "$PODENV_DIAG" ]; then
-            note "podenv: WARNING runtime host self-test: $(cat "$PODENV_DIAG")"
+            # A recorded verdict is not the same as a current one (final
+            # review — the eighth occurrence of "trusted a recorded state
+            # after it stopped being true," this time about the diagnosis
+            # file itself rather than podman's own reporting). We just got
+            # HERE by making a real `podman version` call succeed over this
+            # socket — direct, current evidence the daemon is up and
+            # answering. That is specifically disqualifying for a recorded
+            # "userns nesting failed": the daemon performs the identical
+            # "become root in a user namespace" pivot on ITS OWN startup
+            # (what `podman unshare` manually exercises) before it can ever
+            # accept a connection, so if that pivot still failed, this branch
+            # could not have been reached at all — the diagnosis is provably
+            # obsolete, most plausibly a boot-time race with the previous
+            # instance's teardown (see the entrypoint's retry comment) that
+            # resolved before this call. Self-heal rather than merely
+            # skipping the print: clear the record so no later reader
+            # re-litigates a resolved problem either.
+            #
+            # This reasoning does NOT extend to the file's other possible
+            # content (missing /dev/net/tun): reachability says nothing
+            # about pasta, so that message is left untouched and still
+            # surfaced — a genuinely broken runtime must still say so, with
+            # the same specificity it has always had.
+            case "$(cat "$PODENV_DIAG" 2>/dev/null)" in
+                "userns nesting failed"*)
+                    : > "$PODENV_DIAG" 2>/dev/null || true
+                    ;;
+                *)
+                    note "podenv: WARNING runtime host self-test: $(cat "$PODENV_DIAG")"
+                    ;;
+            esac
         fi
         return 0
     fi
