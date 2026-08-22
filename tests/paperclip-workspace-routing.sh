@@ -1,6 +1,348 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/.."
+. "$(dirname "$0")/../scripts/load-env.sh"; opc_load_env ./.env
+PASS=0 FAIL=0
+ok() { echo "PASS  $1"; PASS=$((PASS+1)); }
+bad() { echo "FAIL  $1"; FAIL=$((FAIL+1)); }
+assert_eq() { local label="$1" want="$2" got="$3"; [ "$want" = "$got" ] && ok "$label" || { bad "$label (want=$want got=$got)"; return 1; }; }
+assert_contains() { local label="$1" needle="$2" haystack="$3"; [[ "$haystack" == *"$needle"* ]] && ok "$label" || { bad "$label (missing=$needle)"; return 1; }; }
+assert_not_contains() { local label="$1" needle="$2" haystack="$3"; [[ "$haystack" != *"$needle"* ]] && ok "$label" || { bad "$label (found=$needle)"; return 1; }; }
+CLI=patches/hermes/opc-paperclip
+MODE=fixture
+RUN_LIVE_AFTER_FIXTURE=0
+case "${1-}" in
+  "") MODE=fixture; RUN_LIVE_AFTER_FIXTURE=1 ;;
+  --fixture) MODE=fixture ;;
+  --live) MODE=live ;;
+  *) echo "usage: $0 [--fixture|--live]" >&2; exit 2 ;;
+esac
+if [ "$#" -gt 1 ]; then
+  echo "usage: $0 [--fixture|--live]" >&2
+  exit 2
+fi
+
+LIVE_TMPDIR=""
+LIVE_RESTORE_NEEDED=0
+LIVE_AGENT_ID=""
+LIVE_COMPANY_ID=""
+LIVE_ORIGINAL_AGENT=""
+LIVE_PROJECT_ID=""
+LIVE_PROJECT_ISSUE_IDS=""
+LIVE_PROTO_NAMES=""
+LIVE_TEST_AGENT_ID=""
+LIVE_RECORD=""
+LIVE_RELEASE=""
+
+live_api() {
+  local method="$1" path="$2" body="${3-}"
+  if [ "$method" = GET ] || [ "$method" = DELETE ]; then
+    curl -fsS -X "$method" -H "Authorization: Bearer $LIVE_BOARD_KEY" \
+      "$LIVE_BASE$path"
+  else
+    curl -fsS -X "$method" -H "Authorization: Bearer $LIVE_BOARD_KEY" \
+      -H 'Content-Type: application/json' --data-binary "$body" "$LIVE_BASE$path"
+  fi
+}
+
+live_wait_for() {
+  local label="$1" command="$2"
+  for _ in $(seq 1 60); do
+    if eval "$command"; then ok "$label"; return 0; fi
+    sleep 1
+  done
+  bad "$label (timed out)"
+  return 1
+}
+
+live_restore() {
+  [ "$LIVE_RESTORE_NEEDED" -eq 1 ] || return 0
+  local payload
+  payload="$(jq -c '{runtimeConfig,metadata}' "$LIVE_ORIGINAL_AGENT")" || {
+    bad "restore original engineer runtimeConfig and metadata (saved object unreadable)"
+    return 1
+  }
+  if live_api PATCH "/agents/$LIVE_AGENT_ID" "$payload" >/dev/null; then
+    LIVE_RESTORE_NEEDED=0
+    ok "restore exact original engineer runtimeConfig and metadata"
+  else
+    bad "restore exact original engineer runtimeConfig and metadata"
+    return 1
+  fi
+}
+
+live_cleanup() {
+  local issue
+  live_restore || true
+  if [ -n "$LIVE_TEST_AGENT_ID" ]; then
+    live_api DELETE "/agents/$LIVE_TEST_AGENT_ID" >/dev/null 2>&1 || true
+  fi
+  for issue in $LIVE_PROJECT_ISSUE_IDS; do
+    live_api DELETE "/issues/$issue" >/dev/null 2>&1 || true
+  done
+  if [ -n "$LIVE_PROJECT_ID" ]; then
+    live_api DELETE "/projects/$LIVE_PROJECT_ID" >/dev/null 2>&1 || true
+  fi
+  for name in $LIVE_PROTO_NAMES; do
+    printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1 || true
+  done
+  [ -n "$LIVE_TMPDIR" ] && rm -rf "$LIVE_TMPDIR"
+}
+
+live_gate() {
+  local company agents engineer marker current experimental repo ticket second \
+    project workspace project_json workspace_show prototype project_id workspace_id \
+    test_agent issue_a issue_b issue_c run_json marker_source issue_json fail_before
+  fail_before="$FAIL"
+  LIVE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/opc-workspace-routing-live.XXXXXX")"
+  chmod 700 "$LIVE_TMPDIR"
+  LIVE_ORIGINAL_AGENT="$LIVE_TMPDIR/original-agent.json"
+  : >"$LIVE_ORIGINAL_AGENT"
+  LIVE_RECORD="$LIVE_TMPDIR/execution-paths"
+  LIVE_RELEASE="$LIVE_TMPDIR/release"
+  : >"$LIVE_RECORD"
+  : >"$LIVE_RELEASE"
+  trap live_cleanup EXIT INT TERM
+
+  LIVE_BASE="http://127.0.0.1:${PAPERCLIP_PORT:-3100}/api"
+  LIVE_BOARD_KEY="$(docker compose exec -T paperclip sh -c 'cat /paperclip/.opc/board-api.key' | tr -d '\r\n')" || {
+    bad "obtain Paperclip board key inside container"
+    return 1
+  }
+  [ -n "$LIVE_BOARD_KEY" ] || { bad "obtain Paperclip board key inside container"; return 1; }
+  ok "obtain Paperclip board key inside container"
+  export PAPERCLIP_API_URL="http://127.0.0.1:${PAPERCLIP_PORT:-3100}"
+  export PAPERCLIP_API_KEY="$LIVE_BOARD_KEY"
+
+  experimental="$(live_api GET /instance/settings/experimental)" || {
+    bad "experimental settings endpoint responds"
+    return 1
+  }
+  assert_eq "live isolated workspaces enabled" true \
+    "$(printf '%s' "$experimental" | jq -r '.enableIsolatedWorkspaces // false')"
+  company="$(live_api GET /companies | jq -c 'if length == 1 then .[0] else empty end')" || {
+    bad "resolve exactly one Paperclip company"
+    return 1
+  }
+  LIVE_COMPANY_ID="$(printf '%s' "$company" | jq -r '.id')"
+  agents="$(live_api GET "/companies/$LIVE_COMPANY_ID/agents")" || {
+    bad "list live Paperclip agents"
+    return 1
+  }
+  engineer="$(printf '%s' "$agents" | jq -c '[.[] | select(.role == "engineer")] | if length == 1 then .[0] else empty end')"
+  [ -n "$engineer" ] || {
+    bad "resolve exactly one live engineer agent"
+    return 1
+  }
+  LIVE_AGENT_ID="$(printf '%s' "$engineer" | jq -r '.id')"
+  printf '%s' "$engineer" | jq '{runtimeConfig,metadata}' >"$LIVE_ORIGINAL_AGENT"
+  LIVE_RESTORE_NEEDED=1
+  marker="$(printf '%s' "$engineer" | jq -r '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns // empty')"
+  current="$(printf '%s' "$engineer" | jq -r '.runtimeConfig.heartbeat.maxConcurrentRuns // empty')"
+  if [ "$marker" = 4 ]; then
+    assert_eq "managed engineer default is four runs" 4 "$current"
+    marker_source=managed_default
+  else
+    echo "INFO  preserving existing operator concurrency override (marker=${marker:-absent}, max=${current:-absent})"
+    marker_source=operator_override
+  fi
+  ok "live engineer agent has source=$marker_source"
+  "$CLI" agent concurrency set --role engineer --max 6 >/dev/null
+  assert_eq "live operator concurrency set to six" 6 \
+    "$("$CLI" agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
+  docker compose up -d --force-recreate paperclip-bootstrap >/dev/null
+  assert_eq "six-run override survives bootstrap recreate" 6 \
+    "$("$CLI" agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
+  "$CLI" agent concurrency reset --role engineer >/dev/null
+  assert_eq "live concurrency reset returns four" 4 \
+    "$("$CLI" agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
+
+  repo="https://github.com/opc-fixture/workspace-routing-$(date +%s)-$$"
+  ticket="$(printf 'Workspace routing fixture; backlog only.\n' | "$CLI" engineering-ticket create \
+    --repo "$repo" --title 'workspace routing fixture' --status backlog)" || {
+    bad "create test-owned backlog engineering ticket"
+    return 1
+  }
+  LIVE_PROJECT_ID="$(printf '%s' "$ticket" | jq -r '.projectId // empty')"
+  issue_a="$(printf '%s' "$ticket" | jq -r '.id // empty')"
+  workspace_id="$(printf '%s' "$ticket" | jq -r '.projectWorkspaceId // empty')"
+  LIVE_PROJECT_ISSUE_IDS="$issue_a"
+  [ -n "$LIVE_PROJECT_ID" ] && [ -n "$workspace_id" ] || {
+    bad "engineering ticket binds project and primary workspace"
+    return 1
+  }
+  project_json="$(live_api GET "/projects/$LIVE_PROJECT_ID")"
+  assert_eq "engineering project has one primary git workspace" 1 \
+    "$(printf '%s' "$project_json" | jq '(.workspaces // []) | map(select(.isPrimary == true) and (.sourceType == "git_repo" or .repoUrl != null)) | length')"
+  assert_eq "engineering project uses isolated worktrees" isolated_workspace \
+    "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultMode')"
+  assert_eq "engineering project uses git worktrees" git_worktree \
+    "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type')"
+  issue_json="$(live_api GET "/issues/$issue_a")"
+  assert_eq "backlog ticket binds project" "$LIVE_PROJECT_ID" \
+    "$(printf '%s' "$issue_json" | jq -r '.projectId')"
+  assert_eq "backlog ticket binds primary workspace" "$workspace_id" \
+    "$(printf '%s' "$issue_json" | jq -r '.projectWorkspaceId')"
+  assert_eq "backlog ticket inherits project policy" inherit \
+    "$(printf '%s' "$issue_json" | jq -r '.executionWorkspaceSettings.mode // .executionWorkspacePreference // empty')"
+  second="${repo/github.com\/opc-fixture/github.com\/OPC-FIXTURE}"
+  ticket="$(printf 'Workspace routing fixture second form.\n' | "$CLI" engineering-ticket create \
+    --repo "$second" --title 'workspace routing fixture second' --status backlog)" || {
+    bad "create second-form engineering ticket"
+    return 1
+  }
+  LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $(printf '%s' "$ticket" | jq -r '.id')"
+  assert_eq "second repository URL reuses project" "$LIVE_PROJECT_ID" \
+    "$(printf '%s' "$ticket" | jq -r '.projectId')"
+  workspace_show="$("$CLI" project workspace show --repo "$repo")"
+  assert_eq "workspace show reports managed default" engineering \
+    "$(printf '%s' "$workspace_show" | jq -r '.workspace.metadata.opcWorkspaceDefaults.lane // empty')"
+  assert_eq "workspace show reports isolated git-worktree default" isolated_workspace \
+    "$(printf '%s' "$workspace_show" | jq -r '.workspace.metadata.opcWorkspaceDefaults.mode // empty')"
+
+  prototype="wsroute-proto-$(date +%s)-$$"
+  LIVE_PROTO_NAMES="$prototype"
+  docker compose exec -T paperclip prototype create "$prototype" --idle never >/dev/null
+  docker compose exec -T paperclip prototype create "$prototype" --idle never >/dev/null
+  prototype_id="$(live_api GET "/companies/$LIVE_COMPANY_ID/projects" | jq -r --arg n "$prototype" '[.[] | select(.name == $n)] | if length == 1 then .[0].id else empty end')"
+  [ -n "$prototype_id" ] || { bad "prototype create/resume persists one project"; return 1; }
+  project_json="$(live_api GET "/projects/$prototype_id")"
+  assert_eq "prototype policy is shared" shared_workspace \
+    "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultMode')"
+  assert_eq "prototype policy serializes" serialize \
+    "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.sharedWorkspaceConcurrency')"
+  assert_eq "prototype policy uses project primary" project_primary \
+    "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type')"
+  assert_eq "prototype policy points at primary workspace" \
+    "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId')" \
+    "$(printf '%s' "$project_json" | jq -r '.primaryWorkspace.id')"
+  adapter_script="/tmp/opc-workspace-routing-agent-$$.sh"
+  LIVE_RECORD="/tmp/opc-workspace-routing-paths-$$"
+  LIVE_RELEASE="/tmp/opc-workspace-routing-release-$$"
+  docker compose exec -T paperclip sh -c "rm -f '$LIVE_RECORD' '$LIVE_RELEASE' '$adapter_script'"
+  cat <<'AGENT_SCRIPT' | docker compose exec -T paperclip sh -c "cat > '$adapter_script' && chmod 755 '$adapter_script'"
+#!/bin/sh
+printf '%s\t%s\n' "${PAPERCLIP_TASK_ID:-}" "${PAPERCLIP_WORKSPACE_CWD:-}" >> "${OPC_RECORD:?}"
+while [ ! -e "${OPC_RELEASE:?}" ]; do sleep 0.2; done
+AGENT_SCRIPT
+  agent_payload="$(jq -nc \
+    --arg n "workspace-routing-process-$$" --arg cmd "sh $adapter_script" \
+    --arg record "$LIVE_RECORD" --arg release "$LIVE_RELEASE" \
+    '{name:$n,role:"general",adapterType:"process",
+      adapterConfig:{command:$cmd,timeoutSec:120,env:{OPC_RECORD:$record,OPC_RELEASE:$release}},
+      runtimeConfig:{heartbeat:{maxConcurrentRuns:3}},
+      metadata:{opcWorkspaceRoutingTest:true}}')"
+  test_agent="$(live_api POST "/companies/$LIVE_COMPANY_ID/agents" "$agent_payload")" || {
+    bad "create test-owned process adapter agent"
+    return 1
+  }
+  LIVE_TEST_AGENT_ID="$(printf '%s' "$test_agent" | jq -r '.id // empty')"
+  [ -n "$LIVE_TEST_AGENT_ID" ] || { bad "create test-owned process adapter agent"; return 1; }
+  issue_payload="$(jq -nc --arg p "$LIVE_PROJECT_ID" --arg w "$workspace_id" --arg a "$LIVE_TEST_AGENT_ID" \
+    '{title:"workspace routing execution A",description:"fixture execution A",
+      status:"todo",projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,
+      executionWorkspaceSettings:{mode:"inherit"}}')"
+  issue_a="$(live_api POST "/companies/$LIVE_COMPANY_ID/issues" "$issue_payload" | jq -r '.id // empty')"
+  issue_payload="$(jq -nc --arg p "$LIVE_PROJECT_ID" --arg w "$workspace_id" --arg a "$LIVE_TEST_AGENT_ID" \
+    '{title:"workspace routing execution B",description:"fixture execution B",
+      status:"todo",projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,
+      executionWorkspaceSettings:{mode:"inherit"}}')"
+  issue_b="$(live_api POST "/companies/$LIVE_COMPANY_ID/issues" "$issue_payload" | jq -r '.id // empty')"
+  LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $issue_a $issue_b"
+  live_api POST "/agents/$LIVE_TEST_AGENT_ID/wakeup" \
+    '{"source":"on_demand","triggerDetail":"manual","payload":{"issueId":"'"$issue_a"'"}}' >/dev/null
+  live_api POST "/agents/$LIVE_TEST_AGENT_ID/wakeup" \
+    '{"source":"on_demand","triggerDetail":"manual","payload":{"issueId":"'"$issue_b"'"}}' >/dev/null
+  paths=""
+  for _ in $(seq 1 60); do
+    paths="$(docker compose exec -T paperclip sh -c "cat '$LIVE_RECORD' 2>/dev/null || true")"
+    [ "$(printf '%s\n' "$paths" | sed '/^$/d' | wc -l | tr -d ' ')" -ge 2 ] && break
+    sleep 1
+  done
+  if [ "$(printf '%s\n' "$paths" | sed '/^$/d' | wc -l | tr -d ' ')" -ge 2 ]; then
+    path_a="$(printf '%s\n' "$paths" | awk -v id="$issue_a" '$1 == id {print $2; exit}')"
+    path_b="$(printf '%s\n' "$paths" | awk -v id="$issue_b" '$1 == id {print $2; exit}')"
+    [ -n "$path_a" ] && [ -n "$path_b" ] && [ "$path_a" != "$path_b" ] \
+      && ok "engineering runs report distinct execution workspaces" \
+      || bad "engineering runs report distinct execution workspaces"
+    primary_cwd="$(printf '%s' "$project_json" | jq -r '.primaryWorkspace.cwd // empty')"
+    if [ -n "$primary_cwd" ]; then
+      [ "$path_a" != "$primary_cwd" ] && [ "$path_b" != "$primary_cwd" ] \
+        && ok "engineering execution workspaces are outside project primary" \
+        || bad "engineering execution workspaces are outside project primary"
+    else
+      echo "BLOCKER engineering project primary workspace has no cwd; cannot prove worktree paths are outside it"
+      bad "engineering execution workspaces are outside project primary (missing primary cwd)"
+    fi
+  else
+    echo "BLOCKER process adapter produced no workspace records; live run state follows:"
+    live_api GET "/companies/$LIVE_COMPANY_ID/live-runs?minCount=0&limit=20" \
+      | jq -c '[.[] | {id,status,agentId,issueId,nextAction}]' || true
+    bad "engineering process adapter executions start"
+  fi
+  docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"
+  prototype_two="wsroute-proto-alt-$(date +%s)-$$"
+  LIVE_PROTO_NAMES="$LIVE_PROTO_NAMES $prototype_two"
+  docker compose exec -T paperclip prototype create "$prototype_two" --idle never >/dev/null
+  docker compose exec -T paperclip sh -c "rm -f '$LIVE_RELEASE'"
+  prototype_two_id="$(live_api GET "/companies/$LIVE_COMPANY_ID/projects" | jq -r --arg n "$prototype_two" '[.[] | select(.name == $n)] | if length == 1 then .[0].id else empty end')"
+  prototype_ws="$(live_api GET "/projects/$prototype_id" | jq -r '.primaryWorkspace.id')"
+  prototype_two_ws="$(live_api GET "/projects/$prototype_two_id" | jq -r '.primaryWorkspace.id')"
+  issue_payload="$(jq -nc --arg p "$prototype_id" --arg w "$prototype_ws" --arg a "$LIVE_TEST_AGENT_ID" \
+    '{title:"prototype serialization A",description:"prototype serialization A",status:"todo",
+      projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
+  prototype_issue_a="$(live_api POST "/companies/$LIVE_COMPANY_ID/issues" "$issue_payload" | jq -r '.id // empty')"
+  issue_payload="$(jq -nc --arg p "$prototype_id" --arg w "$prototype_ws" --arg a "$LIVE_TEST_AGENT_ID" \
+    '{title:"prototype serialization B",description:"prototype serialization B",status:"todo",
+      projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
+  prototype_issue_b="$(live_api POST "/companies/$LIVE_COMPANY_ID/issues" "$issue_payload" | jq -r '.id // empty')"
+  LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $prototype_issue_a $prototype_issue_b"
+  live_api POST "/agents/$LIVE_TEST_AGENT_ID/wakeup" \
+    '{"source":"on_demand","triggerDetail":"manual","payload":{"issueId":"'"$prototype_issue_a"'"}}' >/dev/null
+  for _ in $(seq 1 30); do
+    paths="$(docker compose exec -T paperclip sh -c "cat '$LIVE_RECORD' 2>/dev/null || true")"
+    printf '%s\n' "$paths" | awk -v id="$prototype_issue_a" '$1 == id {found=1} END {exit !found}' && break
+    sleep 1
+  done
+  live_api POST "/agents/$LIVE_TEST_AGENT_ID/wakeup" \
+    '{"source":"on_demand","triggerDetail":"manual","payload":{"issueId":"'"$prototype_issue_b"'"}}' >/dev/null
+  queued=0
+  for _ in $(seq 1 20); do
+    run_json="$(live_api GET "/issues/$prototype_issue_b/live-runs" 2>/dev/null || printf '[]')"
+    if printf '%s' "$run_json" | jq -e 'any(.[]?; .status == "queued" or .nextAction == "workspace_busy")' >/dev/null 2>&1; then queued=1; break; fi
+    sleep 1
+  done
+  [ "$queued" -eq 1 ] && ok "same-prototype second run waits for workspace" \
+    || { bad "same-prototype second run waits for workspace"; live_api GET "/companies/$LIVE_COMPANY_ID/live-runs?minCount=0&limit=20" | jq -c '[.[] | {id,status,issueId,nextAction}]' || true; }
+  issue_payload="$(jq -nc --arg p "$prototype_two_id" --arg w "$prototype_two_ws" --arg a "$LIVE_TEST_AGENT_ID" \
+    '{title:"prototype concurrency C",description:"prototype concurrency C",status:"todo",
+      projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
+  prototype_issue_c="$(live_api POST "/companies/$LIVE_COMPANY_ID/issues" "$issue_payload" | jq -r '.id // empty')"
+  LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $prototype_issue_c"
+  live_api POST "/agents/$LIVE_TEST_AGENT_ID/wakeup" \
+    '{"source":"on_demand","triggerDetail":"manual","payload":{"issueId":"'"$prototype_issue_c"'"}}' >/dev/null
+  concurrent=0
+  for _ in $(seq 1 30); do
+    paths="$(docker compose exec -T paperclip sh -c "cat '$LIVE_RECORD' 2>/dev/null || true")"
+    printf '%s\n' "$paths" | awk -v id="$prototype_issue_c" '$1 == id {found=1} END {exit !found}' && { concurrent=1; break; }
+    sleep 1
+  done
+  [ "$concurrent" -eq 1 ] && ok "different-prototype run executes while first is held" \
+    || { bad "different-prototype run executes while first is held"; live_api GET "/companies/$LIVE_COMPANY_ID/live-runs?minCount=0&limit=20" | jq -c '[.[] | {id,status,issueId,nextAction}]' || true; }
+  docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"
+  docker compose exec -T paperclip rm -f "$adapter_script" "$LIVE_RECORD" "$LIVE_RELEASE"
+  echo "INFO  process-adapter routing evidence collected; failures above are blockers, not passes"
+  ok "prototype create/resume persists shared serialize project-primary defaults"
+  if [ "$FAIL" -eq "$fail_before" ]; then
+    return 0
+  fi
+  return 1
+}
+
+if [ "$MODE" = live ]; then
+  live_gate
+  exit $?
+fi
 PASS=0 FAIL=0
 ok() { echo "PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL  $1"; FAIL=$((FAIL+1)); }
@@ -768,6 +1110,10 @@ assert_eq "concurrent terminal retry IDs match" \
   "$(jq -r '.id' "$TMPDIR/prototype-terminal-race-a.json")" \
   "$(jq -r '.id' "$TMPDIR/prototype-terminal-race-b.json")"
 assert_contains "prototype ambiguity lists second project" "00000000-0000-4000-8000-000000000124" "$(cat "$PROTOTYPE_AMBIGUOUS_ERR")"
-
+stop_fixture
+if [ "$RUN_LIVE_AFTER_FIXTURE" -eq 1 ] && docker compose ps >/dev/null 2>&1; then
+  echo "── live routing gate ──"
+  live_gate || FAIL=$((FAIL+1))
+fi
 echo "result: $PASS pass, $FAIL fail"
 [ "$FAIL" -eq 0 ]
