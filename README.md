@@ -1,6 +1,44 @@
 # OPC Stack
 
-Buzz(對話)+ Hermes(agent runtime)+ Paperclip(work 控制面)+ TencentDB-Agent-Memory(Knowledge Plane)的 docker compose 部署。Nodalis 為 evidence-gated governance,本 repo 不實作(架構決策見 `docs/nodalis-prd-v10.1.md`)。
+OPC Stack 是為單一操作者設計的 Docker Compose agent company runtime，整合對話入口、工作控制面、執行 agents、開發資源與長期記憶。你大部分時間只需要和 **Chief of Staff** 對話；它會保留上下文、判斷需求該去哪裡，並協調其他 agents。
+
+核心規則是「一個概念只有一個 durable writer authority」：Buzz 擁有對話、Paperclip 擁有可追蹤工作、TencentDB 保存供 reasoning 使用的記憶與知識，而程式碼與文件的事實來源是 Git repo。
+
+## 心智模型
+
+日常流程不是由人逐一管理 agents，而是：
+
+1. Human 透過 Buzz（或 Hermes dashboard）和 **Chief of Staff** 對話。
+2. Chief of Staff 判斷內容應該消失、存成記憶，或成為必須完成的工作；它負責分流，不自己實作。
+3. 必須完成的工作會成為 Paperclip issue，再依性質指派給 engineering、prototype 或 research lane。
+4. 執行 agent 將結果與狀態寫回 Paperclip；需要保留的程式碼與文件進 Git。記憶只提供 reasoning context，不會取代人的授權或 Paperclip 的工作狀態。
+
+### Agents
+
+| Agent | Runtime | 職責 |
+|---|---|---|
+| **Chief of Staff** | Front-door Hermes | 主要對話窗口；掌握上下文、判斷意圖、建立與分派工作，但不自己實作 |
+| **OMP Engineer** | OMP | Coding agent；處理要長期保留的功能、bug fix、既有 issue 與 PR |
+| **Prototyper** | OMP | Coding agent；快速建立可互動、附固定 preview URL 的產品原型 |
+| **Scientist** | Hermes expert profile | Research agent；自己寫實驗、蒐集證據並回報判斷，不直接交付 production code |
+
+兩個 coding agents 是 **OMP Engineer** 與 **Prototyper**；**Scientist** 則是跑在 Hermes gateway 裡、具獨立身分與常駐 devenv 租約的研究員。
+
+## 架構
+
+```mermaid
+flowchart TD
+    Human["Human<br/>定義價值與重要判斷"] <--> Buzz["Buzz<br/>對話 authority"]
+    Buzz <--> Frontdoor["Chief of Staff<br/>Front-door Hermes"]
+
+    Frontdoor -->|"承諾完成"| Paperclip["Paperclip<br/>durable work authority"]
+    Frontdoor <-->|"recall / capture"| Memory["TencentDB Agent Memory<br/>記憶與知識"]
+
+    Paperclip <-->|"assignment / result / status"| Runtime["Execution agents<br/>OMP Engineer · Prototyper · Scientist"]
+    Runtime --> Git["Git repo<br/>code / docs truth"]
+    Runtime -.->|"shared resource lease"| Devenv["devenv<br/>PostgreSQL · Valkey · S3 · HTTP"]
+    Runtime -.->|"dedicated daemon lease"| Podenv["podenv<br/>rootless nested containers"]
+```
 
 ## 服務
 
@@ -60,5 +98,4 @@ docker compose logs -f <svc>  # 看日誌
 
 - `AGENTS.md` — 架構、不變量、已知坑(改動前必讀)
 - `SETUP.md` — 安裝、設定頁、agent wiring
-- `docs/nodalis-prd-v10.1.md` — 架構決策(PRD v10 / v10.1)
 - `docs/superpowers/` — 設計與實作計畫
