@@ -30,6 +30,7 @@ RUN test "$(id -u podman)" = "1000" \
 COPY containers.conf /etc/containers/containers.conf
 
 COPY opc-podenv-entrypoint.sh /usr/local/bin/opc-podenv-entrypoint.sh
-RUN chmod +x /usr/local/bin/opc-podenv-entrypoint.sh
+COPY opc-podenv-restore.sh /usr/local/bin/opc-podenv-restore.sh
+RUN chmod +x /usr/local/bin/opc-podenv-entrypoint.sh /usr/local/bin/opc-podenv-restore.sh
 
 ENTRYPOINT ["/usr/local/bin/opc-podenv-entrypoint.sh"]

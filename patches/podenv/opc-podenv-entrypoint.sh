@@ -56,6 +56,24 @@ elif [ ! -c /dev/net/tun ]; then
     echo "[podenv] WARNING   but shares the sidecar's would collide invisibly." >&2
 fi
 
+# Leased containers are this service's descendants, so they died with the
+# previous instance of it. Backgrounded because it waits for the socket the
+# exec below creates.
+#
+# Double-forked (the outer parens are a SYNCHRONOUS subshell, not backgrounded
+# themselves) rather than a plain trailing `&`: this process is about to exec
+# into podman, which becomes the direct parent of anything merely
+# background-forked here and never wait()s on children it did not itself
+# spawn. Measured: a plain `&` left the restore script as a permanent zombie
+# (ppid = the exec'd podman process) once it finished, defeating the exact
+# zombie-reaping invariant `init: true` exists for (see compose file). The
+# subshell here exits immediately after backgrounding the real script, so the
+# script is orphaned to, and reaped by, PID 1 (docker-init) instead — the
+# entrypoint shell foreground-waits for the subshell itself, so that layer
+# leaves no zombie either.
+( PODENV_UID="$PODENV_UID" PODENV_GID="$PODENV_GID" PODENV_SOCK_DIR="$PODENV_SOCK_DIR" \
+    /usr/local/bin/opc-podenv-restore.sh & )
+
 # Spelled out rather than reusing as_runtime_user(): `exec` cannot run a shell
 # function, and this process must be REPLACED — a setpriv running under a
 # surviving shell would make the shell PID 1, so podman would not receive the

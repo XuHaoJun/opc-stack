@@ -466,6 +466,40 @@ docker compose exec -T -u node paperclip sh -c \
      rm -f /tmp/podenv-dedicated.env /tmp/podenv-f1-neg-mysql.env \
            /tmp/podenv-f1-neg-milvus.env /tmp/podenv-f2-metachar.env' >/dev/null 2>&1
 
+echo "── restore ──"
+
+#
+# NOTE ON THE MECHANISM BELOW (measured on this host, not a hunch): a plain
+# `docker compose restart podenv` was tried first, verbatim per the design
+# brief, and it did NOT reproduce a RED condition — a lease provisioned,
+# then survived a `restart` with its ORIGINAL uptime intact (confirmed via
+# `podman ps -a` reporting continuous "Up" time spanning the restart, with no
+# gap). Rootless podman's conmon-detach model is *designed* to survive the
+# podman service process restarting; `docker compose restart` does not
+# reliably tear down the podenv container's own PID namespace on this
+# docker/kernel combination. `docker compose up -d --force-recreate podenv`
+# does: it allocates a genuinely NEW container ID (verified: the container's
+# `.Id` differs, and the probe container is then reported "exited", not
+# "running"). Recreate is also the scenario `AGENTS.md` and the design
+# brief actually care about most (`docker compose up -d --build` after a
+# patches/ change), and any fix for it necessarily also fires on the plain
+# restart path, since the SAME entrypoint runs on both. So this check drives
+# the failure with --force-recreate rather than restart.
+expect "a lease survives a podenv restart" "running" \
+    sh -c 'docker compose exec -T -u node paperclip podenv provision restore-probe \
+             --image docker.io/traefik/whoami --port 80 --as RESTORE_ADDR \
+             --env-file /tmp/podenv-restore.env >/dev/null 2>&1
+           docker compose up -d --force-recreate podenv >/dev/null 2>&1
+           for i in $(seq 1 30); do
+             s=$(docker compose exec -T -u 1000 -e HOME=/home/podman \
+                   -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+                   podman ps --filter name=podenv_restore_probe --format "{{.State}}" 2>/dev/null | tr -d "\r")
+             [ "$s" = "running" ] && { echo running; break; }
+             sleep 2
+           done'
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release restore-probe >/dev/null 2>&1; rm -f /tmp/podenv-restore.env' >/dev/null 2>&1
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
