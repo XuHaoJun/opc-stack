@@ -56,3 +56,10 @@ new installs do not. Report it — you cannot fix it from inside your container.
 For language runtimes and their versions (node, python, rust, go), prefer
 `mise` where the project already uses it — it is version-aware per project in
 a way a single shared nix profile is not. Use nix for everything else.
+
+## Need a service, not a tool?
+
+A daemon (database, cache, queue, vector store) is not a tool install. Lease it:
+`devenv` for shared modern backends, `podenv` for a whole container of your own
+(any image, including very old versions). The **podenv** skill holds the
+decision table for which one.

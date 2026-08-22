@@ -1,0 +1,796 @@
+#!/bin/sh
+# podenv — nested container leases for Paperclip agents.
+#
+#   podenv provision <key> --image REF --port N [--as VAR] [--url TEMPLATE]
+#                          [--env K=V] [--password-env NAME]
+#                          [--netns pasta|host] [--dedicated "reason"]
+#                          [--volume HOST:CONTAINER] [--env-file PATH]
+#   podenv release   <key>
+#   podenv list
+#
+# Design notes (including the seven Phase 0 measurements this depends on) live
+# in docs/superpowers/specs/2026-08-22-podenv-nested-container-lease-design.md.
+# Short version: devenv covers shared, multi-tenant, modern backends; podenv
+# covers what devenv cannot — daemons that refuse to share, and very old
+# versions that only exist as an image.
+#
+# USE DEVENV FIRST. If devenv already provides it, this CLI refuses the image
+# and tells you the devenv command instead. That is a mechanism, not advice.
+#
+# Reclamation is manual (`podenv release`). Nothing reclaims automatically —
+# invariant 6b.
+#
+# Exit codes: 0 ok / 2 bad usage / 3 resources exhausted / 4 backend
+# unreachable / 5 the runtime host refused to start (or restart) the lease's
+# container — distinct from 4 because the backend IS reachable in this case
+# (podenv_require_runtime already succeeded); the problem is the image or
+# command podman was asked to run, not connectivity.
+set -eu
+
+PODENV_LIB="${PODENV_LIB:-/usr/local/lib/podenv}"
+DEVENV_LIB="${DEVENV_LIB:-/usr/local/lib/devenv}"
+
+PODENV_SOCK="${PODENV_SOCK:-/run/podenv/podman.sock}"
+PODENV_DIAG="${PODENV_DIAG:-/run/podenv/diagnosis}"
+PODENV_HOST_NAME="${PODENV_HOST_NAME:-podenv}"
+PODENV_PORT_BASE="${PODENV_PORT_BASE:-23000}"
+PODENV_PORT_COUNT="${PODENV_PORT_COUNT:-16}"
+# A few seconds, not `-t 0` — see podenv_provision_alive's callers below
+# (task-5 F1) and the sibling comment in opc-podenv-restore.sh. Only ever
+# reached once the probe has already found nothing answering, so this is
+# never spent on a lease that was fine.
+PODENV_STOP_GRACE="${PODENV_STOP_GRACE:-5}"
+
+DEVENV_PG_HOST="${DEVENV_PG_HOST:-devenv-pg}"
+DEVENV_PG_PORT="${DEVENV_PG_PORT:-5432}"
+DEVENV_PG_ADMIN_USER="${DEVENV_PG_ADMIN_USER:-postgres}"
+DEVENV_PG_ADMIN_PASSWORD="${DEVENV_PG_ADMIN_PASSWORD:-}"
+DEVENV_CONTROL_DB="${DEVENV_CONTROL_DB:-devenv_control}"
+
+die()  { echo "podenv: $1" >&2; exit "${2:-1}"; }
+note() { echo "$1" >&2; }
+
+# Shared with devenv: env merge, password derivation, owner, reserved .env
+# names, provider image families. See shared.sh's header. Sourced AFTER
+# die()/note() are defined — see devenv's identical comment above its own
+# source line for why.
+. "$DEVENV_LIB/shared.sh"
+
+podenv_psql() {
+    PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" \
+    PGOPTIONS='-c client_min_messages=warning' psql \
+        -h "$DEVENV_PG_HOST" -p "$DEVENV_PG_PORT" -U "$DEVENV_PG_ADMIN_USER" \
+        -w -q -d "$DEVENV_CONTROL_DB" "$@"
+}
+
+# Boolean twin of podenv_require_runtime's three checks, for callers (cmd_release)
+# that only need a yes/no before deciding whether to even attempt an operation —
+# not a diagnosis. Client present AND the daemon actually answers: a stale
+# socket file, or one no daemon is listening on, must not read as "reachable"
+# just because `[ -S ... ]` is true. Kept as the single source of truth so
+# this and podenv_require_runtime can never disagree about what "reachable"
+# means (F6).
+podenv_runtime_reachable() {
+    [ -S "$PODENV_SOCK" ] || return 1
+    command -v podman >/dev/null 2>&1 || return 1
+    podman --remote --url "unix://$PODENV_SOCK" version --format '{{.Server.Version}}' >/dev/null 2>&1
+}
+
+# podenv_provision_alive <host_port> — a single data-exchange attempt against
+# a lease's published address, used by cmd_provision's reprovision branch
+# both to PROBE FIRST (task-5 F1, before touching the container at all) and
+# to verify liveness afterward if a disruption did turn out to be necessary.
+# curl, not a bare /dev/tcp connect: this runs in the paperclip image under
+# dash (no bashisms), which has no /dev/tcp redirection, and no nc/socat/
+# python3 is guaranteed present — curl is (existing gates rely on it).
+#
+# Only two curl exit codes correspond to "nothing is really there": 7 (could
+# not connect at all — the fully-dead case) and 56 (connected, then reset
+# while receiving — pasta's port-forwarder completes the TCP handshake with
+# the caller EVEN WHEN NOTHING IS LISTENING on the forwarded port inside the
+# container, so a bare connect proves only "the forwarder is up," never "the
+# daemon answers" — measured directly against a lease that is genuinely
+# RUNNING but has nothing bound to its port). 28 (timed out waiting for a
+# response) is left as "not yet" rather than folded into either bucket,
+# since a legitimately slow daemon (mysql initialising its data directory)
+# can genuinely take longer than one attempt's --max-time to answer — for
+# THIS call site (the probe-first check) that reads as "not proven alive
+# yet," which is the conservative, safe answer for a check whose whole job
+# is to justify SKIPPING a disruption: only skip when something definitely
+# answered. Every other exit code (0, 1, 52, ...) means SOMETHING on the
+# other end reacted to real bytes — a plain GET, terminated with the blank
+# line an HTTP request needs (so a real HTTP server does not just sit there
+# waiting for the rest of a request that will never arrive), reliably
+# provokes a fast reaction from every backend measured: HTTP
+# (traefik/whoami: real response), Redis (garbage read and rejected instead
+# of hanging), Postgres (rejects it as an invalid startup packet and closes
+# cleanly), MySQL (sends its own handshake unsolicited, before ever seeing
+# our bytes).
+podenv_provision_alive() {
+    _pca_rc=0
+    # `|| _pca_rc=$?`, not a bare call: this script runs under `set -e`, so
+    # an untested command returning nonzero (curl's normal outcome for the
+    # "not alive yet" cases) would abort the whole script right here.
+    curl -sS -o /dev/null --connect-timeout 2 --max-time 3 \
+        "http://${PODENV_HOST_NAME}:${1}/" >/dev/null 2>&1 || _pca_rc=$?
+    case "$_pca_rc" in
+        7|56|28) return 1 ;;
+        *)       return 0 ;;
+    esac
+}
+
+# Three distinct failures, three distinct messages. The raw errors here are
+# actively misleading: podman-remote's "Cannot connect to Podman ... try
+# `podman machine init`" sends the reader to a macOS workflow that does not
+# exist in this stack, and a socket that exists but refuses the connection
+# looks identical to one that is not listening yet.
+podenv_require_runtime() {
+    if podenv_runtime_reachable; then
+        if [ -s "$PODENV_DIAG" ]; then
+            # A recorded verdict is not the same as a current one (final
+            # review — the eighth occurrence of "trusted a recorded state
+            # after it stopped being true," this time about the diagnosis
+            # file itself rather than podman's own reporting). We just got
+            # HERE by making a real `podman version` call succeed over this
+            # socket — direct, current evidence the daemon is up and
+            # answering. That is specifically disqualifying for a recorded
+            # "userns nesting failed": the daemon performs the identical
+            # "become root in a user namespace" pivot on ITS OWN startup
+            # (what `podman unshare` manually exercises) before it can ever
+            # accept a connection, so if that pivot still failed, this branch
+            # could not have been reached at all — the diagnosis is provably
+            # obsolete, most plausibly a boot-time race with the previous
+            # instance's teardown (see the entrypoint's retry comment) that
+            # resolved before this call. Self-heal rather than merely
+            # skipping the print: clear the record so no later reader
+            # re-litigates a resolved problem either.
+            #
+            # This reasoning does NOT extend to the file's other possible
+            # content (missing /dev/net/tun): reachability says nothing
+            # about pasta, so that message is left untouched and still
+            # surfaced — a genuinely broken runtime must still say so, with
+            # the same specificity it has always had.
+            case "$(cat "$PODENV_DIAG" 2>/dev/null)" in
+                "userns nesting failed"*)
+                    : > "$PODENV_DIAG" 2>/dev/null || true
+                    ;;
+                *)
+                    note "podenv: WARNING runtime host self-test: $(cat "$PODENV_DIAG")"
+                    ;;
+            esac
+        fi
+        return 0
+    fi
+    # Not reachable — walk the same three checks again, in order, to name
+    # which one actually failed instead of a single generic message.
+    if [ ! -S "$PODENV_SOCK" ]; then
+        die "no podman socket at $PODENV_SOCK. The podenv compose service is not running (or its volume is not mounted here). Start it: docker compose up -d podenv" 4
+    fi
+    # Check for the client BEFORE attempting to use it: a missing/broken
+    # `podman` binary and a live socket refusing this uid produce the exact
+    # same symptom from `command ... || ...` below (nonzero, no stdout), but
+    # they have completely different repairs (rebuild the image vs. fix the
+    # socket owner). Naming the wrong one sends the reader to fix a uid that
+    # was never the problem.
+    if ! command -v podman >/dev/null 2>&1; then
+        die "no podman client on PATH. It ships in the paperclip image as Debian's apt podman-remote package (symlinked to /usr/local/bin/podman); rebuild the paperclip image if it is missing." 4
+    fi
+    _pr_diag=""
+    [ -s "$PODENV_DIAG" ] && _pr_diag=" Runtime host reported: $(cat "$PODENV_DIAG")"
+    die "the podman client is present but the socket at $PODENV_SOCK will not accept a connection. Since the client is present, the likely cause is the access gate: the socket's OWNER uid, which must equal this user's ($(id -u)).${_pr_diag}" 4
+}
+
+podenv_require_control_schema() {
+    [ -n "$DEVENV_PG_ADMIN_PASSWORD" ] \
+        || die "DEVENV_PG_ADMIN_PASSWORD is unset — podenv shares devenv's control database and cannot reach it" 4
+    podenv_psql -tAc 'SELECT 1 FROM podenv_lease LIMIT 1' >/dev/null 2>&1 && return 0
+    die "podenv control schema not ready — table podenv_lease is missing in '$DEVENV_CONTROL_DB' on $DEVENV_PG_HOST:$DEVENV_PG_PORT. It is created by opc-podenv-seed.sh (paperclip's entrypoint). This is NOT resource exhaustion; releasing leases will not help." 4
+}
+
+podman_remote() { podman --remote --url "unix://$PODENV_SOCK" "$@"; }
+
+podenv_slug() { echo "podenv_$(echo "$1" | tr '-' '_')"; }
+
+# Escape a value for embedding inside a single-quoted SQL string literal (the
+# SQL standard: a literal quote is doubled, ' -> ''). Every value interpolated
+# into a psql -c string below MUST be routed through this — key, slug, image,
+# env_var, netns, the --dedicated reason, devenv_owner's output, anything in
+# cmd_release. Numeric values (cport, hport) are inserted unquoted and are
+# validated elsewhere to be digits-only, so they never reach this function.
+# A single un-escaped call site restores the whole SQL-injection class (F1),
+# so when adding a new interpolated value here, quote it.
+podenv_sql_quote() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+# Smallest free port in the pool for a NEW lease, or the port an existing
+# lease already holds. This alone does NOT resolve the concurrent-claim race
+# (two callers can pick the same free port before either commits it) — that
+# is handled by the retry loop around the INSERT in cmd_provision, which
+# reallocates (this function) on every attempt since the port that just lost
+# is now taken. UNIQUE(host_port) makes the database the arbiter of who wins.
+# No table lock is needed here (unlike devenv's http provider) because a
+# lease holds one port, not a contiguous block.
+podenv_port_alloc() {
+    _pa_key="$1"
+    _pa_have="$(podenv_psql -tAc \
+        "SELECT COALESCE(host_port::text,'') FROM podenv_lease WHERE key = '$(podenv_sql_quote "$_pa_key")'" \
+        2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$_pa_have" ]; then echo "$_pa_have"; return 0; fi
+    _pa_n="$(podenv_psql -tAc "
+        SELECT n FROM generate_series($PODENV_PORT_BASE,
+                                     $((PODENV_PORT_BASE + PODENV_PORT_COUNT - 1))) AS n
+        WHERE NOT EXISTS (SELECT 1 FROM podenv_lease l WHERE l.host_port = n)
+        ORDER BY n LIMIT 1" | tr -d '[:space:]')"
+    [ -n "$_pa_n" ] || die "no free podenv port (pool $PODENV_PORT_BASE-$((PODENV_PORT_BASE + PODENV_PORT_COUNT - 1))) — run 'podenv list' and release one" 3
+    echo "$_pa_n"
+}
+
+# Render {{host}} / {{port}} / {{password}} in a --url template. The double
+# brace form matches the expose.urlTemplate syntax this stack already uses;
+# ${port} is the wrong syntax here and AGENTS.md records it as an expired
+# example from upstream docs.
+podenv_render_url() {
+    printf '%s' "$1" \
+        | sed -e "s|{{host}}|$2|g" -e "s|{{port}}|$3|g" -e "s|{{password}}|$4|g"
+}
+
+cmd_provision() {
+    key=""; image=""; cport=""; as_var=""; url_tpl=""; netns="pasta"
+    dedicated=""; pw_env=""; env_file="$PWD/.env"; run_env=""; run_vol=""
+    # Tracked separately from the value itself: an OMITTED --as/--netns must
+    # read as "whatever this lease already is" on reprovision, not as "the
+    # default value" (see the existing-lease branch below). --image/--port
+    # are mandatory, so a caller-supplied value for either is always
+    # explicit and needs no flag of its own.
+    as_explicit=0; netns_explicit=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --image)        image="${2:?--image needs a value}"; shift 2 ;;
+            --port)         cport="${2:?--port needs a value}"; shift 2 ;;
+            --as)           as_var="${2:?--as needs a value}"; as_explicit=1; shift 2 ;;
+            --url)          url_tpl="${2:?--url needs a value}"; shift 2 ;;
+            # Accumulated in a string, re-split later under `set -f` (see the
+            # comment at the re-split in cmd_provision below) so a value
+            # containing `*`, `?` or `[` cannot glob-expand against this
+            # process's cwd. Field splitting itself still cannot be disabled
+            # in POSIX sh without an eval-based array emulation (worse than
+            # the restriction), so a VALUE CONTAINING SPACES remains
+            # unsupported — that limit stands; only the glob risk is gone.
+            --env)          run_env="$run_env ${2:?--env needs K=V}"; shift 2 ;;
+            --volume)       run_vol="$run_vol ${2:?--volume needs HOST:CONTAINER}"; shift 2 ;;
+            --password-env) pw_env="${2:?--password-env needs a NAME}"; shift 2 ;;
+            --netns)        netns="${2:?--netns needs pasta|host}"; netns_explicit=1; shift 2 ;;
+            --dedicated)    dedicated="${2:?--dedicated needs a reason}"; shift 2 ;;
+            --env-file)     env_file="${2:?--env-file needs a value}"; shift 2 ;;
+            --memory)
+                # Never accept a flag that does nothing. Measured: podman's
+                # --memory is silently ignored in this topology (memory.max
+                # stays `max`, no warning), and delegation cannot be obtained
+                # without mounting the host's /sys/fs/cgroup.
+                die "--memory does not exist here: per-lease memory limits cannot be enforced in this topology (cgroup delegation needs a host /sys/fs/cgroup mount, which invariant 6 forbids). The whole lane is capped by PODENV_MEM_LIMIT in .env." 2 ;;
+            -*)             die "unknown flag: $1" 2 ;;
+            *)  [ -z "$key" ] || die "unexpected argument: $1" 2; key="$1"; shift ;;
+        esac
+    done
+
+    [ -n "$key" ]   || die "usage: podenv provision <key> --image REF --port N [--as VAR]" 2
+    [ -n "$image" ] || die "--image is required (e.g. --image mysql:5.7)" 2
+    [ -n "$cport" ] || die "--port is required — the port the daemon listens on INSIDE the container (mysql: 3306)" 2
+    echo "$key" | grep -Eq '^[a-z][a-z0-9-]{1,40}$' \
+        || die "invalid key '$key' — must match ^[a-z][a-z0-9-]{1,40}\$" 2
+    echo "$cport" | grep -Eq '^[1-9][0-9]*$' || die "--port must be a positive integer" 2
+    case "$netns" in pasta|host) ;; *) die "--netns must be pasta or host" 2 ;; esac
+    # Conservative OCI reference charset: letters, digits, and the handful of
+    # separators a real reference legitimately needs (`.` version/registry
+    # dots, `_-` name chars, `/` path segments, `:` tag or port, `@` digest).
+    # Catches typos as well as anything crafted to break out of the SQL
+    # literal this value is about to be embedded in (F1b) — belt matching
+    # the escaping (F1a) below, not a substitute for it.
+    echo "$image" | grep -Eq '^[A-Za-z0-9._/:@-]+$' \
+        || die "--image '$image' contains characters outside the allowed OCI reference set (letters, digits, . _ - / : @)" 2
+
+    # Default variable name from the image's own name: mysql:5.7 -> MYSQL_ADDR.
+    if [ -z "$as_var" ]; then
+        as_var="$(printf '%s' "$image" | sed 's|.*/||; s|:.*||; s|[^A-Za-z0-9]|_|g' \
+                  | tr '[:lower:]' '[:upper:]')_ADDR"
+    fi
+    echo "$as_var" | grep -Eq '^[A-Z][A-Z0-9_]*$' \
+        || die "--as '$as_var' is not a shell variable name (A-Z, 0-9, _)" 2
+
+    # (b) Variable-name partition. devenv owns a fixed set of .env names; if
+    # podenv could write them, one lease would silently overwrite the other's
+    # connection string. The list comes from devenv/shared.sh — one home, so
+    # there is no drift class here.
+    if devenv_env_name_reserved "$as_var"; then
+        die "'$as_var' is a variable name devenv owns (DATABASE_URL, VALKEY_URL, DEV_PORT, DEV_PORT_<n>, DEV_URL, DEV_HOST, HOST). Pick another with --as, e.g. --as ${as_var}_LEGACY. A devenv lease and a podenv lease share one .env, which only works while their variable names do not collide." 2
+    fi
+
+    # (c) Route gate. devenv already serves some image families, and it should
+    # win by default: it is the shared, multi-tenant, modern lane. But an old
+    # version of the SAME family is a legitimate podenv case (devenv-pg is
+    # pg18; a project stuck on pg9.6 cannot use it), so this is not an absolute
+    # ban — it is a detour that costs something. The reason is persisted and
+    # listed, which is what keeps it from being a rubber stamp: the same
+    # reasoning that keeps `prototype destroy` from having a --yes flag.
+    # This is a carelessness catch, not a security boundary — anyone can pass
+    # --dedicated, deliberately or not, and that is fine (see the design doc).
+    # But an ACCIDENTAL evasion is worth closing: strip a registry/namespace
+    # prefix, a `@<digest>` suffix (pinning by digest is good practice, so
+    # this must not read as evasion), and a `:<tag>` suffix, then lowercase
+    # (a local tag can be uppercase even though Docker Hub repo names cannot)
+    # before resolving common renamings of the SAME software via
+    # devenv_image_family_alias (shared.sh — one home for this data, same as
+    # the reserved-name list above). The lookup itself is a string compare,
+    # not a sed pattern match — see devenv_provider_for_family's own comment
+    # in shared.sh for why that distinction matters (F2).
+    _img_family="$(printf '%s' "$image" | sed 's|.*/||; s|@.*||; s|:.*||' \
+        | tr '[:upper:]' '[:lower:]')"
+    _img_family="$(devenv_image_family_alias "$_img_family")"
+    _img_provider="$(devenv_provider_for_family "$_img_family")"
+    if [ -n "$_img_provider" ] && [ -z "$dedicated" ]; then
+        die "devenv already serves '$_img_family' — use it instead:
+    devenv provision $key --with $_img_provider
+devenv is the shared, multi-tenant lane and it should win whenever it can.
+If you genuinely need a dedicated or older one (devenv-pg is pg18, devenv-valkey
+is valkey 9.1), say why and it will be recorded on the lease:
+    podenv provision $key --image $image --port $cport --dedicated \"<reason>\"" 2
+    fi
+
+    podenv_require_runtime
+    podenv_require_control_schema
+
+    slug="$(podenv_slug "$key")"
+    # devenv_derive_password's own die (exit 4) already fires inside this
+    # command substitution's subshell on a missing salt; under `set -eu` that
+    # nonzero status aborts this script too, with the SAME message and code —
+    # an outer `|| die ...` here would only print a redundant second message
+    # (F8).
+    pw="$(devenv_derive_password "$key" podenv)"
+
+    # --netns host has no port remapping at all (measured: -p is discarded
+    # without a warning), so there is nothing to bind and nothing to hold a
+    # pool slot for — allocate nothing and store the container's own port as
+    # host_port instead (F7). That also makes UNIQUE(host_port) mean
+    # something for this mode: two --netns host leases on the same container
+    # port now collide at INSERT time instead of silently sharing a port. (In
+    # principle a pool-allocated port for some --netns pasta lease could
+    # equal a host-netns lease's container port, but the pool is
+    # 23000-23015 and the daemons this lane fronts use ports shaped like
+    # 80/3306/5432, so that does not arise in practice.)
+    if [ "$netns" = host ]; then
+        hport="$cport"
+    else
+        hport="$(podenv_port_alloc "$key")"
+    fi
+
+    # F1 (review): fetch the WHOLE identity of an existing lease, not just its
+    # key — the existing-lease branch below needs image/container_port/netns/
+    # env_var to refuse a reprovision that silently changes any of them. One
+    # query, '|'-joined (safe: every field is already charset-validated above
+    # to exclude '|', so it cannot appear inside a value and be mistaken for
+    # a separator).
+    existing="$(podenv_psql -tAc \
+        "SELECT image || '|' || container_port || '|' || netns || '|' || env_var
+           FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" \
+        | tr -d '[:space:]')"
+
+    # Register BEFORE creating: the row is what makes the port exclusive, so it
+    # has to exist before anything is bound to it.
+    created_now=0
+    if [ -z "$existing" ]; then
+        created_now=1
+        if [ "$netns" = host ]; then
+            # host_port IS container_port here (F7) — a UNIQUE violation means
+            # another --netns host lease already claims this exact
+            # container_port. Reallocating would retry the SAME fixed value
+            # forever, so this is not a poolable race: fail once, plainly.
+            podenv_psql -v ON_ERROR_STOP=1 -c "
+                INSERT INTO podenv_lease
+                  (key, slug, image, netns, container_port, host_port, env_var,
+                   dedicated_reason, created_by)
+                VALUES ('$(podenv_sql_quote "$key")', '$(podenv_sql_quote "$slug")',
+                        '$(podenv_sql_quote "$image")', '$(podenv_sql_quote "$netns")',
+                        $cport, $hport, '$(podenv_sql_quote "$as_var")',
+                        $( [ -n "$dedicated" ] && printf "'%s'" "$(podenv_sql_quote "$dedicated")" || echo NULL ),
+                        '$(podenv_sql_quote "$(devenv_owner)")')" >/dev/null 2>/dev/null \
+                || die "--port $cport is already claimed by another --netns host lease (host_port must be unique across host-netns leases, and there is no remapping to fall back on) — pick a different --port or release the other lease ('podenv list')" 3
+        else
+            # The INSERT races the port claim against concurrent callers
+            # (paperclip runs agent work concurrently): `podenv_port_alloc`
+            # above can hand two callers the SAME free port before either
+            # commits it, and UNIQUE(host_port) is what actually decides who
+            # wins. This loop is what makes that promise true — on a lost
+            # race (host_port already taken by the winner), reallocate (the
+            # port that just lost is now occupied) and try again, bounded so
+            # real pool exhaustion still surfaces as exit 3 instead of
+            # spinning forever.
+            _prov_attempt=0
+            while :; do
+                if podenv_psql -v ON_ERROR_STOP=1 -c "
+                    INSERT INTO podenv_lease
+                      (key, slug, image, netns, container_port, host_port, env_var,
+                       dedicated_reason, created_by)
+                    VALUES ('$(podenv_sql_quote "$key")', '$(podenv_sql_quote "$slug")',
+                            '$(podenv_sql_quote "$image")', '$(podenv_sql_quote "$netns")',
+                            $cport, $hport, '$(podenv_sql_quote "$as_var")',
+                            $( [ -n "$dedicated" ] && printf "'%s'" "$(podenv_sql_quote "$dedicated")" || echo NULL ),
+                            '$(podenv_sql_quote "$(devenv_owner)")')" >/dev/null 2>/dev/null
+                then
+                    break
+                fi
+                _prov_attempt=$((_prov_attempt + 1))
+                [ "$_prov_attempt" -lt 5 ] \
+                    || die "podenv port pool is contended — lost the host_port race 5 times in a row for '$key'. Try again; if this persists the pool is likely full (run 'podenv list')." 3
+                hport="$(podenv_port_alloc "$key")"
+            done
+        fi
+    else
+        # F1 (review — the seventh occurrence in this branch of "reports
+        # success while the thing is dead or is not what you asked for"):
+        # re-provisioning an EXISTING lease used to touch ONLY last_seen_at
+        # — every other parameter from THIS call (image, port, netns, --as)
+        # was silently accepted, and the .env write further down used THIS
+        # call's --as regardless of what the lease was actually created
+        # with. RED-proved live by the reviewer:
+        #   podenv provision review-drift --image traefik/whoami --port 80   --as WHOAMI_ADDR
+        #   podenv provision review-drift --image nginx:alpine   --port 8080 --as NGINX_ADDR
+        # both exited 0; the container stayed traefik/whoami on 23000, and
+        # .env gained NGINX_ADDR=podenv:23000 — a variable named for nginx
+        # that serves whoami. There is a DESTRUCTIVE sub-case too: under
+        # --netns host, hport = THIS call's --port verbatim (no remapping to
+        # fall back on — see the hport=cport comment above), so a
+        # reprovision with a typo'd --port would send podenv_provision_alive
+        # below to probe a port nothing serves; probe-first would then see
+        # "nothing answering" and stop+start a HEALTHY, serving stateful
+        # daemon before exiting 5 — a bounced database for a typo.
+        #
+        # Fix: refuse BEFORE any of that runs. Compare every parameter that
+        # changes lease IDENTITY (image, container_port, netns, env_var)
+        # against the stored row, and die on the first mismatch — before
+        # podenv_provision_alive is ever called, before anything is probed,
+        # stopped, started, or written. Re-running with IDENTICAL parameters
+        # is unaffected: it takes this same branch, finds no mismatch, and
+        # falls through to the existing probe-first logic below exactly as
+        # before (still exit 0, still non-disruptive on a healthy lease).
+        _ex_image="${existing%%|*}"; _ex_rest="${existing#*|}"
+        _ex_cport="${_ex_rest%%|*}"; _ex_rest="${_ex_rest#*|}"
+        _ex_netns="${_ex_rest%%|*}"; _ex_envvar="${_ex_rest#*|}"
+        # CORRECTED (review, this same task): the mismatch check above used
+        # to compare EVERY field against what THIS call's flags evaluated
+        # to — including --as's and --netns's DEFAULTS when the caller never
+        # passed them at all. --as defaults to a name derived from --image,
+        # and --netns defaults to "pasta"; either default is a real value
+        # that compares unequal to a stored "host" netns or a stored
+        # non-default env_var, so simply OMITTING a flag on the documented
+        # pick-it-back-up path read as "asking to change it" and refused.
+        # RED-proved live in this repo's own stack: a lease created with
+        # `--as MY_CUSTOM_ADDR` refused a plain re-provision that only
+        # dropped `--as` (the CLI reported the derived `WHOAMI_ADDR`
+        # default as a changed identity), and the refusal's only suggested
+        # remedy — `podenv release` — is the one action the podenv skill
+        # tells agents never to run unprompted. An agent resuming work with
+        # no memory of its exact original flags had no sanctioned next step.
+        #
+        # Fix: an omitted flag means "whatever this lease already has," not
+        # "the default." Adopt the STORED value for any field the caller did
+        # not explicitly pass, BEFORE comparing — so omitting --as/--netns
+        # can never itself produce a mismatch, and the .env line below is
+        # written under the lease's actual (stored) variable name. --image
+        # and --port have no such reading (both mandatory, so always
+        # explicit) and are still compared unconditionally.
+        [ "$as_explicit" = 1 ]    || as_var="$_ex_envvar"
+        [ "$netns_explicit" = 1 ] || netns="$_ex_netns"
+        if [ "$_ex_image" != "$image" ] || [ "$_ex_cport" != "$cport" ] \
+            || [ "$_ex_netns" != "$netns" ] || [ "$_ex_envvar" != "$as_var" ]; then
+            die "lease '$key' already holds '$_ex_image' on port $_ex_cport ($_ex_netns netns) as \$$_ex_envvar — provision never changes an existing lease's image/port/netns/--as, it only picks it back up. Use a different key for the new identity, or ask the user to release this one first ('podenv release $key') — releasing is their call, not something to do on your own." 2
+        fi
+        podenv_psql -c \
+            "UPDATE podenv_lease SET last_seen_at = now() WHERE key = '$(podenv_sql_quote "$key")'" \
+            >/dev/null
+    fi
+
+    # EXIT trap armed only now: it must roll back ONLY a row THIS invocation
+    # created (created_now), never tear down a container/row that pre-dates
+    # this call just because a later step (container start) had a bad day.
+    # Must re-raise the original status — a trap that returns normally would
+    # turn a failed provision into exit 0. Mirrors devenv's
+    # devenv_provision_cleanup so the two read the same (F3b).
+    podenv_provision_cleanup() {
+        _pc_rc=$?
+        rm -f "${out_file:-}" 2>/dev/null || true
+        if [ "$_pc_rc" -ne 0 ] && [ "$created_now" = 1 ]; then
+            podman_remote rm -f -v "$slug" >/dev/null 2>&1 || true
+            podenv_psql -c \
+                "DELETE FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" \
+                >/dev/null 2>&1 || true
+            note "podenv: rolled back '$key' (provision failed, nothing was left registered)"
+        fi
+        exit "$_pc_rc"
+    }
+    trap 'podenv_provision_cleanup' EXIT INT TERM
+
+    # Idempotent container creation.
+    #
+    # CORRECTED (previous claim measured false — see task-5-report.md; this
+    # is the SIBLING of the bug fixed in podenv's own opc-podenv-restore.sh,
+    # and the two must stay in agreement — read that script's header too
+    # before touching either). This comment used to say `podman ps -a` is
+    # authoritative for its own containers, unlike prototype-restore's
+    # problem where a DB row claimed `running` after the process was long
+    # gone, because the containers ARE this service's child processes: if it
+    # is up and they are listed, they exist. Measured false: after `docker
+    # compose restart podenv`, the outer container's PID namespace is torn
+    # down (killing every lease's real process) but its writable layer
+    # survives, and podman's rootless runtime state under /run/user/<uid>
+    # lives THERE (not a tmpfs mount) — so podman keeps reporting the lease
+    # "running" and a plain `podman start` on it returns SUCCESS while the
+    # container stays dead. `podman restart` is not the fix either: measured
+    # to fail outright on exactly this state ("conmon exited prematurely").
+    #
+    # This branch is worse than the restore script's version of the same bug
+    # was, because it is the DOCUMENTED, routine path: the podenv skill tells
+    # agents `provision` is idempotent and safe to run freely to "pick a
+    # lease back up."
+    #
+    # CORRECTED AGAIN (task-5 review F1, the previous fix in THIS branch
+    # measured to be a regression, not just a wart): "never trust podman's
+    # recorded state" got implemented as an UNCONDITIONAL `stop -t 0` on
+    # every re-provision call, before checking anything. That is exactly
+    # backwards for the ONE branch in this whole lane that is the
+    # documented, encouraged way to "pick a lease back up" — an agent
+    # holding, say, `legacy-erp` on `mysql:5.7` while it serves real queries
+    # re-runs `podenv provision legacy-erp` (idempotent, safe to run freely,
+    # per the podenv skill) and gets `mysqld` SIGKILLed mid-operation with no
+    # grace period, for no reason at all. RED-proved live in this repo's own
+    # stack (task-5-report.md): a genuinely healthy, serving `traefik/whoami`
+    # lease's `podman inspect --format {{.State.StartedAt}}` jumped forward
+    # by ~10 seconds across an ordinary re-provision call — killed and
+    # restarted despite never having stopped answering. That is a WORSE
+    # failure than the silent-dead-lease bug this mechanism replaced, for
+    # exactly the class of stateful single-tenant legacy daemon this lane
+    # exists to host.
+    #
+    # Fix: PROBE FIRST (podenv_provision_alive above), before touching the
+    # container at all. A healthy lease answers immediately, so the cost of
+    # checking first is negligible — probing the SAME host_port that goes
+    # into the .env below, which conveniently already equals the real
+    # reachable address in both netns modes (F7 sets hport=cport for --netns
+    # host). Only when nothing answers does this disrupt anything, and even
+    # then not with `-t 0`: `stop -t "$PODENV_STOP_GRACE"` gives a daemon
+    # that might be HUNG rather than gone a short window to flush before the
+    # kill — a container that really is already gone returns from `stop`
+    # immediately regardless, so this costs nothing in the common
+    # (already-dead) case. `start` returning 0 is still not proof of life
+    # (same reasoning as the restore script), so the post-disruption check
+    # polls a few times rather than trusting the first attempt: a service
+    # that starts cleanly can take a moment past `start` returning before it
+    # actually answers. Never `podman restart`: measured to fail outright on
+    # exactly the stale-"Up" state this branch has to recover from.
+    if podman_remote container exists "$slug" 2>/dev/null; then
+        if ! podenv_provision_alive "$hport"; then
+            # Nothing answered on the first try — only NOW is it safe/
+            # necessary to disrupt anything.
+            podman_remote stop -t "$PODENV_STOP_GRACE" "$slug" >/dev/null 2>&1 || true
+            podman_remote start "$slug" >/dev/null 2>&1 \
+                || die "podman could not (re)start the existing container '$slug' for lease '$key'. See why: docker compose exec podenv podman logs $slug" 5
+
+            _prov_alive=0
+            _prov_n=0
+            while [ "$_prov_n" -lt 15 ]; do
+                if podenv_provision_alive "$hport"; then
+                    _prov_alive=1
+                    break
+                fi
+                _prov_n=$((_prov_n + 1)); sleep 2
+            done
+            [ "$_prov_alive" = 1 ] \
+                || die "podman reports '$slug' running for lease '$key', but ${PODENV_HOST_NAME}:${hport} never exchanged any data after 30s (only a bare TCP handshake would not prove this — see podenv_provision_alive's comment above) — the (re)start did not actually revive it. See why: docker compose exec podenv podman logs $slug" 5
+        fi
+    else
+        # opc.podenv.port (task-6 F1): the reachable host_port, recorded as a
+        # LABEL on the container itself — not just in the podenv_lease row —
+        # for BOTH netns modes, even though --netns pasta's port is already
+        # visible via `podman port`. Why bother for pasta too: it means
+        # opc-podenv-restore.sh (a different image, no psql, cannot reach the
+        # registry) never has to parse `podman port` output at all, for
+        # either mode — one less thing that can change under us. Why it
+        # matters MORE for --netns host: that mode publishes no port mapping
+        # at all (-p is discarded — see the `hport=cport` comment above), so
+        # `podman port` has nothing to report and, before this label existed,
+        # opc-podenv-restore.sh had no way to find a port to probe for a
+        # host-netns lease at all — every restart of the podenv service
+        # stopped and restarted it unconditionally, healthy or not, and the
+        # best the script could do afterward was an unread stderr WARNING.
+        # Reading this label with `podman inspect` costs nothing the restore
+        # script wasn't already paying (it inspects the container regardless)
+        # and does not depend on the container being in any particular state,
+        # unlike `podman port`.
+        set -- run -d --name "$slug" \
+            --label "opc.podenv.lease=$slug" \
+            --label "opc.podenv.key=$key" \
+            --label "opc.podenv.port=$hport" \
+            --restart no \
+            --network="$netns"
+        [ "$netns" = host ] || set -- "$@" -p "${hport}:${cport}"
+        [ -z "$pw_env" ] || set -- "$@" -e "${pw_env}=${pw}"
+        # Re-split the accumulated --env/--volume strings on IFS whitespace
+        # only: pathname expansion is disabled for the duration (`set -f`),
+        # so a value containing `*`, `?` or `[` is passed through literally
+        # instead of glob-expanding against this process's cwd and injecting
+        # unrelated filenames into the container's env/mounts (F5). Field
+        # splitting on spaces still can't be told apart from a literal space
+        # in a value — that limitation is unchanged, see the flag-parsing
+        # comment above.
+        set -f
+        for _e in $run_env; do set -- "$@" -e "$_e"; done
+        for _v in $run_vol; do set -- "$@" -v "$_v"; done
+        set +f
+        set -- "$@" "$image"
+        podman_remote "$@" >/dev/null \
+            || die "podman could not start the lease '$key' (container '$slug', image '$image'). Run the same image by hand to see why: podman run --rm -it $image" 5
+
+        # F1: `run -d` returning 0 only proves podman ACCEPTED the request to
+        # start a container — it does not prove the container is still
+        # running a moment later. An image with no long-running foreground
+        # process (e.g. plain alpine with no CMD) exits immediately, and
+        # `run -d` still reports success because the START itself succeeded.
+        # Measured pre-fix: `podenv provision nolisten --image
+        # docker.io/library/alpine:3.20 --port 80 --as NOLISTEN_ADDR`
+        # returned exit 0 and wrote a live-looking address while `podman ps
+        # -a` showed `Exited (0)` — a lease for a container that never ran.
+        #
+        # Distinguish "not ready yet" (fine — a legitimately slow image like
+        # mysql:5.7 initialising its data directory can take tens of
+        # seconds, and failing the lease for that would be worse than this
+        # bug) from "died on startup" (unambiguous, and waiting longer never
+        # fixes it) by checking RUNNING STATE, not port readiness — the same
+        # distinction opc-podenv-restore.sh and this command's own
+        # reprovision branch make for their own, different problem (whether
+        # the daemon behind a running container actually answers). This is
+        # deliberately NOT a port probe: a container can be legitimately
+        # running for a long time before its daemon binds anything.
+        #
+        # A short grace period before deciding: a container that has already
+        # exited a couple of seconds after `run -d` did not start, full
+        # stop — there is no "maybe it's just slow" reading of that.
+        sleep 2
+        _prov_running="$(podman_remote inspect "$slug" --format '{{.State.Running}}' 2>/dev/null || true)"
+        if [ "$_prov_running" != "true" ]; then
+            die "the container for lease '$key' ('$slug', image '$image') is not running — it exited during startup instead of staying up. See why: docker compose exec podenv podman logs $slug" 5
+        fi
+    fi
+
+    out_file="$(mktemp)"
+    if [ -n "$url_tpl" ]; then
+        printf '%s=%s\n' "$as_var" \
+            "$(podenv_render_url "$url_tpl" "$PODENV_HOST_NAME" "$hport" "$pw")" > "$out_file"
+    else
+        printf '%s=%s:%s\n' "$as_var" "$PODENV_HOST_NAME" "$hport" > "$out_file"
+    fi
+    devenv_env_merge "$env_file" "$out_file"
+    if [ -n "$existing" ]; then
+        note "podenv: '$key' (existing) → $env_file"
+    else
+        note "podenv: '$key' provisioned → $env_file"
+    fi
+    cat "$out_file"
+    # No manual rm here — podenv_provision_cleanup removes out_file on EXIT
+    # regardless of outcome (mirrors devenv, which does the same).
+}
+
+cmd_release() {
+    key="${1:?usage: podenv release <key>}"
+    podenv_require_control_schema
+    if [ -z "$(podenv_psql -tAc \
+            "SELECT key FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" \
+            | tr -d '[:space:]')" ]; then
+        note "podenv: '$key' (absent)"; return 0
+    fi
+    slug="$(podenv_slug "$key")"
+    # Fetched once, before the row goes away, for both the existing
+    # container-not-confirmed-removed warning below and the new stale-.env
+    # warning (fold-in, review).
+    _rel_row="$(podenv_psql -tAc \
+        "SELECT host_port || '|' || env_var FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" \
+        | tr -d '[:space:]')"
+    _rel_port="${_rel_row%%|*}"
+    _rel_envvar="${_rel_row#*|}"
+
+    # `[ -S "$PODENV_SOCK" ]` alone only proves the socket FILE exists — a
+    # stale one (left on the persistent volume by a previous run) or one no
+    # daemon is listening on would take this branch, have its removal
+    # swallowed by `|| true`, and still print success below. Use the same
+    # client-present-AND-daemon-answers check podenv_require_runtime uses
+    # (podenv_runtime_reachable, F6) so the two can never disagree about what
+    # "reachable" means.
+    container_gone=0
+    if podenv_runtime_reachable; then
+        podman_remote rm -f -v "$slug" >/dev/null 2>&1 || true
+        if ! podman_remote container exists "$slug" 2>/dev/null; then
+            container_gone=1
+        fi
+    fi
+
+    # Ordering kept exactly as before (warn, THEN delete the row regardless):
+    # that is the least-bad choice and matches devenv — a lease you cannot
+    # currently reach still needs its row gone so the key can be
+    # re-provisioned, but the operator has to be told the port may still be
+    # held.
+    if [ "$container_gone" != 1 ]; then
+        note "podenv: WARNING the container for '$key' ($slug) was NOT confirmed removed."
+        note "podenv:   The registry row is going away regardless, which frees port"
+        note "podenv:   $_rel_port for the next lease — and a container still holding it would"
+        note "podenv:   make that lease fail to start. Check and remove it by hand:"
+        note "podenv:   docker compose exec podenv podman ps -a --filter name=$slug"
+        note "podenv:   docker compose exec podenv podman rm -f -v $slug"
+    fi
+
+    # Fold-in (review): `release` recycles the port but does NOT touch
+    # whatever .env this lease's address was written into — podenv has no
+    # way to find it (unlike devenv, which tracks an http_exposed_at flag
+    # for its own preview ports). podenv's default address form is a bare
+    # `host:port` with NO credential, so once this port is re-leased to a
+    # different tenant, a stale $VAR left behind in any .env silently starts
+    # pointing that project at someone else's daemon — devenv is immune to
+    # this because its URLs carry a per-key derived credential that would
+    # simply fail to authenticate against the wrong tenant instead of
+    # connecting to it. Say so at release time; the skill also carries this
+    # rule (patches/paperclip/skills/podenv/SKILL.md).
+    if [ -n "$_rel_envvar" ]; then
+        note "podenv: WARNING '$key' released — if \$$_rel_envvar was written into a project's .env, it is NOT removed and now points at podenv:$_rel_port, a port that WILL be re-leased to a future, unrelated tenant. Remove \$$_rel_envvar from that .env by hand."
+    fi
+
+    podenv_psql -c \
+        "DELETE FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" >/dev/null
+
+    if [ "$container_gone" = 1 ]; then
+        note "podenv: '$key' released (container removed)"
+    else
+        note "podenv: '$key' row released; container removal NOT confirmed — see warning above"
+    fi
+}
+
+cmd_list() {
+    podenv_require_control_schema
+    # Fold-in (review): opc-podenv-seed.sh applies bootstrap.sql with
+    # ON_ERROR_STOP=1 but no --single-transaction, so "podenv_lease created,
+    # podenv_usage view failed" is a reachable, PERSISTENT partial state —
+    # and podenv_require_control_schema above only checks podenv_lease (the
+    # table), not podenv_usage (the view actually queried below). Querying
+    # the view unconditionally in that state used to abort this whole
+    # command with psql's raw error under `set -eu` — exit 1, outside this
+    # CLI's own documented 0/2/3/4/5 exit-code table. `devenv list` already
+    # guards its own podenv section this exact way (same partial-schema
+    # state, degraded to a warning); apply the same reasoning to podenv's
+    # own listing of itself.
+    if [ "$(podenv_psql -tAc \
+            "SELECT to_regclass('podenv_usage') IS NOT NULL" 2>/dev/null \
+            | tr -d '[:space:]')" = "t" ]; then
+        podenv_psql -c \
+            "SELECT key, image, netns, host_port, env_var,
+                    CASE WHEN dedicated_reason IS NULL THEN ''
+                         ELSE 'dedicated: ' || dedicated_reason END AS dedicated,
+                    date_trunc('second', idle) AS idle
+             FROM podenv_usage" \
+            || note "podenv: WARNING podenv_usage query failed — listing skipped (see below)"
+    else
+        note "podenv: WARNING podenv_usage view is missing — listing skipped. Schema is partially applied; rerun opc-podenv-seed.sh (docker compose exec paperclip sh -c '. /usr/local/bin/opc-podenv-seed.sh; opc_podenv_seed_schema')."
+    fi
+    # Disk lives in podman's store, which SQL cannot see. Printed here rather
+    # than left out: there is no disk quota in this lane (a hard cap needs
+    # CAP_SYS_ADMIN, i.e. privileged), so visibility is the only control there
+    # is — the same stance devenv takes with devenv_usage.
+    if [ -S "$PODENV_SOCK" ]; then
+        echo
+        echo "podman store:"
+        podman_remote system df 2>/dev/null || note "podenv: (store usage unavailable)"
+    fi
+}
+
+case "${1:-}" in
+    provision) shift; cmd_provision "$@" ;;
+    release)   shift; cmd_release   "$@" ;;
+    list)      shift; cmd_list      "$@" ;;
+    -h|--help|help|"")
+        sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (provision|release|list)" 2 ;;
+esac

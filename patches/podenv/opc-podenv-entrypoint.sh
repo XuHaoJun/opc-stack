@@ -1,0 +1,135 @@
+#!/bin/sh
+# opc-podenv-entrypoint.sh — the podenv lane's runtime host.
+#
+# Starts the rootless podman API service that `podenv` (in the paperclip
+# image) leases containers from. Root only long enough to hand three trees to
+# the runtime user, then drops for good.
+#
+# The socket keeps podman's OWN 0600 mode and we do not fight it. Its access
+# gate is the OWNER uid, deliberately aligned with paperclip's `node` (uid
+# 1000). Measured: podman re-chmods the socket to 0600 AFTER creating the
+# listener, so granting group access races and loses — a retry loop was
+# observed reporting success (stat really did read 660) and then being
+# reverted. See the spec's measurement 3.
+set -eu
+
+PODENV_UID="${PODENV_UID:-1000}"
+PODENV_GID="${PODENV_GID:-1000}"
+PODENV_SOCK_DIR="${PODENV_SOCK_DIR:-/run/podenv}"
+PODENV_STORE="${PODENV_STORE:-/home/podman/.local/share/containers}"
+PODENV_RUNTIME_DIR="/run/user/${PODENV_UID}"
+PODENV_DIAG="${PODENV_SOCK_DIR}/diagnosis"
+
+mkdir -p "$PODENV_SOCK_DIR" "$PODENV_STORE" "$PODENV_RUNTIME_DIR"
+chown "$PODENV_UID:$PODENV_GID" "$PODENV_SOCK_DIR" "$PODENV_STORE" "$PODENV_RUNTIME_DIR"
+# 0700: a second, independent gate. Measured — a process with the right uid but
+# no traverse on this directory is refused before the socket mode matters.
+chmod 0700 "$PODENV_SOCK_DIR"
+
+as_runtime_user() {
+    setpriv --reuid "$PODENV_UID" --regid "$PODENV_GID" --clear-groups --inh-caps=-all \
+        env HOME=/home/podman XDG_RUNTIME_DIR="$PODENV_RUNTIME_DIR" "$@"
+}
+
+# Self-test, and WRITE THE VERDICT DOWN. A nested runtime that cannot start
+# produces errors that mean nothing to the caller ("cannot clone: Operation not
+# permitted", "Failed to open() /dev/net/tun"); the CLI reads this file so the
+# operator gets one sentence instead of a nested stack trace.
+#
+# Never fatal. podenv is an optional lane and paperclip has no depends_on edge
+# to it: a broken runtime host must degrade to "leases fail when used", not to
+# "the stack does not come up" (invariant 8's lesson).
+: > "$PODENV_DIAG"
+chown "$PODENV_UID:$PODENV_GID" "$PODENV_DIAG"
+
+# Bounded retry, not one shot (final review: the eighth occurrence in this
+# branch of "a recorded state outlives its truth" — this time the RECORD
+# ITSELF, not something podman reports). Measured live against this stack's
+# own gate: `docker compose up -d --force-recreate podenv` (which the restore
+# checks in tests/podenv.sh drive routinely) starts this entrypoint the
+# instant the new container exists, while the PREVIOUS instance's namespaces
+# and processes may still be tearing down — `podman unshare true` failed once
+# with "cannot set user namespace" in exactly that window, and by the time the
+# next command touched the runtime seconds later it was already healthy
+# (`podman unshare true` back to exit 0, host `max_user_namespaces` unchanged
+# at 94963 with 2 in use). A one-shot self-test cannot tell that transient
+# race apart from a genuinely broken host; it just picks whichever attempt it
+# happened to run first. Retrying does: it costs a few bounded seconds only on
+# the (rare) failing path, and only concludes failure once every attempt in
+# the window agrees.
+_st_tries=0
+_st_max=5
+_st_ok=0
+_st_out=""
+while [ "$_st_tries" -lt "$_st_max" ]; do
+    if _st_out="$(as_runtime_user podman unshare true 2>&1)"; then
+        _st_ok=1
+        break
+    fi
+    _st_tries=$((_st_tries + 1))
+    [ "$_st_tries" -lt "$_st_max" ] && sleep 1
+done
+
+if [ "$_st_ok" != 1 ]; then
+    printf 'userns nesting failed: %s\n' "$_st_out" > "$PODENV_DIAG"
+    echo "[podenv] WARNING userns nesting failed after $_st_max attempts — every lease will fail." >&2
+    echo "[podenv] WARNING   $_st_out" >&2
+    echo "[podenv] WARNING   Check that this service still has security_opt: [seccomp=unconfined]," >&2
+    echo "[podenv] WARNING   and that the host allows unprivileged user namespaces." >&2
+elif [ ! -c /dev/net/tun ]; then
+    # UNREACHABLE through the supported path (final review F3, measured):
+    # compose declares `devices: [/dev/net/tun]`, and when the HOST is
+    # missing that device, `docker run --device /dev/net/tun` fails at
+    # CONTAINER CREATION with "error gathering device information" — this
+    # entrypoint never gets exec'd at all, so this branch never runs, and the
+    # graceful-degradation story it used to tell (write a diagnosis, warn,
+    # never block `up`) does not hold for that case: `docker compose up` /
+    # `scripts/setup.sh` (set -euo pipefail) simply exits non-zero instead.
+    # See docs/superpowers/specs/2026-08-22-podenv-nested-container-lease-
+    # design.md's 錯誤處理 §3 correction and SETUP.md's podenv section.
+    #
+    # This branch is left in, relabelled rather than deleted, because it is
+    # reachable by ONE unsupported path: someone runs this image BY HAND
+    # without passing `--device /dev/net/tun` at all (no compose, no
+    # container-creation-time device check to fail first) — e.g. `docker run
+    # opc/podenv:local` directly. In that case the device node genuinely does
+    # not exist inside the running container, this self-test can actually
+    # observe it, and the diagnosis file is worth writing for whoever is
+    # debugging that ad-hoc run.
+    printf 'no /dev/net/tun: pasta unavailable, leases must pass --netns host\n' > "$PODENV_DIAG"
+    echo "[podenv] WARNING /dev/net/tun is missing — pasta cannot start, so port" >&2
+    echo "[podenv] WARNING   remapping (-p) is unavailable. Leases must pass --netns host." >&2
+    echo "[podenv] WARNING   No silent fallback: a lease that thinks it has its own netns" >&2
+    echo "[podenv] WARNING   but shares the sidecar's would collide invisibly." >&2
+fi
+
+# Leased containers are this service's descendants, so they died with the
+# previous instance of it. Backgrounded because it waits for the socket the
+# exec below creates.
+#
+# Double-forked (the outer parens are a SYNCHRONOUS subshell, not backgrounded
+# themselves) rather than a plain trailing `&`: this process is about to exec
+# into podman, which becomes the direct parent of anything merely
+# background-forked here and never wait()s on children it did not itself
+# spawn. Measured: a plain `&` left the restore script as a permanent zombie
+# (ppid = the exec'd podman process) once it finished, defeating the exact
+# zombie-reaping invariant `init: true` exists for (see compose file). The
+# subshell here exits immediately after backgrounding the real script, so the
+# script is orphaned to, and reaped by, PID 1 (docker-init) instead — the
+# entrypoint shell foreground-waits for the subshell itself, so that layer
+# leaves no zombie either.
+# PODENV_RESTORE_RUN=1: opc-podenv-restore.sh's main pass is opt-IN (task-5
+# F2) — sourcing or executing it with no variable set is a safe no-op, so
+# this entrypoint, as the one real production caller, has to say so
+# explicitly.
+( PODENV_UID="$PODENV_UID" PODENV_GID="$PODENV_GID" PODENV_SOCK_DIR="$PODENV_SOCK_DIR" \
+    PODENV_RESTORE_RUN=1 \
+    /usr/local/bin/opc-podenv-restore.sh & )
+
+# Spelled out rather than reusing as_runtime_user(): `exec` cannot run a shell
+# function, and this process must be REPLACED — a setpriv running under a
+# surviving shell would make the shell PID 1, so podman would not receive the
+# signals docker sends it on `compose stop`.
+exec setpriv --reuid "$PODENV_UID" --regid "$PODENV_GID" --clear-groups --inh-caps=-all \
+    env HOME=/home/podman XDG_RUNTIME_DIR="$PODENV_RUNTIME_DIR" \
+    podman system service --time=0 "unix://${PODENV_SOCK_DIR}/podman.sock"

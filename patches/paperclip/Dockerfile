@@ -14,7 +14,14 @@
 # Shared nix seed image (compose passes the IMAGE_PREFIX-qualified name).
 # Declared globally so FROM ${NIX_SEED_IMAGE} expands; the `nix-seed` stage
 # below materializes it for COPY --from (which cannot expand variables).
+#
+# This ARG MUST precede the FIRST FROM in the file, not merely its own FROM —
+# an ARG used in a FROM only has global scope (visible to every later FROM)
+# when declared before any stage begins; declared after one it is scoped to
+# that stage alone, and the following FROM sees an empty value ("base name
+# should not be blank").
 ARG NIX_SEED_IMAGE=opc/nix-seed:local
+
 # Shared seed (nix + 12 tools) built once in patches/nix-seed (compose service
 # `nix-seed`); a tool-list change rebuilds only that image. Seed image alias:
 # COPY --from cannot expand variables (BuildKit), so the global
@@ -22,6 +29,7 @@ ARG NIX_SEED_IMAGE=opc/nix-seed:local
 # materialized as a stage and copied from by name. The COPY --from=nix-seed
 # in the runtime stage below consumes it.
 FROM ${NIX_SEED_IMAGE} AS nix-seed
+
 FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -103,7 +111,7 @@ WORKDIR /app
 RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
   && apt-get update \
-  && apt-get install -y --no-install-recommends openssh-client jq \
+  && apt-get install -y --no-install-recommends openssh-client jq podman-remote \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
   && chown node:node /paperclip
@@ -141,6 +149,33 @@ COPY opc/opc-devenv-seed.sh /usr/local/bin/opc-devenv-seed.sh
 COPY opc/opc-prototype-restore.sh /usr/local/bin/opc-prototype-restore.sh
 # devenv CLI + providers + control schema (see the devenv spec).
 COPY opc/devenv/ /usr/local/lib/devenv/
+# podenv CLI + its control schema (the nested container lease lane).
+COPY opc/podenv/ /usr/local/lib/podenv/
+COPY opc/opc-podenv-seed.sh /usr/local/bin/opc-podenv-seed.sh
+# The podman CLIENT: Debian's own `podman-remote` package (installed in the
+# apt layer above), symlinked to the plain name an agent types.
+#
+# NOT `COPY --from=podenv /usr/bin/podman` (measured to fail, and previously
+# the approach here): quay.io/podman/stable is Fedora, and its podman binary
+# is dynamically linked against Fedora's libc/libselinux/libsemanage/libpam/
+# libgpgme/etc — none of which exist (or exist with a compatible ABI) on this
+# image's Debian trixie base. Running the bare copy dies at the loader with
+# "libsubid.so.5: cannot open shared object file" (plus 22 more missing
+# libraries). The reasoning for copying the binary in the first place — same
+# build, so client and server versions can never skew — was a precaution, not
+# a measurement, and it does not survive contact with one: Debian trixie's
+# podman-remote is 5.4.2 against a 5.8.4 runtime host, and that gap changes
+# NOTHING this lane exercises. Measured directly against the running podenv
+# service: `version` reports `server: 5.8.4` correctly, and `run`, `ps`,
+# `build` (built and tagged an image), `image inspect`, and `system df` all
+# succeed. So: apt's package, not a vendored Fedora closure plus a private
+# linker wrapper (~44MB binary + 23 libraries) to work around a version
+# mismatch that costs nothing. If a future skew ever DOES break one of these
+# operations, that is the thing to fix (pin a newer podman-remote, or point
+# at a backports/testing package) — not to re-reach for copying the binary,
+# which trades a measured, harmless version gap for an unmeasured, expensive
+# ABI mismatch. The symlink itself is made below, alongside devenv/podenv/
+# prototype's.
 # `prototype` CLI: the paperclip-aware workflow layer (project + git + lease).
 # Kept out of devenv on purpose — devenv must stay a generic resource lease
 # with no knowledge of Paperclip. See the header of opc/prototype/prototype.
@@ -157,12 +192,16 @@ COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh /usr/local/bin/opc-claude-seed.sh \
-             /usr/local/bin/opc-devenv-seed.sh /usr/local/bin/opc-prototype-restore.sh \
+             /usr/local/bin/opc-devenv-seed.sh /usr/local/bin/opc-podenv-seed.sh \
+             /usr/local/bin/opc-prototype-restore.sh \
              /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh \
     && chmod +x /usr/local/lib/devenv/devenv /usr/local/lib/devenv/providers/*.sh \
+    && chmod +x /usr/local/lib/podenv/podenv \
     && chmod +x /usr/local/lib/prototype/prototype \
     && ln -sf /usr/local/lib/devenv/devenv /usr/local/bin/devenv \
-    && ln -sf /usr/local/lib/prototype/prototype /usr/local/bin/prototype
+    && ln -sf /usr/local/lib/podenv/podenv /usr/local/bin/podenv \
+    && ln -sf /usr/local/lib/prototype/prototype /usr/local/bin/prototype \
+    && ln -sf /usr/bin/podman-remote /usr/local/bin/podman
 
 # Shared seed (nix + 12 tools) from the nix-seed stage (see stage alias
 # above); a tool-list change rebuilds only the nix-seed image.
@@ -209,6 +248,19 @@ RUN printf '%s\n' \
 ENV MISE_DATA_DIR=/opt/mise \
     MISE_CACHE_DIR=/opt/mise/cache \
     MISE_CONFIG_DIR=/opt/mise/config
+
+# Set in the image ENV, not only exported by the entrypoint: `docker exec`
+# interactive sessions do not inherit entrypoint-time exports (AGENTS.md
+# records this for GH_CONFIG_DIR / GIT_SSH_COMMAND / GIT_CONFIG_GLOBAL), and
+# an agent debugging by hand needs the wide `podman` interface to just work.
+#
+# Measured (all three forms reach the runtime host's 5.8.4): `podman-remote
+# --remote --url unix:///run/podenv/podman.sock version`; the `podman` symlink
+# above with CONTAINER_HOST set and no flags at all; and `podman --remote
+# --url ... version` through that same symlink. So the skill's examples can
+# say plain `podman run`, not `podman-remote --remote --url ... run`.
+ENV CONTAINER_HOST=unix:///run/podenv/podman.sock \
+    PODENV_LIB=/usr/local/lib/podenv
 
 ENTRYPOINT ["/usr/local/bin/nix-entrypoint.sh", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]

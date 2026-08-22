@@ -695,6 +695,12 @@ services:
       # instead of the same hostname being written in two places that can
       # disagree. Set explicitly only to override that.
       DEVENV_HTTP_PUBLIC_HOST: ${DEVENV_HTTP_PUBLIC_HOST:-}
+      # podenv: the nested container lease lane. It shares devenv's control
+      # database (its own table), so it needs no extra credentials — only the
+      # pool bounds, which must match this service's published range.
+      PODENV_PORT_BASE: ${PODENV_PORT_BASE:-23000}
+      PODENV_PORT_COUNT: ${PODENV_PORT_COUNT:-16}
+      PODENV_PORT_RANGE_END: ${PODENV_PORT_RANGE_END:-23015}
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
       # Preview ports for prototype dev servers, leased by `devenv provision
@@ -733,6 +739,14 @@ services:
       # repo. Paperclip does NOT create a local_path workspace's cwd (mkdir
       # only happens for worktrees), so the `prototype` CLI makes it.
       - opc-prototypes:/prototypes
+      # podenv's API socket. A unix socket on a shared volume is reachable
+      # across containers — the same mechanism nix-daemon uses. Mounted rw
+      # because connecting to a unix socket requires write permission on it.
+      #
+      # There is deliberately NO depends_on edge to the podenv service: a
+      # broken nested runtime must degrade to "leases fail when used", not to
+      # "paperclip does not start" (invariant 8).
+      - opc-podenv-sock:/run/podenv
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -962,6 +976,104 @@ services:
     environment:
       DEVENV_VALKEY_PASSWORD: ${DEVENV_VALKEY_PASSWORD:-devenv}
 
+  # ══════════════════════ podenv (巢狀容器租約) ══════════════════════
+  # devenv 蓋不到的那一半: 不能 multi-tenant 的 daemon, 以及很老舊的版本。
+  # 設計 (含七條量測): docs/superpowers/specs/
+  # 2026-08-22-podenv-nested-container-lease-design.md
+  #
+  # Rootless podman inside docker. Invariant 6's two prohibitions both hold:
+  # no host mount, no privileged. The three declarations below are the ENTIRE
+  # security posture of this lane and each one is a measured necessity:
+  #
+  #   seccomp=unconfined  docker's default profile blocks clone() with
+  #                       CLONE_NEWUSER, so rootless podman cannot start at
+  #                       all. Measured both ways: with it, nested `podman
+  #                       run` works; without it, "cannot clone: Operation not
+  #                       permitted". It relaxes the syscall filter and grants
+  #                       NOTHING on the host filesystem — far smaller than
+  #                       privileged, which is what DinD needs (even the
+  #                       official dind-rootless image documents --privileged).
+  #                       It is confined to THIS service on purpose: paperclip
+  #                       holds /keys, gh creds, the board API key and every
+  #                       prototype. This container is NOT empty (final
+  #                       review F4 corrects an earlier, false claim here) —
+  #                       it mounts opc-prototypes read-write too (below), so
+  #                       it can list every prototype's tree and read each
+  #                       one's .env (DATABASE_URL, VALKEY_URL,
+  #                       BETTER_AUTH_SECRET, DEVENV_KEY included). The blast
+  #                       radius really is smaller than paperclip's — no
+  #                       /keys, no gh/claude creds, no hermes home, pinned by
+  #                       tests/podenv.sh's "mounts no secret volume" check —
+  #                       but "holds nothing" overstated it for anyone judging
+  #                       whether seccomp=unconfined is acceptable here. What
+  #                       this container actually holds is every prototype's
+  #                       tree and its devenv credentials, which the agent
+  #                       already has, and no stack credentials.
+  #   /dev/net/tun        pasta needs it to create its tap device. Without it
+  #                       nested containers fall back to the sidecar's netns
+  #                       and `-p` is discarded WITHOUT A WARNING. bridge /
+  #                       netavark is not an option at all: it writes
+  #                       /proc/sys, which docker mounts read-only.
+  #   mem_limit           The ONLY memory knob that works. Per-lease
+  #                       --memory is silently ignored (measured: memory.max
+  #                       stays `max`, no warning) and cannot be fixed without
+  #                       mounting the host's /sys/fs/cgroup.
+  #
+  # NOT needed here, measured on this host — do not "helpfully" add them:
+  # apparmor=unconfined (AppArmor is not loaded), label=disable (no SELinux),
+  # /dev/fuse (kernel 7.2 gives native rootless overlay).
+  podenv:
+    build:
+      context: ./patches/podenv
+      dockerfile: Dockerfile
+    image: ${IMAGE_PREFIX:-opc}/podenv:local
+    # podman itself is PID 1 and never wait()s on reparented children — every
+    # nested `podman run`/`podman build` leaves a (pasta.avx2) and a (conmon)
+    # zombie behind (measured: 5 nested runs -> 10 zombies, ppid 1). init:
+    # true swaps in docker-init as PID 1, which reaps them and still forwards
+    # signals through to podman on `compose stop`. Same precedent as
+    # buzz/frontdoor/paperclip above.
+    init: true
+    restart: unless-stopped
+    security_opt:
+      - seccomp=unconfined
+    devices:
+      - /dev/net/tun
+    mem_limit: ${PODENV_MEM_LIMIT:-4g}
+    environment:
+      # Must equal paperclip's `node` uid: the socket stays 0600 and its owner
+      # IS the access gate. Asserted at build time in the Dockerfile and by
+      # tests/podenv.sh against the running paperclip.
+      PODENV_UID: "1000"
+      PODENV_GID: "1000"
+      PODENV_SOCK_DIR: /run/podenv
+    # Published for the OPERATOR only (127.0.0.1), same stance as devenv-pg:
+    # the point is that YOU can point a client at a leased daemon, not that
+    # the LAN can. In-stack consumers do not need this at all — they reach a
+    # lease at podenv:<port> over docker DNS.
+    #
+    # BASE and RANGE_END are stated twice (here and in the CLI's pool)
+    # because compose cannot do arithmetic; opc-podenv-seed.sh (paperclip's
+    # entrypoint) warns when they drift, and tests/podenv.sh fails on it too.
+    ports:
+      - "127.0.0.1:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}"
+    volumes:
+      - opc-podenv-sock:/run/podenv
+      - opc-podenv-store:/home/podman/.local/share/containers
+      # Lets a lease bind-mount the project it belongs to. No new exposure:
+      # the agent already reads this whole tree from paperclip.
+      - opc-prototypes:/prototypes
+    healthcheck:
+      # `test -S` only proves the socket FILE exists, not that anything is
+      # listening — measured: a stale socket from a previous run (or one
+      # created by anything else) still passes `test -S` with nobody home.
+      # Prove the API actually answers instead, as the uid that will use it.
+      test: ["CMD-SHELL", "setpriv --reuid 1000 --regid 1000 --clear-groups --inh-caps=-all env HOME=/home/podman XDG_RUNTIME_DIR=/run/user/1000 podman --remote --url unix:///run/podenv/podman.sock version >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
   # ══════════════════════════ TencentDB-Agent-Memory ══════════════════════════
   tencentdb-core:
     build:
@@ -1087,6 +1199,11 @@ volumes:
   opc-nix:
   opc-gh-creds:
   opc-prototypes:
+  # podenv: the API socket (shared with paperclip — a unix socket on a shared
+  # volume is reachable across containers, the same mechanism nix-daemon uses)
+  # and the image/container store.
+  opc-podenv-sock:
+  opc-podenv-store:
   opc-prototyper-home:
   devenv-pg-data:
   devenv-valkey-data:

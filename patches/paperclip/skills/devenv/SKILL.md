@@ -29,6 +29,13 @@ hostnames, no hardcoded ports.
 `--with` is a comma list; take only what you need. `--with http=3` leases three
 consecutive ports (`DEV_PORT`, `DEV_PORT_2`, `DEV_PORT_3`).
 
+## When devenv is the wrong tool
+
+devenv serves shared, multi-tenant, modern backends. A daemon that refuses to
+be multi-tenant, or a version devenv does not run (very old MySQL, pg 9.6),
+belongs to the `podenv` lane — load the **podenv** skill; it holds the decision
+table. Do not try to force such a daemon into devenv.
+
 ## Rules
 
 **`provision` is idempotent — run it freely.** Re-running returns the same

@@ -80,7 +80,8 @@ unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES \
       DEVENV_PG_PORT DEVENV_VALKEY_PORT TENCENTDB_CORE_PORT \
       TENCENTDB_PANEL_PORT TENCENTDB_KNOWLEDGE_PORT TENCENTDB_PROXY_PORT \
       DEVENV_HTTP_PORT_BASE DEVENV_HTTP_PORT_COUNT DEVENV_HTTP_PORT_RANGE_END \
-      DEVENV_HTTP_BIND DEVENV_SECRET_SALT 2>/dev/null || true
+      DEVENV_HTTP_BIND DEVENV_SECRET_SALT \
+      PODENV_PORT_BASE PODENV_PORT_COUNT PODENV_PORT_RANGE_END 2>/dev/null || true
 
 # env_value <file> <key> — read ONE value with the same parser the stack uses.
 #
@@ -171,7 +172,7 @@ fi
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/scientist.sh"
+GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/scientist.sh tests/podenv.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
@@ -259,6 +260,41 @@ if [ "$PREVIEW_BASE" -le "$LIVE_PREVIEW_END" ] && [ "$PREVIEW_END" -ge "$LIVE_PR
     die "rehearsal preview range $PREVIEW_BASE-$PREVIEW_END overlaps the live one $LIVE_PREVIEW_BASE-$LIVE_PREVIEW_END"
 fi
 
+# podenv (Task 7): a second, independent port pool for the nested-container
+# lease lane (docker-compose.yml PODENV_PORT_BASE/COUNT/RANGE_END). Same
+# reason the fact is stated twice as the preview pool above — compose cannot
+# do arithmetic — but a different default range (23000/16) because the two
+# pools are leased independently and must never collide with each other.
+PODENV_COUNT="${OPC_REHEARSAL_PODENV_COUNT:-16}"
+PODENV_BASE=$(( 23000 + PORT_OFFSET ))
+PODENV_END=$(( PODENV_BASE + PODENV_COUNT - 1 ))
+LIVE_PODENV_BASE="$(env_value "$REPO_ROOT/.env" PODENV_PORT_BASE)"; [ -n "$LIVE_PODENV_BASE" ] || LIVE_PODENV_BASE=23000
+LIVE_PODENV_END="$(env_value "$REPO_ROOT/.env" PODENV_PORT_RANGE_END)"; [ -n "$LIVE_PODENV_END" ] || LIVE_PODENV_END=23015
+
+# Same kernel-ephemeral-range rule as the preview pool: AGENTS.md records
+# that the podenv base must stay below 32768 for the identical reason
+# (prototype/preview pitfall 3 — a leased-but-not-listening port in that
+# range can be stolen by any process's bind(0)).
+[ "$PODENV_END" -lt 32768 ] || die "podenv range $PODENV_BASE-$PODENV_END reaches into the kernel ephemeral range (>=32768)"
+
+for p in $TEST_PORTS; do
+    if [ "$p" -ge "$LIVE_PODENV_BASE" ] && [ "$p" -le "$LIVE_PODENV_END" ]; then
+        die "rehearsal port $p falls inside the live podenv range $LIVE_PODENV_BASE-$LIVE_PODENV_END"
+    fi
+    if [ "$p" -ge "$PODENV_BASE" ] && [ "$p" -le "$PODENV_END" ]; then
+        die "rehearsal port $p falls inside the rehearsal podenv range $PODENV_BASE-$PODENV_END"
+    fi
+done
+if [ "$PODENV_BASE" -le "$LIVE_PODENV_END" ] && [ "$PODENV_END" -ge "$LIVE_PODENV_BASE" ]; then
+    die "rehearsal podenv range $PODENV_BASE-$PODENV_END overlaps the live one $LIVE_PODENV_BASE-$LIVE_PODENV_END"
+fi
+if [ "$PODENV_BASE" -le "$PREVIEW_END" ] && [ "$PODENV_END" -ge "$PREVIEW_BASE" ]; then
+    die "rehearsal podenv range $PODENV_BASE-$PODENV_END overlaps the rehearsal preview range $PREVIEW_BASE-$PREVIEW_END"
+fi
+if [ "$PODENV_BASE" -le "$LIVE_PREVIEW_END" ] && [ "$PODENV_END" -ge "$LIVE_PREVIEW_BASE" ]; then
+    die "rehearsal podenv range $PODENV_BASE-$PODENV_END overlaps the live preview range $LIVE_PREVIEW_BASE-$LIVE_PREVIEW_END"
+fi
+
 # Anything else on the host counts too — the collision that matters is with
 # whatever is listening now, not only with our own two configs. Checked after
 # the teardown below, so a previous rehearsal's own sockets do not trip it.
@@ -266,13 +302,13 @@ check_free_ports() {
     command -v ss >/dev/null 2>&1 || { echo "note: ss(8) not found — skipping the live-socket collision check"; return 0; }
     local listening; listening=" $(ss -ltnH 2>/dev/null | awk '{n=split($4,a,":"); print a[n]}' | sort -nu | tr '\n' ' ')"
     local p
-    for p in $TEST_PORTS $(seq "$PREVIEW_BASE" "$PREVIEW_END"); do
+    for p in $TEST_PORTS $(seq "$PREVIEW_BASE" "$PREVIEW_END") $(seq "$PODENV_BASE" "$PODENV_END"); do
         case "$listening" in *" $p "*) die "port $p is already bound on this host" ;; esac
     done
 }
 
 echo "rehearsal project : $TEST_PROJECT   (live: $LIVE_PROJECT)"
-echo "rehearsal ports   :$TEST_PORTS  preview $PREVIEW_BASE-$PREVIEW_END"
+echo "rehearsal ports   :$TEST_PORTS  preview $PREVIEW_BASE-$PREVIEW_END  podenv $PODENV_BASE-$PODENV_END"
 echo "scratch clone     : $CLONE"
 
 # ── previous rehearsal first, so a re-run is a clean run ─────────────────
@@ -373,6 +409,9 @@ set_env DEVENV_HTTP_PORT_BASE "$PREVIEW_BASE"
 set_env DEVENV_HTTP_PORT_COUNT "$PREVIEW_COUNT"
 set_env DEVENV_HTTP_PORT_RANGE_END "$PREVIEW_END"
 set_env DEVENV_HTTP_BIND "$HOST"
+set_env PODENV_PORT_BASE "$PODENV_BASE"
+set_env PODENV_PORT_COUNT "$PODENV_COUNT"
+set_env PODENV_PORT_RANGE_END "$PODENV_END"
 
 # INVARIANT 1 — one canonical Buzz host = one community, enforced by NIP-42/98
 # signature verification against the connecting host string. If the rehearsal
@@ -418,7 +457,7 @@ done
 unset LIVE_OPENAI_KEY
 
 grep -vE '^(OPENAI_API_KEY|.*_PASSWORD|.*_SECRET|.*_KEY)=' "$CLONE/.env" \
-    | grep -E '^(COMPOSE_PROJECT_NAME|IMAGE_PREFIX|BUZZ_RELAY_URL|PAPERCLIP_PUBLIC_URL|PAPERCLIP_ALLOWED_HOSTNAMES|DEVENV_HTTP[A-Z_]*|CLAUDE_CREDENTIALS_FILE|[A-Z_]*_PORT)=' \
+    | grep -E '^(COMPOSE_PROJECT_NAME|IMAGE_PREFIX|BUZZ_RELAY_URL|PAPERCLIP_PUBLIC_URL|PAPERCLIP_ALLOWED_HOSTNAMES|DEVENV_HTTP[A-Z_]*|PODENV_PORT[A-Z_]*|CLAUDE_CREDENTIALS_FILE|[A-Z_]*_PORT)=' \
     | sed 's/^/  /' || true
 
 if [ "$DRY_RUN" = 1 ]; then

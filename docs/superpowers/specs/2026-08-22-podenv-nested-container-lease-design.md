@@ -380,25 +380,54 @@ podenv provision legacy-erp --image postgres:9.6 \
 
 `devenv list` 尾巴加一段以 `to_regclass('podenv_lease') IS NOT NULL` 保護的查詢 ——
 podenv 沒裝就完全不影響 devenv, 裝了就有單一可觀測面。這是**對 `patches/paperclip/devenv/devenv`
-的一處修改**, 與上面 (b) 的保留名函式一起, 是本設計唯一要碰 devenv 的兩個地方。
+的一處修改**。連同 (b), 本設計碰 devenv 共三處: 新增 `devenv/shared.sh` (兩支 CLI 共用的
+真相 —— env merge、密碼推導、owner、保留變數名、provider image 家族)、`devenv` 改成 source
+它並刪掉自己那三份重複定義、以及這裡的 guarded 查詢。
 
 schema 由 podenv 自己的 seed 套用, 冪等, 且**開頭先檢查 control schema 是否存在**。這條直接
 抄 `devenv_require_control_schema` 的教訓: 當時 schema 不在, 原始訊息卻喊「no free valkey
 database id — run `devenv list` and release one」, 於是人去 release 無辜的租約。
 
-`podenv_usage` 顯示: key、image、netns 模式、published port、`--dedicated` 的理由、
-磁碟用量 (`podman system df` 的資料, 不是 postgres 的)、created_by、idle。
+`podenv_usage` 顯示: key、image、netns 模式、container_port、host_port、env_var、
+`--dedicated` 的理由、created_by、idle。**這個 view 故意沒有磁碟欄位**
+(final review F8-fold 修正這行過去的錯誤描述) —— 一個 lease 的磁碟用量活在 podman 的
+store, SQL 看不到。`podenv list`(CLI 指令, 不是這個 view) 才在查完 view 之後**額外**印一段
+`podman system df` 的輸出, 兩者是分開的資料來源。
 
 ## Restore
 
 entrypoint 起 `podman system service` 之後**背景**跑 restore —— 背景是必要的, 它要等的
 socket 正是即將 exec 的那個行程。這與 `opc-prototype-restore.sh` 是同一個形狀, 同一個理由。
 
-等 socket 可用後 `podman start` 所有帶 `opc.podenv.lease` label 的容器。
+等 socket 可用後, 對每個帶 `opc.podenv.lease` label 的容器**先 probe 該租約自己發布的
+port** —— 已經在正常回應的租約完全不去碰它, 不 stop、不 start。只有 probe 不到任何回應時
+才 disrupt, 而且不是 `-t 0`: `podman stop -t "$PODENV_STOP_GRACE"`(給一個可能只是卡住、
+還沒真的死的行程一點時間 flush) 再 `podman start`, 然後再 probe 一次確認活著, 才算
+restore 完成。(final review F5 修正: 這一段原本寫的是「先 `podman stop -t 0` 再
+`podman start`, 然後 probe」——那正是下面 §task-5 review F1 說的、已經在
+`opc-podenv-restore.sh` 與 `cmd_provision` 兩處修掉的 regression: 對一個從未停止回應的
+健在租約做無條件 `-t 0` 硬殺。這裡曾經描述的是被修掉之前的行為, 不是出貨的行為 —— 照抄
+這段寫新程式碼會把那個 regression 原樣重新引入。)
 
-與 prototype restore 有一個差別值得記: 那邊的存活判斷刻意**不信 DB** (重建後 row 還寫著
-running 但行程早就不在), 要在容器內 probe port。podenv 不需要 —— podman 對自己的容器狀態
-是權威的, 因為容器就是它的子行程, 它死了它們也死了。
+**這條原本寫的是相反的結論, 且已被獨立驗證量測推翻**: 舊版主張「podenv 不需要 probe ——
+podman 對自己的容器狀態是權威的, 因為容器就是它的子行程, 它死了它們也死了」。第二句
+(它死了它們也死了) 是對的, 但第一句 (podman 對自己狀態的記錄可信) 量測為假。實測
+(`docker compose restart podenv` 之後): `podman ps` 回報租約 `Up`、記錄的 pid 在 `/proc`
+裡已不存在、租約 port 上什麼都沒 listen、從 paperclip curl 回 `000`。`podman ps --sync`
+不會修正這個回報 (量測: 跑完仍然 `Up`)。對著這個狀態跑 `podman start <c>` 印出容器名、
+exit 0, 但容器仍是死的 —— 是三個候選補救裡**唯一靜默失敗**的一個, 而它正是這支腳本原本
+唯一的機制。`podman restart -t 0 <c>` 反而是唯一會**大聲**失敗的候選: `Error: container
+<id> conmon exited prematurely, exit code could not be retrieved: conmon process killed`。
+唯一測出來會動的順序是 `podman stop -t 0 <c>` 再 `podman start <c>` —— 會印同一句 conmon
+錯誤 (可忽略, 因為隨後的 `start` 仍會成功), 但容器真的活過來, curl 拿回 200。
+
+對這個落差的推測 (未證實, 標記為假說而非結論): `docker compose restart` 保留容器自己的
+可寫層, 而 podman 在 rootless runtime 用的 `/run/user/<uid>` 狀態就落在那個可寫層裡
+(不是獨立 mount —— `/proc/mounts` 量過, 底下沒有專屬的 tmpfs), 於是那份「以為還活著」的
+狀態在 restart 後續存下來, podman 因此誤信舊 instance 沒死；`--force-recreate` 會建全新
+可寫層, 那份狀態不在了, podman 才正確回報 `exited`, 這也是為什麼單純 `start` 在
+`--force-recreate` 後「看起來」有效 —— 但這支腳本不能假設自己被哪條路徑帶起來, 所以無論
+如何都不信任記錄的狀態: 一律先逼一次真正的狀態轉換, 再 probe 確認活著, 才算 restore 完成。
 
 **但 `--restart=always` 沒用**: podman 的 restart policy 需要 podman 活著才生效, 而每次開機
 是一個新的 service 行程。所以 label + 顯式 `start` 是機制, 不是保險。
@@ -415,6 +444,15 @@ running 但行程早就不在), 要在容器內 probe port。podenv 不需要 �
 3. **開機自我檢測 + 診斷檔。** entrypoint 跑 `podman info` 與一次不需要網路的
    `podman unshare true`, 失敗就印 WARNING **並把診斷寫進 socket volume 的一個檔**, 讓 CLI
    讀出來 —— 人看到的是一句話, 而不是一層巢狀的 podman 錯誤。**絕不擋 `up`。**
+   **這句話對「userns nesting 失敗」成立, 對「host 完全沒有 `/dev/net/tun`」不成立**
+   (final review F3,量測修正): 缺 device 這件事不會走到 entrypoint —— `docker run
+   --device /dev/net/tun` 在**容器建立階段**就失敗 (`error gathering device
+   information`), compose 甚至沒機會 exec 進 entrypoint 去跑那次自我檢測。後果是
+   `docker compose up`(以及跑在 `set -euo pipefail` 下的 `scripts/setup.sh`) 對這個
+   condition **直接非零退出**, 擋住整個 `up`。這不是可以用「印 WARNING、寫診斷檔」修的
+   優雅降級, 因為程式碼根本沒有機會執行到那一步; 這條也是 opc-podenv-entrypoint.sh 裡
+   `[ ! -c /dev/net/tun ]` 那個分支目前量到「經正常路徑不可達」的原因(見該檔案自己的
+   註解) —— 少了這個 device, 連進到能跑那段判斷的地方都到不了。
 4. **不提供做不到的旋鈕。** 沒有 `--memory`; 磁碟只有可觀測性。
 
 ## 可移植性 (別人的機器)
@@ -426,11 +464,13 @@ running 但行程早就不在), 要在容器內 probe port。podenv 不需要 �
 | unprivileged userns | `=1` | podman 完全不能動 |
 | cgroup v2 | 是 | podman 不能動 |
 | 原生 rootless overlay (kernel 5.11+) | 7.2 | 退回 vfs (慢且吃磁碟) 或需要 `/dev/fuse` |
-| `/dev/net/tun` | 有 | pasta 不可用, 只剩 `--netns host` |
+| `/dev/net/tun` | 有 | **不是優雅降級。** 量到 (final review F3): `docker run --device /dev/net/tun-不存在` 在容器**建立階段**就失敗 (`error gathering device information`), 不是進到 pasta 才發現。podenv service 整個起不來, `docker compose up` / `scripts/setup.sh` 非零退出。修法: 載入 `tun` kernel module, 或這台機器不要這個 service (從 compose 移除) |
 | 無 AppArmor | 是 | 需要額外 `apparmor=unconfined` |
 | 無 docker userns-remap | 是 | nested subuid 映射要重新設計 |
 
-處理方式照不變量 8 的立場: **開機自我檢測、印 WARNING、寫診斷檔、絕不擋 `up`。**
+處理方式照不變量 8 的立場: **開機自我檢測、印 WARNING、寫診斷檔、絕不擋 `up`** ——
+但這條**不適用**於缺 `/dev/net/tun`, 理由見上一節「錯誤處理」第 3 點的修正說明: 那個
+condition 在 compose 建立容器時就失敗, 從未到達會印 WARNING 的那段程式碼。
 
 ## 測試
 
@@ -450,7 +490,9 @@ running 但行程早就不在), 要在容器內 probe port。podenv 不需要 �
 - 從 paperclip 跑得動 `podman info` (uid 對齊的 socket 存取真的成立)
 - provision 一個真的容器, 從 paperclip 用 docker DNS 連上
 - 重啟 podenv service 後 lease 容器自己回來
-- `release` 真的清乾淨 (容器 + volume + 登記 row)
+- `release` 真的清乾淨 (容器 + 登記 row —— gate 檢查涵蓋這兩項; `-v` 確實會叫 podman 順手
+  清掉容器的匿名 volume, 但 gate 本身**沒有**單獨斷言 volume 真的被移除, final review
+  F8-fold 修正這行過去誇大的描述)
 - **(b) 保留變數名的拒絕**真的拒絕
 - **(c) 路由 gate 的拒絕**真的拒絕 —— 這條可以用 `redis:5` 免費測到 (redis 是 devenv 提供
   的家族, 所以必須被拒並指向 `devenv provision --with valkey`)
