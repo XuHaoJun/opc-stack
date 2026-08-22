@@ -181,6 +181,21 @@ class Handler(BaseHTTPRequestHandler):
                     if replay is not None:
                         self._send_json(200, replay)
                         return
+                if payload.get("allowDuplicate") is False:
+                    title = " ".join(str(payload.get("title", "")).split()).lower()
+                    replay = next(
+                        (
+                            existing
+                            for existing in STATE.get("issues", [])
+                            if isinstance(existing, dict)
+                            and (existing.get("status") or "") not in {"done", "cancelled"}
+                            and " ".join(str(existing.get("title", "")).split()).lower() == title
+                        ),
+                        None,
+                    )
+                    if replay is not None:
+                        self._send_json(200, replay)
+                        return
                 issue = dict(payload)
                 settings = issue.get("executionWorkspaceSettings")
                 if isinstance(settings, dict) and settings.get("mode") == "reuse_existing":

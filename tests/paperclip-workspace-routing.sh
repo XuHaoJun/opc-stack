@@ -674,6 +674,70 @@ assert_eq "idempotent concurrent first ticket count" "1" "$(jq '.issues | length
 assert_eq "idempotent concurrent helper IDs match" \
   "$(jq -r '.id' "$TMPDIR/prototype-concurrent-a.json")" \
   "$(jq -r '.id' "$TMPDIR/prototype-concurrent-b.json")"
+stop_fixture
+cat >"$STATE" <<'JSON'
+{
+  "experimental": {"enableIsolatedWorkspaces": false},
+  "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+  "agents": [{"id": "00000000-0000-4000-8000-000000000010", "name": "Prototyper", "role": "prototyper", "status": "idle"}],
+  "projects": [],
+  "issues": [{
+    "id": "00000000-0000-4000-8000-00000000dead",
+    "identifier": "FIX-900",
+    "title": "Old terminal",
+    "description": "Prototype: terminal-bot\nLane: prototype\n",
+    "status": "done",
+    "idempotencyKey": "opc-prototype-first:00000000-0000-4000-8000-000000000001:terminal-bot"
+  }]
+}
+JSON
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+printf 'Prototype: terminal-bot\nLane: prototype\n' |
+  "$CLI" prototype-ticket create --name terminal-bot --title 'Retry epoch' >"$TMPDIR/prototype-terminal-retry.json"
+assert_not_contains "terminal retry does not replay old issue" "00000000-0000-4000-8000-00000000dead" \
+  "$(jq -r '.id' "$TMPDIR/prototype-terminal-retry.json")"
+assert_eq "terminal retry creates new issue" "2" "$(jq '.issues | length' "$STATE")"
+assert_eq "terminal retry is non-terminal" "todo" "$(jq -r '.issues[-1].status' "$STATE")"
+assert_eq "terminal retry uses stable title" "Prototype: terminal-bot" "$(jq -r '.issues[-1].title' "$STATE")"
+assert_eq "terminal retry omits old idempotency key" "null" "$(jq -r '.issues[-1].idempotencyKey // null' "$STATE")"
+
+stop_fixture
+cat >"$STATE" <<'JSON'
+{
+  "experimental": {"enableIsolatedWorkspaces": false},
+  "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+  "agents": [{"id": "00000000-0000-4000-8000-000000000010", "name": "Prototyper", "role": "prototyper", "status": "idle"}],
+  "projects": [],
+  "issues": [{
+    "id": "00000000-0000-4000-8000-00000000dead",
+    "identifier": "FIX-900",
+    "title": "Old terminal",
+    "description": "Prototype: terminal-race\nLane: prototype\n",
+    "status": "cancelled",
+    "idempotencyKey": "opc-prototype-first:00000000-0000-4000-8000-000000000001:terminal-race"
+  }]
+}
+JSON
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
+(printf 'Prototype: terminal-race\nLane: prototype\n' |
+  "$CLI" prototype-ticket create --name terminal-race --title 'Race A' >"$TMPDIR/prototype-terminal-race-a.json") &
+terminal_race_pid_a=$!
+(printf 'Prototype: terminal-race\nLane: prototype\n' |
+  "$CLI" prototype-ticket create --name terminal-race --title 'Race B' >"$TMPDIR/prototype-terminal-race-b.json") &
+terminal_race_pid_b=$!
+terminal_race_status_a=0; terminal_race_status_b=0
+wait "$terminal_race_pid_a" || terminal_race_status_a=$?
+wait "$terminal_race_pid_b" || terminal_race_status_b=$?
+assert_eq "concurrent terminal retry A succeeds" "0" "$terminal_race_status_a"
+assert_eq "concurrent terminal retry B succeeds" "0" "$terminal_race_status_b"
+assert_eq "concurrent terminal retry count" "2" "$(jq '.issues | length' "$STATE")"
+assert_eq "concurrent terminal retry IDs match" \
+  "$(jq -r '.id' "$TMPDIR/prototype-terminal-race-a.json")" \
+  "$(jq -r '.id' "$TMPDIR/prototype-terminal-race-b.json")"
 assert_contains "prototype ambiguity lists second project" "00000000-0000-4000-8000-000000000124" "$(cat "$PROTOTYPE_AMBIGUOUS_ERR")"
 
 echo "result: $PASS pass, $FAIL fail"

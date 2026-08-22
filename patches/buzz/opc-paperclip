@@ -684,10 +684,13 @@ prototype_project_matches() {
     list_projects | jq -c --arg n "$_name" '[.[] | select(.name == $n)]'
 }
 
-list_prototype_issues() {
+list_prototype_marker_issues() {
     _company="$1"
+    _marker="$2"
     _offset=0
-    _all='[]'
+    _matches_file="$(mktemp "${TMPDIR:-/tmp}/opc-paperclip-prototype-matches.XXXXXX")" ||
+        die "failed to allocate prototype issue buffer" 4
+    : >"$_matches_file"
     while :; do
         _page="$(api_request GET "/companies/$_company/issues?limit=500&offset=$_offset")" ||
             die "failed to list Paperclip issues" 4
@@ -695,11 +698,15 @@ list_prototype_issues() {
             die "Paperclip issues response is not an array" 4
         [ "$_page_count" -ge 0 ] ||
             die "Paperclip issues response is not an array" 4
-        _all="$(jq -nc --argjson all "$_all" --argjson page "$_page" '$all + $page')"
+        printf '%s' "$_page" | jq -c --arg marker "$_marker" \
+            '.[] | select((.description // "" | split("\n")[0]) == $marker)' \
+            >>"$_matches_file" ||
+            die "Paperclip issues response is not an array" 4
         [ "$_page_count" -lt 500 ] && break
         _offset=$((_offset + _page_count))
     done
-    printf '%s' "$_all"
+    jq -s . "$_matches_file"
+    rm -f "$_matches_file"
 }
 
 prototype_primary_workspace_id() {
@@ -753,12 +760,15 @@ prototype_ticket_create() {
     _project_count="$(printf '%s' "$_matches" | jq -r 'length')"
     case "$_project_count" in
         0)
-            _issues="$(list_prototype_issues "$_company")"
-            _active="$(printf '%s' "$_issues" | jq -c --arg marker "Prototype: $_name" '
-                [.[] | select((.status // "") != "done" and (.status // "") != "cancelled")
-                  | select((.description // "" | split("\n")[0]) == $marker)]
-            ' 2>/dev/null)" || die "Paperclip issues response is not an array" 4
+            _matching="$(list_prototype_marker_issues "$_company" "Prototype: $_name")"
+            _active="$(printf '%s' "$_matching" | jq -c '
+                [.[] | select((.status // "") != "done" and (.status // "") != "cancelled")]
+            ')"
+            _terminal="$(printf '%s' "$_matching" | jq -c '
+                [.[] | select((.status // "") == "done" or (.status // "") == "cancelled")]
+            ')"
             _active_count="$(printf '%s' "$_active" | jq -r 'length')"
+            _terminal_count="$(printf '%s' "$_terminal" | jq -r 'length')"
             case "$_active_count" in
                 0) ;;
                 1)
@@ -775,6 +785,13 @@ prototype_ticket_create() {
             esac
             _project_id=""
             _workspace_id=""
+            _idempotency_key=""
+            _terminal_epoch=0
+            if [ "$_terminal_count" -eq 0 ]; then
+                _idempotency_key="opc-prototype-first:$_company:$_name"
+            else
+                _terminal_epoch=1
+            fi
             ;;
         1)
             _project="$(printf '%s' "$_matches" | jq -c '.[0]')"
@@ -783,6 +800,8 @@ prototype_ticket_create() {
             _workspace_id="$(prototype_primary_workspace_id "$_project")"
             [ -n "$_workspace_id" ] ||
                 die "prototype project has no primary workspace" 3
+            _idempotency_key=""
+            _terminal_epoch=0
             ;;
         *) _details="$(printf '%s' "$_matches" | jq -r '.[] | "\(.id // "<no-id>") \(.name // "<unnamed>")"' \
                | tr '\n' ';' | sed 's/;$//')"
@@ -795,11 +814,13 @@ prototype_ticket_create() {
     _payload="$(jq -nc --rawfile description "$_description_file" \
         --arg title "$_title" --arg priority "$_priority" --arg agent "$_agent_id" \
         --arg project "$_project_id" --arg workspace "$_workspace_id" \
-        --arg idempotency "opc-prototype-first:$_company:$_name" '
-        {title:$title,description:$description,assigneeAgentId:$agent}
+        --arg idempotency "$_idempotency_key" --arg terminal_title "Prototype: $_name" \
+        --argjson terminal_epoch "$_terminal_epoch" '
+        {title:(if $terminal_epoch == 1 then $terminal_title else $title end),
+         description:$description,assigneeAgentId:$agent,allowDuplicate:false}
         | if $priority == "" then . else .priority=$priority end
-        | if $project == "" then .idempotencyKey=$idempotency
-          else .projectId=$project | .projectWorkspaceId=$workspace end
+        | if $project == "" then . else .projectId=$project | .projectWorkspaceId=$workspace end
+        | if $idempotency == "" then . else .idempotencyKey=$idempotency end
     ')"
     _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
         die "failed to create prototype ticket" 4
