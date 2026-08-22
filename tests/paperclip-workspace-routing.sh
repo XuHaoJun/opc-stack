@@ -127,5 +127,42 @@ assert_contains "multiple-primary error is actionable" "multiple primary workspa
 assert_not_contains "multiple-primary stderr omits bearer token" "$TOKEN" "$(cat "$MULTI_ERR")"
 assert_not_contains "multiple-primary fixture log omits bearer token" "$TOKEN" "$(cat "$LOG")"
 
+stop_fixture
+cat >"$STATE" <<'JSON'
+{
+  "experimental": {"enableIsolatedWorkspaces": false},
+  "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
+  "agents": [],
+  "projects": [
+    {
+      "id": "project-a",
+      "name": "Alpha",
+      "workspaces": [
+        {"id": "workspace-a", "repoUrl": "https://github.com/owner/repo", "isPrimary": true}
+      ]
+    },
+    {
+      "id": "project-b",
+      "name": "Beta",
+      "workspaces": [
+        {"id": "workspace-b", "repoUrl": "ssh://git@github.com/owner/repo.git", "isPrimary": true}
+      ]
+    }
+  ],
+  "issues": []
+}
+JSON
+start_fixture
+DUPLICATE_ERR="$TMPDIR/duplicate.err"
+if $CLI project workspace show --repo Owner/Repo >/dev/null 2>"$DUPLICATE_ERR"; then
+  bad "duplicate matching projects fail closed"
+else
+  ok "duplicate matching projects fail closed"
+fi
+assert_contains "duplicate error includes first project ID/name" "project-a Alpha" "$(cat "$DUPLICATE_ERR")"
+assert_contains "duplicate error includes second project ID/name" "project-b Beta" "$(cat "$DUPLICATE_ERR")"
+assert_not_contains "duplicate stderr omits bearer token" "$TOKEN" "$(cat "$DUPLICATE_ERR")"
+assert_not_contains "duplicate fixture log omits bearer token" "$TOKEN" "$(cat "$LOG")"
+
 echo "result: $PASS pass, $FAIL fail"
 [ "$FAIL" -eq 0 ]

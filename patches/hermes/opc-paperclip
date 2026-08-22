@@ -139,7 +139,9 @@ $_matches
 EOF
     _count="$(printf '%s' "$_found" | sed '/^$/d' | wc -l)"
     if [ "$_count" -gt 1 ]; then
-        _details="$(printf '%s' "$_found" | sed '/^$/d' | jq -r '"\(.id // \"<no-id>\") \(.name // \"<unnamed>\")"' | tr '\n' ';' | sed 's/;$//')"
+        _details="$(printf '%s' "$_found" | sed '/^$/d' | jq -r '"\(.id // "<no-id>") \(.name // "<unnamed>")"')" ||
+            die "failed to format duplicate Paperclip projects" 4
+        _details="$(printf '%s\n' "$_details" | tr '\n' ';' | sed 's/;$//')"
         die "multiple Paperclip projects match $_identity: $_details" 3
     fi
     if [ "$_count" -eq 1 ]; then
