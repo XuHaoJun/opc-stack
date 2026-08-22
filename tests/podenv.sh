@@ -469,34 +469,57 @@ docker compose exec -T -u node paperclip sh -c \
 echo "── restore ──"
 
 #
-# NOTE ON THE MECHANISM BELOW (measured on this host, not a hunch): a plain
-# `docker compose restart podenv` was tried first, verbatim per the design
-# brief, and it did NOT reproduce a RED condition — a lease provisioned,
-# then survived a `restart` with its ORIGINAL uptime intact (confirmed via
-# `podman ps -a` reporting continuous "Up" time spanning the restart, with no
-# gap). Rootless podman's conmon-detach model is *designed* to survive the
-# podman service process restarting; `docker compose restart` does not
-# reliably tear down the podenv container's own PID namespace on this
-# docker/kernel combination. `docker compose up -d --force-recreate podenv`
-# does: it allocates a genuinely NEW container ID (verified: the container's
-# `.Id` differs, and the probe container is then reported "exited", not
-# "running"). Recreate is also the scenario `AGENTS.md` and the design
-# brief actually care about most (`docker compose up -d --build` after a
-# patches/ change), and any fix for it necessarily also fires on the plain
-# restart path, since the SAME entrypoint runs on both. So this check drives
-# the failure with --force-recreate rather than restart.
-expect "a lease survives a podenv restart" "running" \
-    sh -c 'docker compose exec -T -u node paperclip podenv provision restore-probe \
-             --image docker.io/traefik/whoami --port 80 --as RESTORE_ADDR \
-             --env-file /tmp/podenv-restore.env >/dev/null 2>&1
-           docker compose up -d --force-recreate podenv >/dev/null 2>&1
-           for i in $(seq 1 30); do
-             s=$(docker compose exec -T -u 1000 -e HOME=/home/podman \
-                   -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
-                   podman ps --filter name=podenv_restore_probe --format "{{.State}}" 2>/dev/null | tr -d "\r")
-             [ "$s" = "running" ] && { echo running; break; }
-             sleep 2
-           done'
+# CORRECTED NOTE (previous claim measured false — see task-5-report.md): an
+# earlier version of this gate asserted that `docker compose restart podenv`
+# "did not reproduce a RED condition" because `podman ps -a` showed
+# uninterrupted uptime spanning the restart. That was reading podman's
+# RECORDED state, not reality — the exact class of bug this whole check
+# exists to catch. Measured on this host: `restart` DOES kill the lease's
+# real processes (the outer container's PID namespace is torn down), but
+# because `restart` preserves the podenv container's writable layer,
+# `/run/user/1000` (podman's rootless runtime state, created there by the
+# entrypoint — not a tmpfs mount, confirmed via `/proc/mounts`) survives, and
+# podman goes on reporting the lease "Up" with a live-looking uptime while its
+# recorded pid no longer exists in `/proc` and nothing answers on its port.
+# `--force-recreate` builds a fresh writable layer, so that stale state is
+# absent, podman correctly reports "exited", and a plain `podman start`
+# genuinely revives it — which is why the OLD version of this check, driven
+# only through `--force-recreate`, stayed green while `restart` silently
+# rotted leases in production. So this gate now drives BOTH paths, and
+# neither trusts `podman ps`/`inspect` state: only an HTTP request through
+# the lease's own published port counts as "genuinely serving".
+podenv_restore_probe() {
+    label="$1"; disrupt="$2"
+    docker compose exec -T -u node paperclip sh -c \
+        'podenv provision restore-probe --image docker.io/traefik/whoami --port 80 \
+            --as RESTORE_ADDR --env-file /tmp/podenv-restore.env >/dev/null 2>&1'
+    addr="$(docker compose exec -T -u node paperclip sh -c \
+        'grep "^RESTORE_ADDR=" /tmp/podenv-restore.env | cut -d= -f2-' 2>/dev/null | tr -d '\r')"
+    if [ -z "$addr" ]; then
+        fail "$label (provision produced no RESTORE_ADDR — nothing to probe)"
+        return
+    fi
+    eval "$disrupt"
+    code=""
+    for i in $(seq 1 45); do
+        code="$(docker compose exec -T -u node paperclip sh -c \
+            "curl -s -o /dev/null -w '%{http_code}' --max-time 3 'http://$addr/'" 2>/dev/null | tr -d '\r')"
+        [ "$code" = "200" ] && break
+        sleep 2
+    done
+    if [ "$code" = "200" ]; then
+        pass "$label"
+    else
+        fail "$label (want HTTP 200 through $addr, got '$code')"
+    fi
+}
+
+podenv_restore_probe "a lease genuinely serves traffic after 'docker compose restart podenv'" \
+    'docker compose restart podenv >/dev/null 2>&1'
+
+podenv_restore_probe "a lease genuinely serves traffic after '--force-recreate podenv'" \
+    'docker compose up -d --force-recreate podenv >/dev/null 2>&1'
+
 docker compose exec -T -u node paperclip sh -c \
     'podenv release restore-probe >/dev/null 2>&1; rm -f /tmp/podenv-restore.env' >/dev/null 2>&1
 

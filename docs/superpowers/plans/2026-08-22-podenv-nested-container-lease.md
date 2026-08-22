@@ -1504,6 +1504,13 @@ git commit -m "feat: podenv 與 devenv 的分工靠機制 — 保留變數名與
 
 ### Task 5: 開機把租約叫回來
 
+> **事後更正 (獨立驗證量測, 見 `.superpowers/sdd/task-5-report.md`)**: 下面 Step 3 的
+> script 與其註解, 以及它主張的「liveness 不需要 probe」, 已量測為假, 且是這個 task 曾經
+> 實際出過的 production 缺陷 (租約在 `docker compose restart podenv` 後 `podman ps`
+> 回報 `Up`、curl 回 `000`)。真正 shipped 的 `patches/podenv/opc-podenv-restore.sh`
+> 是先 `podman stop -t 0` 再 `start`, 然後 probe 該租約自己的 port 才算 restore 完成 —
+> 下面的程式碼片段保留原樣是歷史記錄, 不是目前的實作, 錯誤的斷言就地更正如下。
+
 **Files:**
 - Create: `patches/podenv/opc-podenv-restore.sh`
 - Modify: `patches/podenv/Dockerfile`
@@ -1562,10 +1569,20 @@ Expected: `a lease survives a podenv restart` FAIL (got '')。
 # needs podman to be alive to act on it, and every boot is a NEW service
 # process. The label plus this loop is the mechanism, not a safety net.
 #
-# Unlike prototype-restore, liveness needs no probing. Those preview servers
-# were children of a server whose database still claimed `running` long after
-# the process died. Here the containers ARE this service's descendants: if the
-# service is up and podman lists them, they exist.
+# CORRECTED (measured false — this line originally read "Unlike
+# prototype-restore, liveness needs no probing... if the service is up and
+# podman lists them, they exist"): measured on `docker compose restart
+# podenv`, `podman ps` goes on reporting a lease "Up" with a live-looking
+# uptime after its real processes died with the torn-down PID namespace, the
+# recorded pid is gone from /proc, and nothing answers on the port. `podman
+# ps --sync` does not correct this. A plain `podman start` against that state
+# returns success (prints the name, exit 0) without reviving anything — the
+# one candidate of the three measured here that fails SILENTLY, which is
+# exactly what made this the worst possible mechanism to have shipped with
+# unconditionally. So: never trust recorded state, force a real transition
+# (`podman stop -t 0` then `start` — not `podman restart`, which errors
+# outright on this state), and probe the lease's own port before calling it
+# restored. See task-5-report.md for the full measurement.
 #
 # Never fatal: this is recovery. Every lease is also restartable by hand with
 # `podman start <slug>`.

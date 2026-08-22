@@ -396,11 +396,28 @@ database id — run `devenv list` and release one」, 於是人去 release 無�
 entrypoint 起 `podman system service` 之後**背景**跑 restore —— 背景是必要的, 它要等的
 socket 正是即將 exec 的那個行程。這與 `opc-prototype-restore.sh` 是同一個形狀, 同一個理由。
 
-等 socket 可用後 `podman start` 所有帶 `opc.podenv.lease` label 的容器。
+等 socket 可用後, 對每個帶 `opc.podenv.lease` label 的容器先 `podman stop -t 0` 再 `podman
+start`, 然後 probe 該租約自己發布的 port 才算數。
 
-與 prototype restore 有一個差別值得記: 那邊的存活判斷刻意**不信 DB** (重建後 row 還寫著
-running 但行程早就不在), 要在容器內 probe port。podenv 不需要 —— podman 對自己的容器狀態
-是權威的, 因為容器就是它的子行程, 它死了它們也死了。
+**這條原本寫的是相反的結論, 且已被獨立驗證量測推翻**: 舊版主張「podenv 不需要 probe ——
+podman 對自己的容器狀態是權威的, 因為容器就是它的子行程, 它死了它們也死了」。第二句
+(它死了它們也死了) 是對的, 但第一句 (podman 對自己狀態的記錄可信) 量測為假。實測
+(`docker compose restart podenv` 之後): `podman ps` 回報租約 `Up`、記錄的 pid 在 `/proc`
+裡已不存在、租約 port 上什麼都沒 listen、從 paperclip curl 回 `000`。`podman ps --sync`
+不會修正這個回報 (量測: 跑完仍然 `Up`)。對著這個狀態跑 `podman start <c>` 印出容器名、
+exit 0, 但容器仍是死的 —— 是三個候選補救裡**唯一靜默失敗**的一個, 而它正是這支腳本原本
+唯一的機制。`podman restart -t 0 <c>` 反而是唯一會**大聲**失敗的候選: `Error: container
+<id> conmon exited prematurely, exit code could not be retrieved: conmon process killed`。
+唯一測出來會動的順序是 `podman stop -t 0 <c>` 再 `podman start <c>` —— 會印同一句 conmon
+錯誤 (可忽略, 因為隨後的 `start` 仍會成功), 但容器真的活過來, curl 拿回 200。
+
+對這個落差的推測 (未證實, 標記為假說而非結論): `docker compose restart` 保留容器自己的
+可寫層, 而 podman 在 rootless runtime 用的 `/run/user/<uid>` 狀態就落在那個可寫層裡
+(不是獨立 mount —— `/proc/mounts` 量過, 底下沒有專屬的 tmpfs), 於是那份「以為還活著」的
+狀態在 restart 後續存下來, podman 因此誤信舊 instance 沒死；`--force-recreate` 會建全新
+可寫層, 那份狀態不在了, podman 才正確回報 `exited`, 這也是為什麼單純 `start` 在
+`--force-recreate` 後「看起來」有效 —— 但這支腳本不能假設自己被哪條路徑帶起來, 所以無論
+如何都不信任記錄的狀態: 一律先逼一次真正的狀態轉換, 再 probe 確認活著, 才算 restore 完成。
 
 **但 `--restart=always` 沒用**: podman 的 restart policy 需要 podman 活著才生效, 而每次開機
 是一個新的 service 行程。所以 label + 顯式 `start` 是機制, 不是保險。
