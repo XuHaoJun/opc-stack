@@ -36,16 +36,24 @@ FULLSTACK_PROMPT="/opt/opc-agent-prompts/fullstack-engineer.md"
 PROTOTYPER_PROMPT="/opt/opc-agent-prompts/prototyper.md"
 KEY_NAME="${PAPERCLIP_KEY_NAME:-frontdoor}"
 FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT=4
+FULLSTACK_MAX_CONCURRENT_RUNS_UPSTREAM_DEFAULT=20
 
 opc_managed_concurrency_action() { # current marker default
     _omca_current="$1"
     _omca_marker="$2"
     _omca_default="$3"
     if [ -z "$_omca_marker" ]; then
-        printf '%s\n' apply
-    elif [ "$_omca_current" = "$_omca_default" ] &&
-         [ "$_omca_marker" = "$_omca_default" ]; then
-        printf '%s\n' keep
+        case "$_omca_current" in
+            "$FULLSTACK_MAX_CONCURRENT_RUNS_UPSTREAM_DEFAULT"|\
+            "$_omca_default") printf '%s\n' apply ;;
+            *) printf '%s\n' preserve ;;
+        esac
+    elif [ "$_omca_current" = "$_omca_marker" ]; then
+        if [ "$_omca_marker" = "$_omca_default" ]; then
+            printf '%s\n' keep
+        else
+            printf '%s\n' apply
+        fi
     else
         printf '%s\n' preserve
     fi

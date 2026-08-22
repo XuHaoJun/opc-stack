@@ -27,7 +27,7 @@ done
 cmp -s patches/buzz/opc-paperclip patches/hermes/opc-paperclip \
   && ok "CLI copies are identical" || bad "CLI copies are identical"
 
-for decision_case in "20||4|apply" "4|4|4|keep" "6|4|4|preserve" "4|3|4|preserve"; do
+for decision_case in "20||4|apply" "6||4|preserve" "4|4|4|keep" "4|4|5|apply" "6|4|4|preserve" "4|3|4|preserve"; do
   IFS='|' read -r current marker default expected <<<"$decision_case"
   actual="$(
     OPC_PAPERCLIP_BOOTSTRAP_LIB_ONLY=1 sh -c \
@@ -145,9 +145,20 @@ assert_eq "agent PATCH preserves metadata sibling" "yes" \
     "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
     | jq -r '.[0].metadata.fixtureKeep')"
 
+$CLI agent concurrency set --role engineer --max 6 >/dev/null
+curl -fsS -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  "$PAPERCLIP_API_URL/api/agents/00000000-0000-4000-8000-000000000010" \
+  -d '{"metadata":{"opcManagedDefaults":{"fullstackMaxConcurrentRuns":3},"fixtureKeep":"yes"}}' >/dev/null
 $CLI agent concurrency reset --role engineer >/dev/null
 assert_eq "concurrency reset" "4" \
   "$($CLI agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
+assert_eq "reset is marked managed_default" "managed_default" \
+  "$($CLI agent concurrency show --role engineer | jq -r .source)"
+assert_eq "reset updates managed marker" "4" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].metadata.opcManagedDefaults.fullstackMaxConcurrentRuns')"
 for invalid_max in 0 51; do
   before="$(cat "$STATE")"
   if $CLI agent concurrency set --role engineer --max "$invalid_max" >/dev/null 2>&1; then

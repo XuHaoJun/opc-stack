@@ -225,25 +225,48 @@ cmd_agent_concurrency_show() {
 cmd_agent_concurrency_write() {
     _role="$1"
     _max="$2"
+    _reset_marker="${3-}"
     _agent="$(agent_by_role "$_role")"
     _id="$(printf '%s' "$_agent" | jq -r '.id // empty')"
     [ -n "$_id" ] || die "Paperclip agent has no id" 4
-    _payload="$(printf '%s' "$_agent" | jq --arg value "$_max" '
+    _new_runtime="$(printf '%s' "$_agent" | jq --arg value "$_max" '
         (.runtimeConfig // {}) as $r
-        | (.metadata // {}) as $m
-        | {runtimeConfig: ($r * {heartbeat:(($r.heartbeat // {})
-              * {maxConcurrentRuns:($value | tonumber)})}),
-           metadata: $m}
+        | $r * {heartbeat:(($r.heartbeat // {})
+              * {maxConcurrentRuns:($value | tonumber)})}
     ')"
+    if [ "$_reset_marker" = reset ]; then
+        _new_metadata="$(printf '%s' "$_agent" | jq --arg value "$_max" '
+            (.metadata // {}) as $m
+            | $m * {opcManagedDefaults:(($m.opcManagedDefaults // {})
+                  * {fullstackMaxConcurrentRuns:($value | tonumber)})}
+        ')"
+    else
+        _new_metadata="$(printf '%s' "$_agent" | jq '.metadata // {}')"
+    fi
+    _payload="$(jq -nc --argjson runtime "$_new_runtime" \
+        --argjson metadata "$_new_metadata" \
+        '{runtimeConfig:$runtime, metadata:$metadata}')"
     _response="$(api_request PATCH "/agents/$_id" "$_payload")" ||
         die "failed to update Paperclip agent concurrency" 4
     printf '%s' "$_response" | jq -e --arg max "$_max" \
         '.runtimeConfig.heartbeat.maxConcurrentRuns == ($max | tonumber)' >/dev/null 2>&1 ||
         die "Paperclip agent concurrency update was not verified" 4
+    if [ "$_reset_marker" = reset ]; then
+        printf '%s' "$_response" | jq -e --arg max "$_max" \
+            '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns == ($max | tonumber)' \
+            >/dev/null 2>&1 ||
+            die "Paperclip managed concurrency marker update was not verified" 4
+    fi
     _live="$(agent_by_role "$_role")"
     printf '%s' "$_live" | jq -e --arg max "$_max" \
         '.runtimeConfig.heartbeat.maxConcurrentRuns == ($max | tonumber)' >/dev/null 2>&1 ||
         die "Paperclip agent concurrency did not persist" 4
+    if [ "$_reset_marker" = reset ]; then
+        printf '%s' "$_live" | jq -e --arg max "$_max" \
+            '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns == ($max | tonumber)' \
+            >/dev/null 2>&1 ||
+            die "Paperclip managed concurrency marker did not persist" 4
+    fi
     concurrency_show_json "$_live"
 }
 
@@ -256,7 +279,7 @@ cmd_agent_concurrency_reset() {
         esac
     done
     [ -n "$_role" ] || die "--role is required" 2
-    cmd_agent_concurrency_write "$_role" "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT"
+    cmd_agent_concurrency_write "$_role" "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" reset
 }
 
 cmd_agent_concurrency_set() {
