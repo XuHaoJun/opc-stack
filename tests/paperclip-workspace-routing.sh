@@ -32,9 +32,9 @@ LIVE_PROJECT_ISSUE_IDS=""
 LIVE_PROTO_NAMES=""
 LIVE_TEST_AGENT_IDS=""
 LIVE_ADAPTER_SCRIPT=""
+LIVE_MARKER=""
+LIVE_CREATED_ISSUE_ID=""
 LIVE_RELEASE=""
-LIVE_CLEANUP_STATUS=0
-
 live_api() {
   local method="$1" path="$2" body="${3-}"
   if [ "$method" = GET ] || [ "$method" = DELETE ]; then
@@ -90,13 +90,16 @@ wake_issue() {
     { bad "wakeup issue $issue (HTTP $LIVE_RESPONSE_STATUS)"; return 1; }
 }
 create_issue() {
-  local payload="$1" id title
+  local payload="$1" id title marker
   live_mutation POST "/companies/$LIVE_COMPANY_ID/issues" "$payload" || return 1
   id="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.id // empty')"
   if [ -z "$id" ]; then
     title="$(printf '%s' "$payload" | jq -r '.title // empty')"
+    marker="$(printf '%s' "$payload" | jq -r '.description // empty')"
     id="$(live_api GET "/companies/$LIVE_COMPANY_ID/issues?limit=1000" 2>/dev/null \
-      | jq -r --arg t "$title" '.[] | select(.title == $t) | .id' | head -n 1)"
+      | jq -r --arg t "$title" --arg m "$marker" --arg p "$LIVE_PROJECT_ID" \
+        '.[] | select(.title == $t and (.description // "") == $m and (($p == "") or .projectId == $p)) | .id' \
+      | head -n 1)"
     [ -n "$id" ] && LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $id"
     return 1
   fi
@@ -160,33 +163,52 @@ live_restore() {
 }
 
 live_cleanup() {
-  local issue name agent cleanup_status=0 gone live_runs
-  if [ -n "${LIVE_ADAPTER_SCRIPT:-}" ] && ! docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"; then
-    bad "release process probe holders"
-    cleanup_status=1
-  fi
+  local issue name agent cleanup_status=0 gone live_runs drain_ok=1 holder_present=0
   if [ -n "${LIVE_ADAPTER_SCRIPT:-}" ]; then
-    for _ in $(seq 1 30); do
-      [ -z "$LIVE_COMPANY_ID" ] && break
-      live_runs="$(live_api GET "/companies/$LIVE_COMPANY_ID/live-runs?minCount=0&limit=1000" 2>/dev/null || printf '[]')"
-      if ! printf '%s' "$live_runs" | jq -e --arg ids "$LIVE_TEST_AGENT_IDS" \
-        'any(.[]? as $run; ($run.status == "queued" or $run.status == "running")
-          and (($ids | split(" ")) | index($run.agentId)) != null)' >/dev/null 2>&1; then
-        break
+    if ! docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"; then
+      bad "release process probe holders"
+      cleanup_status=1
+      drain_ok=0
+    else
+      for _ in $(seq 1 30); do
+        if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/live-runs?minCount=0&limit=1000"; then
+          bad "inspect process holder runs during cleanup (HTTP $LIVE_RESPONSE_STATUS)"
+          cleanup_status=1
+          drain_ok=0
+          break
+        fi
+        live_runs="$LIVE_RESPONSE_BODY"
+        if printf '%s' "$live_runs" | jq -e --arg ids "$LIVE_TEST_AGENT_IDS" \
+          'any(.[]? as $run; ($run.status == "queued" or $run.status == "running")
+            and (($ids | split(" ")) | index($run.agentId)) != null)' >/dev/null 2>&1; then
+          holder_present=1
+          sleep 1
+        else
+          holder_present=0
+          break
+        fi
+      done
+      if [ "$holder_present" -eq 1 ]; then
+        bad "process holder runs drained before cleanup"
+        cleanup_status=1
+        drain_ok=0
       fi
-      sleep 1
-    done
+    fi
   fi
   live_restore || cleanup_status=1
-  for agent in $LIVE_TEST_AGENT_IDS; do
-    delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
-  done
-  for issue in $LIVE_PROJECT_ISSUE_IDS; do
-    delete_and_verify "test issue $issue" "/issues/$issue" "/issues/$issue" absent || cleanup_status=1
-  done
-  if [ -n "$LIVE_PROJECT_ID" ]; then
-    delete_and_verify "test engineering project $LIVE_PROJECT_ID" \
-      "/projects/$LIVE_PROJECT_ID" "/projects/$LIVE_PROJECT_ID" absent || cleanup_status=1
+  if [ "$drain_ok" -eq 1 ]; then
+    for agent in $LIVE_TEST_AGENT_IDS; do
+      delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
+    done
+    for issue in $LIVE_PROJECT_ISSUE_IDS; do
+      delete_and_verify "test issue $issue" "/issues/$issue" "/issues/$issue" absent || cleanup_status=1
+    done
+    if [ -n "$LIVE_PROJECT_ID" ]; then
+      delete_and_verify "test engineering project $LIVE_PROJECT_ID" \
+        "/projects/$LIVE_PROJECT_ID" "/projects/$LIVE_PROJECT_ID" absent || cleanup_status=1
+    fi
+  else
+    echo "BLOCKER leaving test agents/issues/project because holder quiescence was not proven"
   fi
   for name in $LIVE_PROTO_NAMES; do
     if ! printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1; then
@@ -219,6 +241,7 @@ live_cleanup() {
     cleanup_status=1
   fi
   rm -f "$LIVE_RECORD" "$LIVE_RELEASE"
+  rm -rf "$LIVE_TMPDIR"
   LIVE_CLEANUP_STATUS="$cleanup_status"
   return "$cleanup_status"
 }
@@ -237,6 +260,7 @@ live_gate() {
   LIVE_RELEASE="$LIVE_TMPDIR/release"
   : >"$LIVE_RECORD"
   : >"$LIVE_RELEASE"
+  LIVE_MARKER="opc-workspace-routing-$RANDOM-$(date +%s)-$$"
   trap live_cleanup EXIT INT TERM
   LIVE_BASE="http://127.0.0.1:${PAPERCLIP_PORT:-3100}/api"
   LIVE_BOARD_KEY="$(docker compose exec -T paperclip sh -c 'cat /paperclip/.opc/board-api.key' | tr -d '\r\n')" || {
@@ -300,7 +324,7 @@ live_gate() {
   fi
 
   repo="https://github.com/opc-fixture/workspace-routing-$(date +%s)-$$"
-  ticket="$(printf 'Workspace routing fixture; backlog only.\n' | "$CLI" engineering-ticket create \
+  ticket="$(printf '%s\n' "$LIVE_MARKER engineering backlog fixture" | "$CLI" engineering-ticket create \
     --repo "$repo" --title 'workspace routing fixture' --status backlog)" || {
     bad "create test-owned backlog engineering ticket"
     return 1
@@ -380,14 +404,14 @@ AGENT_SCRIPT
   test_agent_a="$LIVE_CREATED_AGENT_ID"
   create_process_agent engineering-b "$LIVE_PROJECT_ID" "$workspace_id" || { bad "create test-owned process adapter agent B"; return 1; }
   test_agent_b="$LIVE_CREATED_AGENT_ID"
-  issue_payload="$(jq -nc --arg p "$LIVE_PROJECT_ID" --arg w "$workspace_id" --arg a "$test_agent_a" \
-    '{title:"workspace routing execution A",description:"fixture execution A",
+  issue_payload="$(jq -nc --arg p "$LIVE_PROJECT_ID" --arg w "$workspace_id" --arg a "$test_agent_a" --arg marker "$LIVE_MARKER" \
+    '{title:"workspace routing execution A",description:($marker+" execution A"),
       status:"todo",projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,
       executionWorkspaceSettings:{mode:"inherit"}}')"
   create_issue "$issue_payload" || { bad "create execution issue A"; return 1; }
   issue_a="$LIVE_CREATED_ISSUE_ID"
-  issue_payload="$(jq -nc --arg p "$LIVE_PROJECT_ID" --arg w "$workspace_id" --arg a "$test_agent_b" \
-    '{title:"workspace routing execution B",description:"fixture execution B",
+  issue_payload="$(jq -nc --arg p "$LIVE_PROJECT_ID" --arg w "$workspace_id" --arg a "$test_agent_b" --arg marker "$LIVE_MARKER" \
+    '{title:"workspace routing execution B",description:($marker+" execution B"),
       status:"todo",projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,
       executionWorkspaceSettings:{mode:"inherit"}}')"
   create_issue "$issue_payload" || { bad "create execution issue B"; return 1; }
@@ -453,13 +477,13 @@ AGENT_SCRIPT
   test_agent_p2="$LIVE_CREATED_AGENT_ID"
   create_process_agent prototype-c "$prototype_two_id" "$prototype_two_ws" || { bad "create prototype process agent C"; return 1; }
   test_agent_p3="$LIVE_CREATED_AGENT_ID"
-  issue_payload="$(jq -nc --arg p "$prototype_id" --arg w "$prototype_ws" --arg a "$test_agent_p1" \
-    '{title:"prototype serialization A",description:"prototype serialization A",status:"todo",
+  issue_payload="$(jq -nc --arg p "$prototype_id" --arg w "$prototype_ws" --arg a "$test_agent_p1" --arg marker "$LIVE_MARKER" \
+    '{title:"prototype serialization A",description:($marker+" prototype A"),status:"todo",
       projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
   create_issue "$issue_payload" || { bad "create prototype issue A"; return 1; }
   prototype_issue_a="$LIVE_CREATED_ISSUE_ID"
-  issue_payload="$(jq -nc --arg p "$prototype_id" --arg w "$prototype_ws" --arg a "$test_agent_p2" \
-    '{title:"prototype serialization B",description:"prototype serialization B",status:"todo",
+  issue_payload="$(jq -nc --arg p "$prototype_id" --arg w "$prototype_ws" --arg a "$test_agent_p2" --arg marker "$LIVE_MARKER" \
+    '{title:"prototype serialization B",description:($marker+" prototype B"),status:"todo",
       projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
   create_issue "$issue_payload" || { bad "create prototype issue B"; return 1; }
   prototype_issue_b="$LIVE_CREATED_ISSUE_ID"
@@ -483,8 +507,16 @@ AGENT_SCRIPT
     fi
     sleep 1
   done
-  issue_payload="$(jq -nc --arg p "$prototype_two_id" --arg w "$prototype_two_ws" --arg a "$test_agent_p3" \
-    '{title:"prototype concurrency C",description:"prototype concurrency C",status:"todo",
+  if [ "$queued" -eq 1 ]; then
+    ok "same-prototype second run is scheduled_retry workspace_busy"
+  else
+    bad "same-prototype second run is scheduled_retry workspace_busy"
+    live_api GET "/companies/$LIVE_COMPANY_ID/heartbeat-runs?limit=1000" \
+      | jq -c '[.[] | {id,status,issueId,scheduledRetryReason}]' || true
+    return 1
+  fi
+  issue_payload="$(jq -nc --arg p "$prototype_two_id" --arg w "$prototype_two_ws" --arg a "$test_agent_p3" --arg marker "$LIVE_MARKER" \
+    '{title:"prototype concurrency C",description:($marker+" prototype C"),status:"todo",
       projectId:$p,projectWorkspaceId:$w,assigneeAgentId:$a,executionWorkspaceSettings:{mode:"inherit"}}')"
   create_issue "$issue_payload" || { bad "create prototype issue C"; return 1; }
   prototype_issue_c="$LIVE_CREATED_ISSUE_ID"
