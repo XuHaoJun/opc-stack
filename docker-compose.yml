@@ -701,6 +701,10 @@ services:
       PODENV_PORT_BASE: ${PODENV_PORT_BASE:-23000}
       PODENV_PORT_COUNT: ${PODENV_PORT_COUNT:-16}
       PODENV_PORT_RANGE_END: ${PODENV_PORT_RANGE_END:-23015}
+      DEVENV_S3_HOST: devenv-s3
+      DEVENV_S3_PORT: "9000"
+      DEVENV_S3_ROOT_USER: ${DEVENV_S3_ROOT_USER:-devenv-admin}
+      DEVENV_S3_ROOT_PASSWORD: ${DEVENV_S3_ROOT_PASSWORD:-devenv-object-storage}
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
       # Preview ports for prototype dev servers, leased by `devenv provision
@@ -976,6 +980,24 @@ services:
     environment:
       DEVENV_VALKEY_PASSWORD: ${DEVENV_VALKEY_PASSWORD:-devenv}
 
+  devenv-s3:
+    image: rustfs/rustfs:1.0.0-rc.3@sha256:800cf3f352a0a27e3275ca854a51f0027975d7acc7a0d52089a35bcc9fcbf0b5
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY: ${DEVENV_S3_ROOT_USER:-devenv-admin}
+      RUSTFS_SECRET_KEY: ${DEVENV_S3_ROOT_PASSWORD:-devenv-object-storage}
+    ports:
+      - "127.0.0.1:${DEVENV_S3_PORT:-9002}:9000"
+    volumes:
+      - devenv-s3-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
   # ══════════════════════ podenv (巢狀容器租約) ══════════════════════
   # devenv 蓋不到的那一半: 不能 multi-tenant 的 daemon, 以及很老舊的版本。
   # 設計 (含七條量測): docs/superpowers/specs/
@@ -1207,6 +1229,7 @@ volumes:
   opc-prototyper-home:
   devenv-pg-data:
   devenv-valkey-data:
+  devenv-s3-data:
   buzz-pgdata:
   buzz-redisdata:
   buzz-miniodata:
