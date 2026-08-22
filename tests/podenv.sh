@@ -798,43 +798,235 @@ expect_ok "the lease still serves after the routine re-provision (F1)" "200" \
 docker compose exec -T -u node paperclip sh -c \
     'podenv release f1-disrupt-gate >/dev/null 2>&1; rm -f /tmp/podenv-f1-disrupt.env' >/dev/null 2>&1
 
-echo "── task-5 review F3: --netns host restore is reported honestly as unprobeable ──"
+echo "── task-6 review F1: --netns host leases are probed via a label, not left blind ──"
 
-# Controller review finding F3 (minor): --netns host leases publish no port
-# at all, so opc-podenv-restore.sh cannot probe them — the code correctly
-# logs a WARNING and moves on rather than claiming "restored". That was
-# right and completely untested; a future edit could regress it silently
-# into either claiming false success or crashing on the missing port. Same
-# style as the F2 measurement section above: create the exact shape by
-# hand (a real --netns host container carrying the restore label, since
-# cmd_provision does not need to be involved for this), run the restore
-# script directly, and check its own wording for this container.
+# Controller review finding F1 (this task, supersedes task-5 review F3 below
+# it used to sit at this spot): --netns host leases publish no port mapping
+# at all, so opc-podenv-restore.sh's PROBE-FIRST check (task-5 F1, right
+# above) could never even be attempted for them — `podman port` has
+# structurally nothing to report for that mode. Consequence measured
+# pre-fix: EVERY --netns host lease was stopped and restarted on EVERY
+# podenv service restart, healthy or not, and the script could only warn on
+# stderr afterward that it could not verify. The reviewer proposed
+# documenting this as a limitation for agents to work around by hand
+# (re-run `podenv provision` after every restart). The fix instead closes
+# it: cmd_provision now labels every container it creates with the
+# reachable port (`opc.podenv.port`), in BOTH netns modes, and
+# opc-podenv-restore.sh reads that label via `podman inspect`
+# (podenv_lease_port) instead of depending on `podman port` at all.
+#
+# CORRECTED (task-6 controller review, this task): an earlier version of
+# this section drove a REAL `docker compose restart podenv` and then
+# asserted both leases' StartedAt+pid were UNCHANGED across it. That is an
+# impossible property to demand of a service restart: `restart` tears down
+# the podenv container's PID namespace, so every lease's real process
+# genuinely dies — it MUST come back with a new StartedAt and pid, because
+# that is opc-podenv-restore.sh's revival working, not a regression.
+# "Undisturbed" is a property of RE-PROVISIONING a healthy lease (the
+# task-5 F1 section above, for --netns pasta), not of a service restart.
+# The two properties are split and each is asserted only where it holds:
+#   (a) below — after a REAL `docker compose restart podenv`, both leases
+#       must be REVIVED and genuinely SERVING again, proven by an actual
+#       HTTP request/response through each lease's own address (curl's
+#       %{http_code}, which requires a real status line back — pasta's
+#       forwarder alone, with nothing behind it, cannot produce one). A
+#       changed StartedAt/pid here is expected and is not checked.
+#   (b) task-6 review F1b, right after this section's cleanup — probe-first
+#       must not disrupt an ALREADY-HEALTHY lease on an ordinary
+#       re-provision, for --netns host specifically (the task-5 F1 section
+#       above already covers this for --netns pasta): provision, confirm
+#       serving, re-provision the SAME key, and require StartedAt+pid
+#       UNCHANGED. This is the property "undisturbed" actually describes,
+#       and it is the one this repo's controller verified by hand for both
+#       netns modes before assigning this task.
+# The second half of this section (kill the --netns host lease for real,
+# then prove the restore pass revives AND verifies it) is unaffected by this
+# correction and is unchanged below.
 docker compose exec -T -u node paperclip sh -c \
-    'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f3_netns_host >/dev/null 2>&1
-     podman --remote --url unix:///run/podenv/podman.sock run -d --name podenv_f3_netns_host \
-       --label opc.podenv.lease=podenv_f3_netns_host --label opc.podenv.key=f3-netns-host \
+    'rm -f /tmp/podenv-f1host-pasta.env /tmp/podenv-f1host-host.env'
+
+# traefik/whoami always listens on 80 unless told otherwise (WHOAMI_PORT_NUMBER)
+# — --netns host has no remapping, so the daemon has to be told to bind the
+# exact port this test probes. 8099 is chosen only to avoid the 23000-23015
+# pasta pool and to not collide with anything the podenv service container
+# itself binds (nothing does, by default).
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1host-pasta --image docker.io/traefik/whoami --port 80 \
+        --as F1HOST_PASTA_ADDR --env-file /tmp/podenv-f1host-pasta.env' >/dev/null 2>&1
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1host-host --image docker.io/traefik/whoami --port 8099 \
+        --netns host --env WHOAMI_PORT_NUMBER=8099 \
+        --as F1HOST_HOST_ADDR --env-file /tmp/podenv-f1host-host.env' >/dev/null 2>&1
+
+_f1h_pasta_addr="$(docker compose exec -T -u node paperclip sh -c \
+    'grep "^F1HOST_PASTA_ADDR=" /tmp/podenv-f1host-pasta.env | cut -d= -f2-' 2>/dev/null | tr -d '\r')"
+_f1h_host_addr="$(docker compose exec -T -u node paperclip sh -c \
+    'grep "^F1HOST_HOST_ADDR=" /tmp/podenv-f1host-host.env | cut -d= -f2-' 2>/dev/null | tr -d '\r')"
+
+expect_ok "the pasta lease genuinely serves before the restart (F1 precondition)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "[ -n '$_f1h_pasta_addr' ] || exit 1
+     curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1h_pasta_addr/'"
+expect_ok "the --netns host lease genuinely serves before the restart (F1 precondition)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "[ -n '$_f1h_host_addr' ] || exit 1
+     curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1h_host_addr/'"
+
+expect "the --netns host lease carries the opc.podenv.port label (F1)" "8099" \
+    docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_f1host_host --format '{{ index .Config.Labels "opc.podenv.port" }}'
+# The label records the REACHABLE port, not the container's internal one —
+# that is what a probe needs to connect to. For a --netns pasta lease that
+# is the allocated PUBLISHED host port (there is remapping), not the
+# container's --port; the pool hands out whatever is free (23000 in one
+# measured run), so the expectation has to be the port this run actually
+# got, read the same way a probe would: from the address podenv itself just
+# wrote to the .env file above.
+expect "the pasta lease carries the opc.podenv.port label too (F1)" "${_f1h_pasta_addr##*:}" \
+    docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_f1host_pasta --format '{{ index .Config.Labels "opc.podenv.port" }}'
+
+docker compose restart podenv >/dev/null 2>&1
+
+# Let the backgrounded restore pass reach completion: it polls the socket
+# every 2s up to 60 tries, then probes each lease (fast) or disrupts+revives
+# (up to ~35s per lease if it has to). Generous but bounded.
+for i in $(seq 1 30); do
+    docker compose exec -T podenv test -S /run/podenv/podman.sock >/dev/null 2>&1 && break
+    sleep 2
+done
+sleep 10
+
+# (a) revived and genuinely serving again — see the corrected header
+# comment above for why "undisturbed" is not the property being asserted
+# here. curl performing a real HTTP GET and getting a status line back is
+# the actual-data-exchange requirement: pasta's forwarder alone (nothing
+# behind it) cannot produce one, so this cannot pass against a lease that
+# only "looks" alive.
+expect_ok "the pasta lease still serves after the restart (F1)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1h_pasta_addr/'"
+expect_ok "the --netns host lease still serves after the restart (F1)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1h_host_addr/'"
+
+# Second half: break the --netns host lease FOR REAL (kill its process,
+# leaving podman's own container bookkeeping to notice on its own — the
+# same shape a killed podenv service leaves behind) and prove the restore
+# pass revives AND verifies it rather than just leaving it alone.
+docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman kill -s KILL podenv_f1host_host >/dev/null 2>&1
+
+check "the --netns host lease is genuinely dead after the kill (setup sanity, F1)" \
+    sh -c "! docker compose exec -T -u node paperclip sh -c \
+        \"curl -s -o /dev/null --max-time 3 'http://$_f1h_host_addr/'\""
+
+_f1h_revive_line="$(docker compose exec -T podenv sh -c 'PODENV_RESTORE_RUN=1 /usr/local/bin/opc-podenv-restore.sh' 2>&1 | grep podenv_f1host_host | tail -1)"
+
+if printf '%s\n' "$_f1h_revive_line" | grep -q '^\[podenv-restore\] restored podenv_f1host_host'; then
+    pass "opc-podenv-restore.sh revives a genuinely dead --netns host lease using the label-derived port (F1)"
+else
+    fail "opc-podenv-restore.sh did not revive the killed --netns host lease (F1) (got: $_f1h_revive_line)"
+fi
+
+expect_ok "the revived --netns host lease genuinely serves again (F1)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1h_host_addr/'"
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release f1host-pasta >/dev/null 2>&1
+     podenv release f1host-host >/dev/null 2>&1
+     rm -f /tmp/podenv-f1host-pasta.env /tmp/podenv-f1host-host.env' >/dev/null 2>&1
+
+echo "── task-6 review F1b: reprovision must not disrupt an already-alive --netns host lease ──"
+
+# (b) from the corrected header comment above. The task-5 F1 section
+# earlier in this file already proves probe-first does not disrupt a
+# healthy lease on an ordinary re-provision for --netns pasta; this is the
+# same property for --netns host, which is the actual blind spot the
+# opc.podenv.port label exists to close (before it, cmd_provision's
+# reprovision branch had no port to probe for this mode either, so nothing
+# stopped an unconditional stop/start from firing here on every ordinary
+# `podenv provision` re-run, healthy or not). Same WHOAMI_PORT_NUMBER trap
+# as the setup above: --netns host has no port remapping, so the daemon
+# must be told to bind the exact port this test probes. Port 8098 is used
+# (not 8099) so this section cannot collide with a lease left behind by a
+# prior run of the section above.
+docker compose exec -T -u node paperclip sh -c 'rm -f /tmp/podenv-f1hostb-disrupt.env'
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1hostb-disrupt-gate --image docker.io/traefik/whoami --port 8098 \
+        --netns host --env WHOAMI_PORT_NUMBER=8098 \
+        --as F1HOSTB_DISRUPT_ADDR --env-file /tmp/podenv-f1hostb-disrupt.env' >/dev/null 2>&1
+
+_f1hb_addr="$(docker compose exec -T -u node paperclip sh -c \
+    'grep "^F1HOSTB_DISRUPT_ADDR=" /tmp/podenv-f1hostb-disrupt.env | cut -d= -f2-' 2>/dev/null | tr -d '\r')"
+
+expect_ok "the --netns host lease genuinely serves before re-provisioning (F1b precondition)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "[ -n '$_f1hb_addr' ] || exit 1
+     curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1hb_addr/'"
+
+_f1hb_before="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_f1hostb_disrupt_gate --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+
+# The routine, encouraged action: re-run provision on a lease that is
+# already fine. Same command as the first call, verbatim.
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1hostb-disrupt-gate --image docker.io/traefik/whoami --port 8098 \
+        --netns host --env WHOAMI_PORT_NUMBER=8098 \
+        --as F1HOSTB_DISRUPT_ADDR --env-file /tmp/podenv-f1hostb-disrupt.env' >/dev/null 2>&1
+
+_f1hb_after="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_f1hostb_disrupt_gate --format '{{.State.StartedAt}} pid={{.State.Pid}}' 2>/dev/null | tr -d '\r')"
+
+if [ -n "$_f1hb_before" ] && [ -n "$_f1hb_after" ] && [ "$_f1hb_before" = "$_f1hb_after" ]; then
+    pass "reprovision of an already-alive --netns host lease does not disrupt it (StartedAt+pid unchanged, F1b)"
+else
+    fail "reprovision of an already-alive --netns host lease disrupted it — StartedAt+pid changed from '$_f1hb_before' to '$_f1hb_after' (F1b — the exact regression this check exists to catch)"
+fi
+
+expect_ok "the --netns host lease still serves after the routine re-provision (F1b)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1hb_addr/'"
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release f1hostb-disrupt-gate >/dev/null 2>&1; rm -f /tmp/podenv-f1hostb-disrupt.env' >/dev/null 2>&1
+
+echo "── task-6 review F1 fallback: a pre-label --netns host lease is still reported honestly as unprobeable ──"
+
+# The fallback this fix keeps (per its own comment in podenv_lease_port):
+# a lease created before the opc.podenv.port label existed has neither the
+# label nor anything `podman port` can report for --netns host, so this is
+# the one remaining case opc-podenv-restore.sh cannot probe. Same setup as
+# the old task-5 F3 check this supersedes — bypass cmd_provision entirely so
+# the container carries only the OLD two labels, never the new one.
+docker compose exec -T -u node paperclip sh -c \
+    'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f1_nolabel_host >/dev/null 2>&1
+     podman --remote --url unix:///run/podenv/podman.sock run -d --name podenv_f1_nolabel_host \
+       --label opc.podenv.lease=podenv_f1_nolabel_host --label opc.podenv.key=f1-nolabel-host \
        --network=host docker.io/library/alpine:3.20 sleep 300 >/dev/null 2>&1'
 
-check "the F3 --netns host lease is genuinely RUNNING (setup sanity)" \
+check "the fallback lease is genuinely RUNNING (setup sanity)" \
     sh -c 'docker compose exec -T -u node paperclip sh -c \
-        "podman --remote --url unix:///run/podenv/podman.sock inspect podenv_f3_netns_host --format \"{{.State.Running}}\"" \
+        "podman --remote --url unix:///run/podenv/podman.sock inspect podenv_f1_nolabel_host --format \"{{.State.Running}}\"" \
         2>/dev/null | tr -d "\r" | grep -qx true'
 
-_f3_restore_line="$(docker compose exec -T podenv sh -c 'PODENV_RESTORE_RUN=1 /usr/local/bin/opc-podenv-restore.sh' 2>&1 | grep podenv_f3_netns_host | tail -1)"
+_f1_nolabel_line="$(docker compose exec -T podenv sh -c 'PODENV_RESTORE_RUN=1 /usr/local/bin/opc-podenv-restore.sh' 2>&1 | grep podenv_f1_nolabel_host | tail -1)"
 
-if printf '%s\n' "$_f3_restore_line" | grep -q '^\[podenv-restore\] restored podenv_f3_netns_host'; then
-    fail "opc-podenv-restore.sh must not claim a --netns host lease as restored — it has no port to probe (F3) (got: $_f3_restore_line)"
+if printf '%s\n' "$_f1_nolabel_line" | grep -q '^\[podenv-restore\] restored podenv_f1_nolabel_host'; then
+    fail "opc-podenv-restore.sh must not claim a label-less --netns host lease as restored — it has no port to probe (F1 fallback) (got: $_f1_nolabel_line)"
 else
-    pass "opc-podenv-restore.sh does not claim success for a --netns host lease it cannot probe (F3)"
+    pass "opc-podenv-restore.sh does not claim success for a label-less --netns host lease it cannot probe (F1 fallback)"
 fi
-if printf '%s\n' "$_f3_restore_line" | grep -qi 'cannot verify liveness by probing'; then
-    pass "opc-podenv-restore.sh reports the --netns host lease honestly as unprobeable (F3)"
+if printf '%s\n' "$_f1_nolabel_line" | grep -qi 'cannot verify liveness by probing'; then
+    pass "opc-podenv-restore.sh reports the label-less --netns host lease honestly as unprobeable (F1 fallback)"
 else
-    fail "opc-podenv-restore.sh's wording for the --netns host case is missing or changed (F3) (got: $_f3_restore_line)"
+    fail "opc-podenv-restore.sh's wording for the label-less case is missing or changed (F1 fallback) (got: $_f1_nolabel_line)"
 fi
 
 docker compose exec -T -u node paperclip sh -c \
-    'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f3_netns_host >/dev/null 2>&1'
+    'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f1_nolabel_host >/dev/null 2>&1'
 
 echo "── skill ──"
 
@@ -846,6 +1038,26 @@ expect "devenv skill points forward without copying the table" "1" \
     sh -c 'grep -c "podenv" patches/paperclip/skills/devenv/SKILL.md | tr -d " "'
 check "Prototyper lists podenv in desiredSkills" \
     sh -c 'grep -q "podenv" patches/paperclip/opc-paperclip-bootstrap.sh'
+
+# Review F2 (minor): exit 3 has a self-resolvable case (a --netns host port
+# collision) distinct from the two pool-exhaustion sites — the skill must
+# not tell an agent to ask the user about something the CLI's own message
+# already told it how to fix itself.
+check "the exit-3 row distinguishes the self-resolvable --netns host collision from pool exhaustion (F2)" \
+    sh -c 'grep -A2 "^| 3 |" patches/paperclip/skills/podenv/SKILL.md | grep -qi "netns host"'
+
+# Review F3 (minor): "names the devenv command to use instead" is only true
+# for the route-gate exit-2 site, not plain bad usage or the reserved
+# variable-name case. The row must not make the blanket claim any more.
+check "the exit-2 row no longer makes a blanket 'names the devenv command' claim (F3)" \
+    sh -c '! grep -A1 "^| 2 |" patches/paperclip/skills/podenv/SKILL.md | grep -q "the message — it names the devenv command to use instead\."'
+check "the exit-2 row still says the route gate names a devenv command (F3)" \
+    sh -c 'grep -A3 "^| 2 |" patches/paperclip/skills/podenv/SKILL.md | grep -qi "route gate.*devenv command\|devenv command.*route gate\|route gate.*devenv provision"'
+
+# Review F4 (minor): --env-file is a real, supported flag missing from the
+# flag table, and the worked examples rely on its default.
+check "--env-file is documented in the flag table with its default (F4)" \
+    sh -c 'grep -F -- "--env-file" patches/paperclip/skills/podenv/SKILL.md | grep -qi "\.env"'
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"

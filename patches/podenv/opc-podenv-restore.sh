@@ -50,8 +50,9 @@
 # script can tell "genuinely running" from podman's stale "Up" apart from
 # actually reaching the lease — which is the same probe already needed
 # afterward. Only when the probe finds nothing answering (or there is
-# nothing to probe at all — see the --netns host case below) does this
-# script disrupt anything, and even then not with `-t 0`: `stop
+# nothing to probe at all — a lease from before podenv_lease_port's label
+# existed, see that function's own comment) does this script disrupt
+# anything, and even then not with `-t 0`: `stop
 # -t "$PODENV_STOP_GRACE"` gives a daemon that might be HUNG rather than
 # gone a short window to flush before the kill. A container that really is
 # already gone returns from `stop` immediately regardless of the timeout
@@ -59,6 +60,25 @@
 # case, and can save data in the hung-not-gone one. Never `podman restart`:
 # measured to fail outright on exactly the stale-"Up" state this script
 # exists to recover from.
+#
+# TASK-6 F1 (closing a blind spot, not just documenting it): probe-first
+# above used to NOT apply to a --netns host lease at all, because that mode
+# publishes no port mapping (`-p` is discarded — see
+# patches/paperclip/podenv/podenv's `hport=cport` comment), and `podman
+# port` — the only source this script had for "what port do I probe" — has
+# structurally nothing to report for it. So every --netns host lease was
+# stopped and restarted on EVERY podenv service restart regardless of
+# whether it was healthy, and the best this script could do afterward was an
+# unread stderr WARNING. Fixed by having cmd_provision record the reachable
+# port as a LABEL on the container (opc.podenv.port, both netns modes) and
+# reading that instead of `podman port` — see podenv_lease_port below. That
+# label does not depend on the container being in any particular runtime
+# state or on the netns mode, so a --netns host lease is now probed exactly
+# like a --netns pasta one, and the pasta path also stops depending on
+# `podman port` output at all. A fallback to `podman port` remains for any
+# lease created before this label existed (podenv_lease_port's own comment
+# says why); the WARNING further down is now reached only by that leftover
+# case, not by every --netns host lease unconditionally.
 #
 # Never fatal: this is recovery. Every lease is also restartable by hand with
 # `podman start <slug>`.
@@ -145,6 +165,51 @@ podenv_probe_answers() {
     [ "${_pa_bytes:-0}" -ge 1 ]
 }
 
+# podenv_lease_port <container> — the port this lease answers on.
+#
+# TASK-6 F1 (closing a blind spot a reviewer proposed only documenting):
+# `podman port` reads a container's published port MAPPING, and a --netns
+# host lease has none — cmd_provision discards `-p` entirely for that mode
+# (see patches/paperclip/podenv/podenv's `hport=cport` comment). Before this
+# function existed, that meant a --netns host lease could never be probed
+# here at all: every restart of the podenv service stopped and restarted it
+# unconditionally regardless of health, and the best this script could do
+# afterward was an unread stderr WARNING that it could not verify — probe-
+# first, the whole point of this file, silently did not apply to that mode.
+#
+# The fix does not try to make `podman port` report something it structurally
+# cannot for --netns host. It sidesteps the question: `cmd_provision` already
+# records the reachable port as a LABEL on the container itself
+# (opc.podenv.port) at create time, for BOTH netns modes — a label this
+# script CAN read with `podman inspect`, unlike the registry row (different
+# image, no psql client here; see the file header). So: try the label first.
+# It works identically for --netns pasta and --netns host, which means the
+# pasta path also stops depending on parsing `podman port` output at all —
+# one less thing that can change under us.
+#
+# Fallback to `podman port` only for a lease created before this label
+# existed (an already-running container from an older podenv build) — such a
+# lease has no opc.podenv.port label to read, so this is the only way to
+# probe a pre-existing --netns pasta lease, and for a pre-existing --netns
+# host lease it correctly yields nothing (that mode never published a port
+# mapping), which the caller treats as "cannot verify" exactly as before this
+# fix. `index` rather than `.Config.Labels.opc.podenv.port`: Go's template
+# parser would read the dots in the label name as field traversal, the same
+# reason the "restore label" check in tests/podenv.sh has to use `index` too.
+podenv_lease_port() {
+    _plp_c="$1"
+    _plp_port="$(podman_r inspect "$_plp_c" \
+        --format '{{ index .Config.Labels "opc.podenv.port" }}' 2>/dev/null \
+        | tr -d '[:space:]')"
+    case "$_plp_port" in
+        ''|'<no value>')
+            _plp_line="$(podman_r port "$_plp_c" 2>/dev/null | head -1)"
+            _plp_port="$(printf '%s' "$_plp_line" | sed -n 's/.*:\([0-9]\+\)[[:space:]]*$/\1/p')"
+            ;;
+    esac
+    printf '%s' "$_plp_port"
+}
+
 # Everything below this line is the main restore pass (wait for the socket,
 # find labelled leases, probe before disrupting, verify each is genuinely
 # alive). Guarded so the SAFE thing — do nothing — is the DEFAULT, and only
@@ -185,14 +250,16 @@ _ids="$(podman_r ps -a --filter label=opc.podenv.lease --format '{{.Names}}' 2>/
 
 for _c in $_ids; do
     # PROBE FIRST (task-5 F1 — see the header comment for the measured
-    # regression this replaces): find the lease's published port and try it
-    # ONCE, before touching the container at all. `podman port` reads the
-    # container's recorded network config, which is available whether the
-    # container is genuinely running, stale-"Up", or truly exited — trying
-    # it here costs nothing and, when it succeeds, proves the lease never
-    # needed disrupting in the first place.
-    _portline="$(podman_r port "$_c" 2>/dev/null | head -1)"
-    _port="$(printf '%s' "$_portline" | sed -n 's/.*:\([0-9]\+\)[[:space:]]*$/\1/p')"
+    # regression this replaces): find the lease's reachable port and try it
+    # ONCE, before touching the container at all — this succeeding proves the
+    # lease never needed disrupting in the first place. Reads the
+    # opc.podenv.port LABEL (task-6 F1, podenv_lease_port above), not
+    # `podman port` directly: the label is available whether the container is
+    # genuinely running, stale-"Up", or truly exited (it is static container
+    # config, not runtime state), AND — unlike `podman port` — it exists for
+    # a --netns host lease too, which is what makes that mode probeable here
+    # at all now.
+    _port="$(podenv_lease_port "$_c")"
 
     if [ -n "$_port" ] && podenv_probe_answers "$_port"; then
         echo "[podenv-restore] $_c already answers on 127.0.0.1:${_port} (exchanged data) — left untouched, no stop/start needed"
@@ -218,23 +285,30 @@ for _c in $_ids; do
         continue
     fi
 
-    # The pre-disruption probe above already ruled out having a port to try
-    # (host-netns leases publish none — measured: -p is discarded for that
-    # mode, so `podman port` never has anything to report, before OR after
-    # start). Re-check anyway rather than assume: a `run` config can differ
-    # from what a `port` query returned a moment ago in principle, and this
-    # costs one more cheap call.
+    # The pre-disruption probe above already tried the label AND (for a
+    # pre-label lease) the `podman port` fallback via podenv_lease_port. A
+    # `run` config could in principle differ from what was read a moment ago
+    # — re-check anyway rather than assume, at the cost of one more cheap
+    # call.
     if [ -z "$_port" ]; then
-        _portline="$(podman_r port "$_c" 2>/dev/null | head -1)"
-        _port="$(printf '%s' "$_portline" | sed -n 's/.*:\([0-9]\+\)[[:space:]]*$/\1/p')"
+        _port="$(podenv_lease_port "$_c")"
     fi
     if [ -z "$_port" ]; then
-        # --netns host leases publish no port at all. There is nothing here
-        # this script can probe — say so rather than silently counting it as
-        # restored, and rather than silently claiming it needed restoring at
-        # all (it may not have — this is the one lease shape this script
-        # cannot tell "was fine" from "was dead" apart on, see task-5 F3).
-        echo "[podenv-restore] WARNING $_c started but publishes no port (--netns host) — cannot verify liveness by probing; check by hand: docker compose exec -T -u ${PODENV_UID} -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/${PODENV_UID} podenv podman logs $_c" >&2
+        # TASK-6 F1: this branch used to be reached by EVERY --netns host
+        # lease, unconditionally, because `podman port` structurally cannot
+        # report anything for that mode. Now that podenv_lease_port reads the
+        # opc.podenv.port label first, a --netns host lease created by the
+        # current podenv CLI has a port to probe and takes the normal path
+        # above/below instead. This branch is now reached only by a lease
+        # that predates the label (an already-running container from an
+        # older podenv build, --netns host or otherwise a pasta lease whose
+        # `podman port` genuinely has nothing to report) — there really is
+        # nothing here this script can probe. Say so rather than silently
+        # counting it as restored, and rather than silently claiming it
+        # needed restoring at all (it may not have — this is the one
+        # remaining case this script cannot tell "was fine" from "was dead"
+        # apart on).
+        echo "[podenv-restore] WARNING $_c started but has no opc.podenv.port label and publishes no port via 'podman port' either (a lease from before this label existed) — cannot verify liveness by probing; check by hand: docker compose exec -T -u ${PODENV_UID} -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/${PODENV_UID} podenv podman logs $_c" >&2
         continue
     fi
 

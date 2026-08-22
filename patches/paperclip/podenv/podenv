@@ -484,9 +484,28 @@ is valkey 9.1), say why and it will be recorded on the lease:
                 || die "podman reports '$slug' running for lease '$key', but ${PODENV_HOST_NAME}:${hport} never exchanged any data after 30s (only a bare TCP handshake would not prove this — see podenv_provision_alive's comment above) — the (re)start did not actually revive it. See why: docker compose exec podenv podman logs $slug" 5
         fi
     else
+        # opc.podenv.port (task-6 F1): the reachable host_port, recorded as a
+        # LABEL on the container itself — not just in the podenv_lease row —
+        # for BOTH netns modes, even though --netns pasta's port is already
+        # visible via `podman port`. Why bother for pasta too: it means
+        # opc-podenv-restore.sh (a different image, no psql, cannot reach the
+        # registry) never has to parse `podman port` output at all, for
+        # either mode — one less thing that can change under us. Why it
+        # matters MORE for --netns host: that mode publishes no port mapping
+        # at all (-p is discarded — see the `hport=cport` comment above), so
+        # `podman port` has nothing to report and, before this label existed,
+        # opc-podenv-restore.sh had no way to find a port to probe for a
+        # host-netns lease at all — every restart of the podenv service
+        # stopped and restarted it unconditionally, healthy or not, and the
+        # best the script could do afterward was an unread stderr WARNING.
+        # Reading this label with `podman inspect` costs nothing the restore
+        # script wasn't already paying (it inspects the container regardless)
+        # and does not depend on the container being in any particular state,
+        # unlike `podman port`.
         set -- run -d --name "$slug" \
             --label "opc.podenv.lease=$slug" \
             --label "opc.podenv.key=$key" \
+            --label "opc.podenv.port=$hport" \
             --restart no \
             --network="$netns"
         [ "$netns" = host ] || set -- "$@" -p "${hport}:${cport}"

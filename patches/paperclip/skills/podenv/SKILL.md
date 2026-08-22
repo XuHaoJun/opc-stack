@@ -68,6 +68,7 @@ hardcode it.
 | `--volume H:C` | Bind-mount. `/prototypes` is visible to the runtime host, so `--volume /prototypes/myproj:/app` works. |
 | `--netns host` | Only when pasta cannot run the image. **There is no port remapping in this mode**, so `--port` must already be free across every lease. |
 | `--dedicated "reason"` | Required to override the route gate above. |
+| `--env-file PATH` | Where to write/merge the `.env` entry. Defaults to `.env` in the current directory — the worked examples below rely on this default; pass it explicitly only when you are not running from the project's own directory. |
 
 A worked example — MySQL 5.7, which is exactly what this lane exists for:
 
@@ -124,7 +125,7 @@ anything.
 
 | Exit | Meaning |
 |---|---|
-| 2 | Bad usage, a reserved variable name, or the route gate. Read the message — it names the devenv command to use instead. |
-| 3 | Port pool exhausted. Report it to the user; they decide what to release. |
+| 2 | Bad usage. Three different cases share this code, and only one of them names a devenv command: the **route gate** (devenv already serves this image family) does — read the message and run the `devenv provision` command it gives you. A **reserved `.env` variable name** names a different `--as` instead, not a devenv command. Plain bad usage (missing `--image`, invalid `--netns`, a malformed `--port`) names neither — it just tells you what was wrong with the flags. Read the message; do not assume it always points at devenv. |
+| 3 | Three different exhaustion/collision cases share this code, and only two of them are the operator's call. The pool-exhaustion sites (no free port in `PODENV_PORT_BASE`-`PODENV_PORT_RANGE_END`, or the port-claim race lost 5 times running) mean report it to the user; they decide what to release. The third — a **`--netns host` port collision** (two host-netns leases both wanting the same container port, which that mode cannot remap around) — is yours to fix without asking: the message itself says to pick a different `--port` or release the other lease (`podenv list`). Don't burn a round-trip asking permission for something the message already told you how to resolve. |
 | 4 | The runtime host or the registry is unreachable. Report it — this is not something you can fix. |
 | 5 | The runtime host refused to start (or revive) the lease's container — a bad image, a command that exits immediately, or a daemon that never came back up after a restart attempt. No registry row and no `.env` entry are left behind when this happens on a fresh `provision`. Read the container's logs before retrying blindly. |
