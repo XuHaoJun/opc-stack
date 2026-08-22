@@ -57,6 +57,58 @@ podman_r() {
         podman "$@"
 }
 
+# podenv_probe_answers <port> — a single attempt at the data-exchange probe
+# described below: open the port, send a minimal HTTP GET, and require at
+# least one REAL byte back within a bounded timeout.
+#
+# TASK-5 CORRECTION (measured false — see task-5-report.md): the previous
+# form of this probe trusted `head -c 1`'s EXIT STATUS alone
+# (`timeout 2 head -c 1 <&3 >/dev/null 2>/dev/null`) as proof a byte came
+# back. It is not: `head -c N` exits 0 whenever it reaches EOF cleanly,
+# REGARDLESS of how many bytes (including zero) it actually read — POSIX
+# `head` only exits nonzero on a genuine read ERROR, and a graceful
+# close/EOF is not an error. Measured directly against a container that is
+# genuinely RUNNING but has nothing bound on the probed port (the exact F2
+# scenario below): the surrounding `(...)` subshell exits 0 on roughly 1 in
+# 7 attempts (3/20 and 3/20 in two separate 20-trial runs) with ZERO bytes
+# actually captured — i.e. the read hit EOF (the far end closed cleanly)
+# rather than erroring (RST), and `head` called that success anyway. Over
+# this function's caller's 15-attempt/30s retry window that is roughly a
+# 90% chance of at least one false "alive" — reproduced live: a gate run
+# hit it and printed "restored podenv_f2_probe (verified: ... exchanged
+# data ...)" for a container nothing was listening on. curl-based probes
+# elsewhere in this lane (podenv's own `cmd_provision`) do not share this
+# flaw — measured 0/20 false positives — because curl's exit code already
+# encodes "the transfer did not go as the request demanded," where a bare
+# `head` exit code does not encode "I got as many bytes as I asked for."
+# Fix: capture the read into a file and require its BYTE COUNT to be >= 1,
+# never trust `head`'s exit status by itself.
+#
+# Split out as its own function (rather than left inline in the loop below)
+# so tests/podenv.sh can source this script with PODENV_RESTORE_LIB=1 and
+# call this in isolation against a guaranteed-nothing-listening port — a
+# tight loop of single attempts is a deterministic regression guard for the
+# exact bug above, where waiting out a natural ~1-in-7 flake in the full
+# gate is not.
+podenv_probe_answers() {
+    _pa_port="$1"
+    _pa_tmp="$(mktemp)"
+    ( exec 3<>"/dev/tcp/127.0.0.1/${_pa_port}" 2>/dev/null || exit 1
+      printf 'GET / HTTP/1.0\r\n\r\n' >&3 2>/dev/null
+      timeout 2 head -c 1 <&3 >"$_pa_tmp" 2>/dev/null
+    ) 2>/dev/null
+    _pa_bytes="$(wc -c <"$_pa_tmp" 2>/dev/null | tr -d '[:space:]')"
+    rm -f "$_pa_tmp"
+    [ "${_pa_bytes:-0}" -ge 1 ]
+}
+
+# Everything below this line is the main restore pass (wait for the socket,
+# find labelled leases, force a real transition, verify each is genuinely
+# alive). Guarded so tests/podenv.sh can source this file for
+# podenv_probe_answers alone (PODENV_RESTORE_LIB=1) without also running a
+# full restore pass as a side effect of sourcing.
+[ "${PODENV_RESTORE_LIB:-0}" = 1 ] && return 0 2>/dev/null || true
+
 _n=0
 while [ ! -S "$PODENV_SOCK" ] && [ "$_n" -lt 60 ]; do
     _n=$((_n + 1)); sleep 2
@@ -132,14 +184,13 @@ for _c in $_ids; do
     # server reject the garbage and close cleanly, all distinct from the
     # reset-on-nothing-bound case. A read that only times out (connection
     # open, nothing back yet) is treated as "not yet" and this keeps
-    # polling, same as before the fix.
+    # polling, same as before the fix. See podenv_probe_answers above (task-5
+    # follow-up) for why the single attempt itself has to count bytes rather
+    # than trust `head`'s exit status.
     _alive=0
     _n=0
     while [ "$_n" -lt 15 ]; do
-        if ( exec 3<>"/dev/tcp/127.0.0.1/${_port}" 2>/dev/null || exit 1
-             printf 'GET / HTTP/1.0\r\n\r\n' >&3 2>/dev/null
-             timeout 2 head -c 1 <&3 >/dev/null 2>/dev/null
-           ) 2>/dev/null; then
+        if podenv_probe_answers "$_port"; then
             _alive=1
             break
         fi

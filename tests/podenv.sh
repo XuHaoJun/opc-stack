@@ -671,6 +671,38 @@ else
     pass "opc-podenv-restore.sh's wording no longer claims the port 'answers' (F2)"
 fi
 
+# task-5 (gate flake): the check above relies on the same natural flake it is
+# trying to catch — measured pre-fix at roughly 1-in-7 per single attempt
+# (3/20 and 3/20 across two independent 20-trial runs), so waiting on 30s of
+# retries only catches a REGRESSION here with ~90% odds, not certainty (a
+# live gate run failed exactly this way: "restored podenv_f2_probe (verified:
+# ... exchanged data ...)" for a container nothing was listening on). The
+# root cause was `head -c 1`'s exit status being trusted alone — `head` exits
+# 0 on a clean EOF with zero bytes too (not a read error), so a graceful
+# close and a real 1-byte answer were indistinguishable. The fix (in
+# opc-podenv-restore.sh's podenv_probe_answers) counts the bytes actually
+# captured instead. This check exercises that REAL function directly (not a
+# re-typed copy — PODENV_RESTORE_LIB=1 makes sourcing skip the main restore
+# pass, see the script's own guard) in a tight 40-attempt loop against the
+# still-running, still-nothing-bound podenv_f2_probe lease from above: at the
+# pre-fix ~1-in-7 single-attempt rate, 40 tries have a 1 - 0.857^40 ≈ 99.8%
+# chance of catching at least one false positive, vs. this being expected to
+# be silent every time once the byte count is actually checked.
+_probe_flakes="$(docker compose exec -T podenv sh -c '
+    PODENV_RESTORE_LIB=1 . /usr/local/bin/opc-podenv-restore.sh
+    n=0; bad=0
+    while [ "$n" -lt 40 ]; do
+        podenv_probe_answers 23011 && bad=$((bad + 1))
+        n=$((n + 1))
+    done
+    echo "$bad"
+' 2>/dev/null | tr -d '\r')"
+if [ "${_probe_flakes:-x}" = "0" ]; then
+    pass "podenv_probe_answers never false-positives on an unbound port (40 rapid attempts, F2 regression guard)"
+else
+    fail "podenv_probe_answers false-positived ${_probe_flakes:-?}/40 times on an unbound port (F2 regression guard — the head -c1 EOF-vs-error bug is back)"
+fi
+
 # cmd_provision's reprovision branch ("container exists") on the exact same
 # lease shape: register a matching row (mirrors the F3-gate setup above) so
 # `podenv provision` takes that branch, and require the SAME honesty — it
