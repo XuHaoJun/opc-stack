@@ -38,23 +38,35 @@ api_request() { # METHOD PATH [JSON]
 
 canonical_repo_json() {
     _raw="$1"
+    _kind=short
     case "$_raw" in
-        git@github.com:*) _path="${_raw#git@github.com:}" ;;
-        ssh://git@github.com/*) _path="${_raw#ssh://git@github.com/}" ;;
-        https://github.com/*) _path="${_raw#https://github.com/}" ;;
-        http://github.com/*) _path="${_raw#http://github.com/}" ;;
+        git@github.com:*) _path="${_raw#git@github.com:}"; _kind=url ;;
+        ssh://git@github.com/*) _path="${_raw#ssh://git@github.com/}"; _kind=url ;;
+        https://github.com/*) _path="${_raw#https://github.com/}"; _kind=url ;;
+        http://github.com/*) _path="${_raw#http://github.com/}"; _kind=url ;;
         */*) _path="$_raw" ;;
         *) die "unsupported repository identity: $_raw" 2 ;;
     esac
+    if [ "$_kind" = url ]; then
+        case "$_path" in
+            */) _path="${_path%/}" ;;
+        esac
+    else
+        case "$_path" in
+            ""|/*|*/|*//*|*@*|*:*|*[\?\#\%\&\;]*)
+                die "unsupported repository identity: $_raw" 2 ;;
+        esac
+    fi
     _path="${_path%.git}"
-    _path="${_path#/}"
-    _path="${_path%/}"
     _owner="${_path%%/*}"
     _repo="${_path#*/}"
     [ -n "$_owner" ] && [ -n "$_repo" ] && [ "${_repo#*/}" = "$_repo" ] ||
         die "repository must be exactly owner/repo" 2
     case "$_owner" in
-        *.*) die "unsupported repository identity: $_raw" 2 ;;
+        *.*|*[!A-Za-z0-9_-]*) die "unsupported repository identity: $_raw" 2 ;;
+    esac
+    case "$_repo" in
+        *[!A-Za-z0-9._-]*) die "unsupported repository identity: $_raw" 2 ;;
     esac
     _owner_lc="$(printf '%s' "$_owner" | tr '[:upper:]' '[:lower:]')"
     _repo_lc="$(printf '%s' "$_repo" | tr '[:upper:]' '[:lower:]')"
@@ -89,36 +101,49 @@ primary_workspace_json() {
     else
         _project="$(cat)"
     fi
-    printf '%s' "$_project" | jq -c '
-        if (.primaryWorkspace? | type) == "object" then .primaryWorkspace
-        else ((.workspaces // []) | map(select(.isPrimary == true)) | .[0] // null)
-        end
-    '
+    if [ "$(printf '%s' "$_project" | jq -r 'if (.primaryWorkspace? | type) == "object" then 1 else 0 end')" -eq 1 ]; then
+        printf '%s' "$_project" | jq -c '.primaryWorkspace'
+        return
+    fi
+    _primary_count="$(printf '%s' "$_project" | jq '[.workspaces // [] | .[] | select(.isPrimary == true)] | length')"
+    case "$_primary_count" in
+        0) printf '%s\n' null ;;
+        1) printf '%s' "$_project" | jq -c '(.workspaces // [])[] | select(.isPrimary == true)' ;;
+        *) die "multiple primary workspaces ($_primary_count); expected exactly one" 3 ;;
+    esac
 }
 
 unique_project_by_repo() {
-    _canonical="$1"
+    case "$1" in
+        \{*) _canonical="$1" ;;
+        *) _canonical="$(canonical_repo_json "$1")" ;;
+    esac
     _identity="$(printf '%s' "$_canonical" | jq -r '.identity')"
     _projects="$(list_projects)" || die "failed to list Paperclip projects" 4
-    _matches="$(printf '%s' "$_projects" | jq -c --arg identity "$_identity" '
-        [ .[]
-          | . as $project
-          | (if (.primaryWorkspace? | type) == "object"
-             then [.primaryWorkspace]
-             else [(.workspaces // [])[] | select(.isPrimary == true)]
-             end) as $primary
-          | select(any($primary[]?; (.repoUrl? // "") as $url
-              | ($url | test("^(https?://)?github\\.com/"))
-              and (($url | sub("^https?://"; "") | sub("\\.git$"; "") | ascii_downcase) == $identity)))
-        ]
-    ' 2>/dev/null)" || die "Paperclip projects response is invalid" 4
-    _count="$(printf '%s' "$_matches" | jq 'length')"
+    _matches="$(printf '%s' "$_projects" | jq -c '.[]')"
+    _found=''
+    while IFS= read -r _project; do
+        [ -n "$_project" ] || continue
+        _workspace="$(primary_workspace_json "$_project")"
+        [ "$_workspace" != null ] || continue
+        _url="$(printf '%s' "$_workspace" | jq -r '.repoUrl // empty')"
+        [ -n "$_url" ] || continue
+        if _live_identity="$(canonical_repo_json "$_url" 2>/dev/null | jq -r '.identity')"; then
+            if [ "$_live_identity" = "$_identity" ]; then
+                _found="${_found}${_project}
+"
+            fi
+        fi
+    done <<EOF
+$_matches
+EOF
+    _count="$(printf '%s' "$_found" | sed '/^$/d' | wc -l)"
     if [ "$_count" -gt 1 ]; then
-        _details="$(printf '%s' "$_matches" | jq -r '.[] | "\(.id // "<no-id>") \(.name // "<unnamed>")"' | tr '\n' ';' | sed 's/;$//')"
+        _details="$(printf '%s' "$_found" | sed '/^$/d' | jq -r '"\(.id // \"<no-id>\") \(.name // \"<unnamed>\")"' | tr '\n' ';' | sed 's/;$//')"
         die "multiple Paperclip projects match $_identity: $_details" 3
     fi
     if [ "$_count" -eq 1 ]; then
-        printf '%s\n' "$_matches" | jq -c '.[0]'
+        printf '%s' "$_found" | sed '/^$/d' | jq -c .
     fi
 }
 
