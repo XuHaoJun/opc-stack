@@ -101,6 +101,8 @@ check "profile home exists" \
     docker compose exec -T hermes test -f "/opt/data/profiles/$PROFILE/config.yaml"
 check "profile .env carries an API_SERVER_KEY >=16 chars" \
     docker compose exec -T hermes sh -c "test \"\$(opc-env-value.sh /opt/data/profiles/$PROFILE/.env API_SERVER_KEY | wc -c)\" -ge 17"
+check "Scientist SOUL requires controlled reproducible evidence" \
+    docker compose exec -T hermes sh -c "grep -q 'baseline/control' /opt/data/profiles/$PROFILE/SOUL.md && grep -q 'UNVERIFIED' /opt/data/profiles/$PROFILE/SOUL.md"
 checkout "dashboard switcher lists the profile" "$PROFILE" \
     docker compose exec -T -u 10000 -e HOME=/opt/data -e HERMES_HOME=/opt/data hermes-dashboard /opt/hermes/bin/hermes profile list
 

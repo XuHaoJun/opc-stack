@@ -2,7 +2,7 @@
 # Export the variables from ./.env into the environment.
 #
 # `.env` is a docker-compose dotenv file, NOT a shell script. Compose's parser
-# accepts unquoted values containing spaces (PAPERCLIP_EXECUTOR_AGENT_NAME=OMP
+# accepts unquoted values containing spaces (PAPERCLIP_EXECUTOR_AGENT_NAME=Fullstack
 # Engineer), so sourcing the file with `.` splits that line and then tries to
 # run `Engineer` — the "command not found" noise this replaces.
 #

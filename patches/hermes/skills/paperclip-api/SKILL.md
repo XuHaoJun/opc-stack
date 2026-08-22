@@ -31,7 +31,7 @@ an internal container name and is useless in a chat message.
 | Add comment | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"body":"..."}' "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | List comments | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | Set status | `curl -fsS -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"status":"done"}' "$PAPERCLIP_API_URL/api/issues/<issueId>"` |
-| List agents (to resolve a lane) | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies/<companyId>/agents"` → match by `.name`, take `.id` |
+| List agents (to resolve a lane) | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies/<companyId>/agents"` → select engineering by `.role`; select other lanes by `.name`; take `.id` only from one exact match |
 
 The API key is a board key auto-created by the stack bootstrap (authenticates
 as the admin user). Every issue MUST carry an `assigneeAgentId` — Paperclip
@@ -41,14 +41,19 @@ unassigned ticket is a ticket nobody wakes up for.
 ## Routing: pick a lane
 
 The lane decides which agent gets the ticket, and therefore which skills and
-working style are applied. Resolve the lane to an agent id at call time by
-name — never hardcode an id, they change when the stack is rebuilt.
+working style are applied. Resolve the lane to an agent id from the live agent
+records at call time — never hardcode an id, because ids change when the stack
+is rebuilt and the engineering agent's name is configurable.
 
-| Lane | Agent name | Use for |
+| Lane | Agent selector | Use for |
 |---|---|---|
-| `engineering` | `OMP Engineer` | Real work: features, bug fixes, existing PRs/issues, anything whose output is meant to be kept |
-| `prototype` | `Prototyper` | Fast experiments with a live preview URL — "does this feel right", "what would this look like", "can X even work". Built quickly, then **kept for as long as the user wants it**; see the prototype section below |
-| `research` | `Scientist` | 還沒有答案的問題 —— 「這個做得到嗎」「哪個方案比較快」「這個資料長什麼樣」。科學家自己跑實驗蒐證，然後回報，**不會**直接產出要留下來的程式碼；它的產出是一份判斷加上一張 backlog 提案 |
+| `engineering` | Exactly one agent with `role == "engineer"` | Durable production work: end-to-end features, bug fixes, existing PRs/issues, and anything whose output is meant to be maintained |
+| `prototype` | Exact name `Prototyper` | Build the smallest inspectable named preview artifact — "does this feel right", "what would this look like", "can X even work". Keep it for as long as the user wants it; see the prototype section below |
+| `research` | Exact name `Scientist` | 還沒有答案的問題 —— 「這個做得到嗎」「哪個方案比較快」「這個資料長什麼樣」。科學家用可丟棄的實驗蒐證，然後回報判斷與 backlog 建議，**不會**直接產出要留下來的 production code |
+
+Engineering routing MUST produce exactly one `role == "engineer"` match. Zero
+or multiple matches is an explicit routing error: do not guess and do not
+create the ticket. Prototyper and Scientist remain exact-name selectors.
 
 **Default to `engineering` whenever you are not sure.** The two failure modes
 are not symmetric: a prototype request sent to engineering just gets built

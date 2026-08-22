@@ -7,7 +7,8 @@
 ## 結論速覽
 
 - 大部分 LLM / port / 認證類 env 是 **runtime**:`docker compose up -d` 即可生效,不需 rebuild。
-- 真正 **seed**(第一次 boot 燒進 volume/DB)的是 DB / minio / keys / bootstrap 相關。
+- executor 的名稱、top-level role/title/capabilities 與 managed prompt 是 **bootstrap reconcile**；`adapterConfig` 保留：重跑 one-shot 即收斂，不必清 volume。
+- 真正 **seed**(第一次 boot 燒進 volume/DB)的是 DB / minio / keys 與 create-only bootstrap 資料。
 - 兩個**死變數**:寫在 .env.example,但 compose 沒接線,改了沒有效果。
 
 ---
@@ -48,6 +49,12 @@ and uses `TENCENTDB_LLM_API_KEY` only as fallback. The Buzz relay itself does
 not consume the LLM key; its separate frontdoor ACP uses the canonical
 provider settings.
 
+## Bootstrap reconcile — 重跑 one-shot 即收斂
+
+| Env | 生效方式 |
+|---|---|
+| `PAPERCLIP_EXECUTOR_AGENT_NAME` | executor 由 `paperclip-bootstrap` 每次執行時 reconcile：名稱、top-level `role`/`title`/`capabilities` 與 bootstrap-owned managed prompt 會收斂，既有 `adapterConfig` 保留。既有名稱若**精確等於** legacy `OMP Engineer`，會依原 agent ID 就地改名為 `Fullstack Engineer`，不建立重複 agent；真正自訂過的名稱保持自訂，不會被覆蓋。變更後重跑 `paperclip-bootstrap` one-shot 即可，不需清 volume |
+
 ## Seed — 第一次 boot 燒進 volume/DB,事後改要清 volume 或手動修
 
 | Env | 為什麼是 seed |
@@ -56,7 +63,7 @@ provider settings.
 | `BUZZ_DB_PASSWORD` | postgres `POSTGRES_PASSWORD` 只在 volume 首次初始化時寫入。事後改會讓 buzz 的 `DATABASE_URL` 對不上 DB 實際密碼(要 `ALTER USER` 或砍 `buzz-pgdata`) |
 | `BUZZ_S3_ACCESS_KEY` / `BUZZ_S3_SECRET_KEY` | minio root creds 燒在 minio data volume 首次 init;事後改會弄掛 `buzz-minio-init` 的 `mc alias set` 與 buzz 的 S3 存取 |
 | `BUZZ_S3_BUCKET` | `mc mb --ignore-existing` 冪等;改名字只是新增空 bucket,舊媒體留在舊 bucket(要手動搬) |
-| `PAPERCLIP_ADMIN_EMAIL/PASSWORD/NAME`、`PAPERCLIP_COMPANY_NAME`、`PAPERCLIP_EXECUTOR_AGENT_NAME` | 只被 `paperclip-bootstrap` one-shot 吃(idempotent:admin/company/agent 已存在即跳過)。事後改 admin 密碼要在 Paperclip UI 改 |
+| `PAPERCLIP_ADMIN_EMAIL/PASSWORD/NAME`、`PAPERCLIP_COMPANY_NAME` | admin/company 由 `paperclip-bootstrap` one-shot 建立；已存在即保留。事後改 admin 密碼要在 Paperclip UI 改 |
 | `PAPERCLIP_API_KEY`(無 .env 變數;entrypoint 從 `/keys/paperclip-api.key` 注入) | bootstrap 寫 key 檔(只回傳一次)。換 key 要清 opc-keys volume 內該檔或重跑 bootstrap |
 | `TENCENTDB_ADMIN_USERNAME/USER_KEY` | `init-admin` idempotent(已存在回 409);事後改沒效果,且 USER_KEY 改了會使 provision 的 `/v3/meta/auth/verify` 失敗 |
 | `TENCENTDB_TEAM_ID/NAME`、`TENCENTDB_AGENT_ID/NAME` | 只進 `tencentdb-bootstrap` 的 get-before-create;hermes/frontdoor 的 memory 寫入在 compose 硬編碼 `team=opc` / `agt-hermes-front-door`(未接 .env)。事後改只生空 team/agent,資料仍寫在原 id 下 |

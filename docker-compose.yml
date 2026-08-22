@@ -784,7 +784,7 @@ services:
       PAPERCLIP_ADMIN_PASSWORD: ${PAPERCLIP_ADMIN_PASSWORD:?set in .env}
       PAPERCLIP_ADMIN_NAME: ${PAPERCLIP_ADMIN_NAME:-Admin}
       PAPERCLIP_COMPANY_NAME: ${PAPERCLIP_COMPANY_NAME:-OPC}
-      PAPERCLIP_EXECUTOR_AGENT_NAME: ${PAPERCLIP_EXECUTOR_AGENT_NAME:-OMP Engineer}
+      PAPERCLIP_EXECUTOR_AGENT_NAME: ${PAPERCLIP_EXECUTOR_AGENT_NAME:-Fullstack Engineer}
       PAPERCLIP_SCIENTIST_AGENT_NAME: ${PAPERCLIP_SCIENTIST_AGENT_NAME:-Scientist}
       # Same value the hermes entrypoint seeds into the profile's own .env —
       # this is the credential paperclip presents on /p/agt-scientist.

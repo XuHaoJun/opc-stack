@@ -98,6 +98,22 @@ has "memory tenancy: tencentdb-bootstrap one-shot"    patches/tencentdb-agent-me
 # declaration near the top of the script, so deleting the reconcile call
 # entirely left this row green (RED-tested, fix round 1).
 has "board agent: paperclip-bootstrap one-shot"       patches/paperclip/opc-paperclip-bootstrap.sh 'reconcile_agent "$SCIENTIST_NAME" hermes_gateway sci_desired_config'
+hasall "executor identity and prompt are reconciled" patches/paperclip/opc-paperclip-bootstrap.sh \
+    'DEFAULT_EXECUTOR_NAME="Fullstack Engineer"' \
+    'LEGACY_EXECUTOR_NAME="OMP Engineer"' \
+    'api_patch_raw "/agents/$agent_id"' \
+    'reconcile_agent_instructions "$agent_id" "$FULLSTACK_PROMPT"'
+hasall "Prototyper prompt is reconciled" patches/paperclip/opc-paperclip-bootstrap.sh \
+    'reconcile_agent_instructions "$_prototyper_id" "$PROTOTYPER_PROMPT"'
+has "coding-agent prompts ship in the Paperclip image" patches/paperclip/Dockerfile \
+    'COPY opc/agent-prompts/ /opt/opc-agent-prompts/'
+hasall "managed prompts clear legacy prompt authority" patches/paperclip/opc-paperclip-bootstrap.sh \
+    'api_get "/agents/$_rai_id"' \
+    'has("promptTemplate")' \
+    'has("bootstrapPromptTemplate")'
+hasall "engineering routing supports custom executor names" patches/buzz/skills/paperclip-api/SKILL.md \
+    'role == "engineer"' \
+    'exactly one'
 # Asserts the real producer action, not just that a service block named
 # devenv-expert-leases exists somewhere in the compose file. The full
 # invocation (with --env-file) is required because the bare
