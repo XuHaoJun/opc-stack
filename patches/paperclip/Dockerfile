@@ -191,6 +191,7 @@ COPY opc/templates/ /usr/local/lib/prototype/templates/
 # Vendored third-party skills, installed into the company library by
 # opc-paperclip-bootstrap.sh (Paperclip's GitHub importer drops sibling files).
 COPY opc/skills/ /opt/opc-skills/
+COPY opc/agent-prompts/ /opt/opc-agent-prompts/
 COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \

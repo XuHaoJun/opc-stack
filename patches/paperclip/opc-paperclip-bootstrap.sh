@@ -12,7 +12,7 @@
 #   6. Prototyper agent (omp, scoped to the prototype/prototype-workspace/devenv skills).
 #   7. Scientist agent (hermes_gateway adapter → the gateway's agt-scientist profile).
 #
-# Re-run reconciles missing pieces only. The key file is the source of truth:
+# Re-run reconciles bootstrap-owned state. The key file is the source of truth:
 # if it exists, the key is not re-created (the token is only returned once)
 # and reconciliation uses it as bearer auth instead of the admin session.
 set -eu
@@ -23,10 +23,17 @@ ADMIN_EMAIL="${PAPERCLIP_ADMIN_EMAIL:-admin@opc.local}"
 ADMIN_PASSWORD="${PAPERCLIP_ADMIN_PASSWORD:-}"
 ADMIN_NAME="${PAPERCLIP_ADMIN_NAME:-Admin}"
 COMPANY_NAME="${PAPERCLIP_COMPANY_NAME:-OPC}"
-AGENT_NAME="${PAPERCLIP_EXECUTOR_AGENT_NAME:-OMP Engineer}"
+DEFAULT_EXECUTOR_NAME="Fullstack Engineer"
+LEGACY_EXECUTOR_NAME="OMP Engineer"
+case "${PAPERCLIP_EXECUTOR_AGENT_NAME:-}" in
+    ""|"$LEGACY_EXECUTOR_NAME") AGENT_NAME="$DEFAULT_EXECUTOR_NAME" ;;
+    *) AGENT_NAME="$PAPERCLIP_EXECUTOR_AGENT_NAME" ;;
+esac
 PROTOTYPER_NAME="${PAPERCLIP_PROTOTYPER_AGENT_NAME:-Prototyper}"
 SCIENTIST_NAME="${PAPERCLIP_SCIENTIST_AGENT_NAME:-Scientist}"
 SKILLS_SRC="${OPC_SKILLS_DIR:-/opt/opc-skills}"
+FULLSTACK_PROMPT="/opt/opc-agent-prompts/fullstack-engineer.md"
+PROTOTYPER_PROMPT="/opt/opc-agent-prompts/prototyper.md"
 KEY_NAME="${PAPERCLIP_KEY_NAME:-frontdoor}"
 JAR=/tmp/pc-cookies.txt
 
@@ -79,6 +86,54 @@ api_patch_raw() { # path  (body on stdin)
     fi
 }
 
+api_put_raw() { # path  (body on stdin)
+    if [ "$AUTH_MODE" = key ]; then
+        curl -fsS -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+            -H "Origin: $ORIGIN" -X PUT "$API$1" --data-binary @- 2>/dev/null || true
+    else
+        curl -fsS -b "$JAR" -H 'Content-Type: application/json' \
+            -H "Origin: $ORIGIN" -X PUT "$API$1" --data-binary @- 2>/dev/null || true
+    fi
+}
+
+reconcile_agent_instructions() { # agent-id source-file
+    _rai_id="$1"
+    _rai_source="$2"
+
+    if [ ! -f "$_rai_source" ] || [ ! -r "$_rai_source" ]; then
+        echo "[pc-bootstrap] WARNING agent instructions source unavailable: $_rai_source" >&2
+        return 1
+    fi
+
+    _rai_live_json="$(api_get "/agents/$_rai_id/instructions-bundle/file?path=AGENTS.md")"
+    _rai_detail_json="$(api_get "/agents/$_rai_id")"
+    _rai_want="$(jq -Rs . < "$_rai_source")"
+    if printf '%s' "$_rai_live_json" \
+         | jq -e '.path == "AGENTS.md" and (.content | type == "string")' >/dev/null 2>&1 \
+       && printf '%s' "$_rai_detail_json" \
+         | jq -e '.adapterConfig
+                   | type == "object"
+                     and (has("promptTemplate") | not)
+                     and (has("bootstrapPromptTemplate") | not)' >/dev/null 2>&1; then
+        _rai_live="$(printf '%s' "$_rai_live_json" | jq -c '.content')"
+        if [ "$_rai_live" = "$_rai_want" ]; then
+            echo "[pc-bootstrap] agent instructions current: $_rai_id"
+            return 0
+        fi
+    fi
+
+    if jq -n --arg p AGENTS.md --rawfile c "$_rai_source" \
+         '{path:$p, content:$c, clearLegacyPromptTemplate:true}' \
+         | api_put_raw "/agents/$_rai_id/instructions-bundle/file" \
+         | jq -e '.path == "AGENTS.md"' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] agent instructions reconciled: $_rai_id"
+        return 0
+    fi
+
+    echo "[pc-bootstrap] WARNING could not reconcile AGENTS.md for agent $_rai_id" >&2
+    return 1
+}
+
 api_post() { # path body
     if [ "$AUTH_MODE" = key ]; then
         curl -fsS -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
@@ -122,16 +177,97 @@ else
 fi
 
 # ── 3. Executor agent (claude_local → omp acp) ──
-agent_id="$(api_get "/companies/$company_id/agents" | \
+EXECUTOR_ROLE="engineer"
+EXECUTOR_TITLE="Fullstack Engineer"
+EXECUTOR_CAPABILITIES="Implements and maintains durable production systems."
+
+_agents_json="$(api_get "/companies/$company_id/agents")"
+if ! printf '%s' "$_agents_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "[pc-bootstrap] executor lookup failed" >&2
+    exit 1
+fi
+
+_desired_agent_id="$(printf '%s' "$_agents_json" | \
     jq -r --arg n "$AGENT_NAME" '.[] | select(.name == $n) | .id' 2>/dev/null | head -1)"
+_legacy_agent_id=""
+if [ "$AGENT_NAME" = "$DEFAULT_EXECUTOR_NAME" ]; then
+    _legacy_agent_id="$(printf '%s' "$_agents_json" | \
+        jq -r --arg n "$LEGACY_EXECUTOR_NAME" '.[] | select(.name == $n) | .id' 2>/dev/null | head -1)"
+fi
+
+if [ -n "$_desired_agent_id" ] && [ -n "$_legacy_agent_id" ]; then
+    echo "[pc-bootstrap] FATAL executor identity collision: both '$DEFAULT_EXECUTOR_NAME' and '$LEGACY_EXECUTOR_NAME' exist" >&2
+    exit 1
+fi
+
+agent_id="$_desired_agent_id"
+if [ -z "$agent_id" ] && [ -n "$_legacy_agent_id" ]; then
+    agent_id="$_legacy_agent_id"
+    _rename_response="$(jq -nc \
+        --arg n "$DEFAULT_EXECUTOR_NAME" \
+        --arg r "$EXECUTOR_ROLE" \
+        --arg t "$EXECUTOR_TITLE" \
+        --arg c "$EXECUTOR_CAPABILITIES" \
+        '{name:$n, role:$r, title:$t, capabilities:$c}' \
+        | api_patch_raw "/agents/$agent_id")"
+    if ! printf '%s' "$_rename_response" | jq -e \
+         --arg id "$agent_id" --arg n "$DEFAULT_EXECUTOR_NAME" \
+         '.id == $id and .name == $n' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] executor rename failed: $LEGACY_EXECUTOR_NAME ($agent_id)" >&2
+        exit 1
+    fi
+    echo "[pc-bootstrap] renamed executor: $LEGACY_EXECUTOR_NAME -> $DEFAULT_EXECUTOR_NAME ($agent_id)"
+fi
+
 if [ -z "$agent_id" ]; then
-    agent_id="$(api_post "/companies/$company_id/agents" \
-        "{\"name\":\"$AGENT_NAME\",\"adapterType\":\"claude_local\",\"adapterConfig\":{\"engine\":\"acp\",\"agentCommand\":\"omp acp --yolo\"}}" | jq -r '.id // empty')"
-    [ -n "$agent_id" ] || { echo "[pc-bootstrap] agent creation failed (auth?)"; exit 1; }
+    _create_response="$(jq -nc \
+        --arg n "$AGENT_NAME" \
+        --arg r "$EXECUTOR_ROLE" \
+        --arg t "$EXECUTOR_TITLE" \
+        --arg c "$EXECUTOR_CAPABILITIES" \
+        '{name:$n, role:$r, title:$t, capabilities:$c,
+          adapterType:"claude_local",
+          adapterConfig:{engine:"acp", agentCommand:"omp acp --yolo"}}' \
+        | api_post_raw "/companies/$company_id/agents")"
+    agent_id="$(printf '%s' "$_create_response" | jq -r '.id // empty')"
+    if [ -z "$agent_id" ] || ! printf '%s' "$_create_response" | jq -e \
+         --arg id "$agent_id" --arg n "$AGENT_NAME" \
+         --arg r "$EXECUTOR_ROLE" --arg t "$EXECUTOR_TITLE" --arg c "$EXECUTOR_CAPABILITIES" \
+         '.id == $id and .name == $n and .role == $r and .title == $t and .capabilities == $c' \
+         >/dev/null 2>&1; then
+        echo "[pc-bootstrap] executor creation failed" >&2
+        exit 1
+    fi
     echo "[pc-bootstrap] created agent: $agent_id"
 else
-    echo "[pc-bootstrap] agent exists: $agent_id"
+    _executor_live="$(api_get "/companies/$company_id/agents" | \
+        jq -c --arg id "$agent_id" '.[]? | select(.id == $id)' 2>/dev/null | head -1)"
+    if ! printf '%s' "$_executor_live" | jq -e --arg id "$agent_id" '.id == $id' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] executor reconciliation lookup failed: $agent_id" >&2
+        exit 1
+    fi
+    if printf '%s' "$_executor_live" | jq -e \
+         --arg r "$EXECUTOR_ROLE" --arg t "$EXECUTOR_TITLE" --arg c "$EXECUTOR_CAPABILITIES" \
+         '.role == $r and .title == $t and .capabilities == $c' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] agent exists: $agent_id (identity current)"
+    else
+        _executor_response="$(jq -nc \
+            --arg r "$EXECUTOR_ROLE" --arg t "$EXECUTOR_TITLE" --arg c "$EXECUTOR_CAPABILITIES" \
+            '{role:$r, title:$t, capabilities:$c}' \
+            | api_patch_raw "/agents/$agent_id")"
+        if ! printf '%s' "$_executor_response" | jq -e \
+             --arg id "$agent_id" --arg n "$AGENT_NAME" \
+             --arg r "$EXECUTOR_ROLE" --arg t "$EXECUTOR_TITLE" --arg c "$EXECUTOR_CAPABILITIES" \
+             '.id == $id and .name == $n and .role == $r and .title == $t and .capabilities == $c' \
+             >/dev/null 2>&1; then
+            echo "[pc-bootstrap] executor metadata reconciliation failed: $agent_id" >&2
+            exit 1
+        fi
+        echo "[pc-bootstrap] executor metadata reconciled: $agent_id"
+    fi
 fi
+
+reconcile_agent_instructions "$agent_id" "$FULLSTACK_PROMPT" || true
 
 # ── 4. Board API key → /keys/paperclip-api.key ──
 if [ ! -s /keys/paperclip-api.key ]; then
@@ -346,6 +482,14 @@ proto_desired_config() { # live adapterConfig on stdin → desired on stdout
 }
 
 reconcile_agent "$PROTOTYPER_NAME" claude_local proto_desired_config || true
+
+_prototyper_id="$(api_get "/companies/$company_id/agents" | \
+    jq -r --arg n "$PROTOTYPER_NAME" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)"
+if [ -z "$_prototyper_id" ]; then
+    echo "[pc-bootstrap] WARNING Prototyper instruction reconcile skipped: exact-name lookup failed" >&2
+else
+    reconcile_agent_instructions "$_prototyper_id" "$PROTOTYPER_PROMPT" || true
+fi
 
 # ── 7. Scientist agent (remote hermes profile) ──
 # Unlike the two local agents above, this one runs somewhere else: the hermes

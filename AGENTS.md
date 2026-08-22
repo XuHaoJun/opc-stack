@@ -41,8 +41,9 @@ Buzz  (或 hermes-dashboard chat / 未來 Telegram — 同一個 agent, 不同 p
   ├─ 成為公司共識 ──→ TencentDB Wiki / CodeGraph   (服務在跑, 尚未接)
   └─ 承諾要完成 ────→ Paperclip issue
                           │ hermes 在此決定 lane (見「已知坑」的路由條目)
-                          ├─ engineering → OMP Engineer
-                          └─ prototype   → Prototyper
+                          ├─ engineering → Fullstack Engineer
+                          ├─ prototype   → Prototyper
+                          └─ research    → Scientist
 ```
 
 這張圖是好幾條規則的由來:
@@ -50,6 +51,9 @@ Buzz  (或 hermes-dashboard chat / 未來 Telegram — 同一個 agent, 不同 p
 - **Hermes Kanban 關掉** (不變量 2) — Paperclip 才是 work truth, 不能有第二套。同理禁止任何 runtime 的
   internal todo/plan 跨 invocation 存活: 要被別人接手或被人追蹤, 就得 materialize 成 Paperclip issue。
 - **派工路由放 skill 而非 system_prompt** — hermes 是上圖的 triage 層, 而三個入口是同一個 agent。
+- **三條 lane 的交付邊界不可混用** — Fullstack Engineer 負責可長期維護的端到端
+  production implementation；Prototyper 只交付最小、可檢視且具名的 preview artifact；
+  Scientist 只用可丟棄的實驗產生證據與 backlog 建議，不直接交付 production code。
 - **memory 只影響 reasoning** — recall 到「上次說 production 可以自動 deploy」只是 context, **不得**
   當成 capability / credential / production / 付款 / 對外授權的依據。PRD 硬邊界, 破壞它算 architecture
   regression 不算 integration 便利。
@@ -221,7 +225,7 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
   openai.com, 而我們的 base_url 是 opencode.ai, 最後落到 `"no-key-required"`
   (與 `1881e40` 修的同一件事, 每個 profile 各要一份)。
 - **`config.yaml` 不是放「必須成立的規則」的地方**: seed 是「不存在才寫」, 而且 **hermes 會自己遷移它** — frontdoor 的 volume 被遷到 `_config_version 37` 的過程中 **`system_prompt` 整個不見了**, 於是它有很長一段時間在**沒有 system prompt** 的狀態下跑, 而沒有任何地方會顯示這件事。config.yaml 現在只放對話語氣與 Buzz 發文機制, 且每次開機 reconcile。
-- **派工路由住在 `paperclip-api` skill, 不在 system_prompt**: hermes 是決定 assignee 的那一層 (Paperclip 在本 stack 沒有自動路由 — 無 CEO、org 全扁平、`role=general`, 未指派的 ticket 沒人會醒)。lane 表 (`engineering`→`OMP Engineer` / `prototype`→`Prototyper`) 放 skill 的理由: skill 由 image 在每次開機同步進 **兩個** hermes home (frontdoor 與 gateway), 而 `config.yaml` 的 system_prompt 是 per-home 且 dashboard 可編輯 — 規則放 prompt 會分歧。**改 skill 要同時改 `patches/buzz/skills/` 與 `patches/hermes/skills/` 兩份** (內容必須相同)。channel 層的 `platforms.<name>.channel_overrides[channel_id]` 可覆寫 system_prompt/model, 但那是 per-platform × per-channel-id, 只適合當加速器, 不要拿來當路由機制。
+- **派工路由住在 `paperclip-api` skill, 不在 system_prompt**: hermes 是決定 assignee 的那一層 (Paperclip 在本 stack 沒有自動路由 — agents 的 `reportsTo=null`、org 扁平, 未指派的 ticket 沒人會醒)。lane 表 (`engineering`→`Fullstack Engineer` / `prototype`→`Prototyper` / `research`→`Scientist`) 放 skill 的理由: skill 由 image 在每次開機同步進 **兩個** hermes home (frontdoor 與 gateway), 而 `config.yaml` 的 system_prompt 是 per-home 且 dashboard 可編輯 — 規則放 prompt 會分歧。**改 skill 要同時改 `patches/buzz/skills/` 與 `patches/hermes/skills/` 兩份** (內容必須相同)。channel 層的 `platforms.<name>.channel_overrides[channel_id]` 可覆寫 system_prompt/model, 但那是 per-platform × per-channel-id, 只適合當加速器, 不要拿來當路由機制。
 - **preview 的對外位址由 `PAPERCLIP_PUBLIC_URL` 決定, 不要另外設一份**: `DEVENV_HTTP_PUBLIC_HOST` 留空時從它的 host 推導 (`providers/http.sh`)。理由是 preview 連結**長在 board 上**, 兩者必然從同一個地方被存取 —— 寫成兩個變數只會製造「board 開得起來、連結打不開」這種只有症狀沒有訊息的分歧。發佈位址 `DEVENV_HTTP_BIND` 預設 `0.0.0.0`(與 paperclip/buzz/hermes 一致); 要收窄就設 `127.0.0.1` 或 tailnet IP。**改了要 recreate paperclip 容器**(docker 的 port 發佈在建立容器時固定)。
 - **prototype 目錄的擁有者必須是 runtime user (`node`)**: paperclip server 與它 spawn 的 dev server 都是 node, 但人用 `docker compose exec` 是 root。root 建出來的樹會讓 `expose --start` 回 **500**, 而真正的原因 (`EACCES: mkdir .next/dev`) 只出現在 paperclip 的 log 裡, 看起來完全不像權限問題。`prototype` CLI 在以 root 執行時會自動 chown; 同一類問題也影響 git (`dubious ownership` → `|| true` 包住的 commit 靜靜失敗)。
 - **project-only skill = 放進專案目錄, 不是 Paperclip 的 scope**: Paperclip 的 `sharingScope` 只有 `private|company|public_link`, **沒有 project 這個層級**。omp 從工作目錄探索 skill (binary 裡有 `.claude/skills` / `.agents/skills` / `.omp/skills` 三種), 所以 `prototype skill add <name> --from <repo>` 把它 vendor 進 `<project>/.claude/skills/` 並 pin SHA —— 只有這個 prototype 的 session 看得到。用 `.claude/skills` 是因為 Claude Code 也讀它, 換 engine 不會壞。

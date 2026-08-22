@@ -156,13 +156,18 @@ OpenAI-compatible endpoint works for every project above.
 
 | Project | URL | What you do there |
 |---|---|---|
-| **Paperclip** | http://localhost:3100 | Auto-bootstrapped by the `paperclip-bootstrap` one-shot: first admin (log in with `PAPERCLIP_ADMIN_EMAIL` / `PAPERCLIP_ADMIN_PASSWORD` from `.env`), default company, the OMP executor agent, and the frontdoor API key (written to the keys volume — no manual step). Then, optionally, Agents → add a **Hermes Gateway** agent: `apiBaseUrl: http://hermes:8642`, `apiKey: <HERMES_API_SERVER_KEY from .env>`. |
+| **Paperclip** | http://localhost:3100 | Auto-bootstrapped by the `paperclip-bootstrap` one-shot: first admin (log in with `PAPERCLIP_ADMIN_EMAIL` / `PAPERCLIP_ADMIN_PASSWORD` from `.env`), default company, the Fullstack Engineer executor agent, and the frontdoor API key (written to the keys volume — no manual step). Then, optionally, Agents → add a **Hermes Gateway** agent: `apiBaseUrl: http://hermes:8642`, `apiKey: <HERMES_API_SERVER_KEY from .env>`. |
 | **Hermes dashboard** | http://localhost:9119 | Basic auth: `HERMES_DASHBOARD_USERNAME` / `HERMES_DASHBOARD_PASSWORD` from `.env`. Served by the `hermes-dashboard` container over the Buzz front door's hermes home — **Sessions** (Automation/All filter 才看得到 ACP session) 與 **Logs → AGENT** (live agent log, 含 `acp::thought` chain-of-thought, 由 frontdoor 的 RUST_LOG + tee 餵進 `/opt/data/logs/agent.log`)。Kanban disabled by config. 注意: 頁面右上「Restart Gateway」會啟動 shared home 上的 gateway supervisor (可能接手 agent 的 pending work), 非必要別按。 |
 | **Hermes API server** | http://localhost:8642 | OpenAI-compatible gateway (`API_SERVER_KEY`). Swagger under `/docs` if exposed. |
 | **Buzz** | http://localhost:3000 | Git repos browser (`BUZZ_SERVE_GIT_WEB_GUI`). Buzz's real surface is the **desktop app**: download Buzz Desktop, add workspace `ws://<this-machine-LAN-IP>:3000`, then ask the owner for an invite code (relay is closed by default — see below). |
 | **TencentDB panel** | http://localhost:8125 | Log in with the admin key `TENCENTDB_ADMIN_USER_KEY` from `.env` (created automatically by the one-shot init-admin container). Create Teams/Agents/Tasks, browse memory (L0–L3). |
 | **TencentDB knowledge** | http://localhost:8424/docs | Knowledge service Swagger (wiki / code-graph). |
 | **TencentDB proxy** | http://localhost:8096 | LLM forward proxy with memory injection. Point a coding agent at it (see below). |
+
+The three execution lanes stay separate: **Fullstack Engineer** owns durable,
+end-to-end production implementation; **Prototyper** produces the smallest
+inspectable named preview artifact; **Scientist** runs disposable experiments
+that produce evidence and backlog recommendations, not production code.
 
 ### Buzz: adding users (closed relay, default)
 
@@ -238,9 +243,19 @@ Setup (one-time):
    Rewrites ssh `IdentityFile` paths to the container layout and pre-seeds
    the `github.com` host key. No rebuild needed.
 
-The Paperclip admin/company/executor agent/API key are created automatically
-by the `paperclip-bootstrap` one-shot (see Setup pages above); the frontdoor
-and hermes entrypoints load `PAPERCLIP_API_KEY` from the keys volume at boot.
+The Paperclip admin/company/API key are created automatically by the
+`paperclip-bootstrap` one-shot (see Setup pages above); the executor agent is
+created or reconciled. An existing agent named exactly `OMP Engineer` is
+renamed in place to `Fullstack Engineer` by ID, while genuine custom names stay
+custom. To apply this reconciliation to an existing install:
+
+```bash
+scripts/prepare.sh
+docker compose build paperclip && docker compose up --force-recreate --no-deps paperclip-bootstrap
+```
+
+The frontdoor and hermes entrypoints load `PAPERCLIP_API_KEY` from the keys
+volume at boot.
 
 How it works: entrypoints set `GIT_SSH_COMMAND` / `GH_CONFIG_DIR` /
 `GIT_CONFIG_GLOBAL` from `/creds` (paperclip's omp inherits them), the
@@ -288,8 +303,8 @@ entrypoint re-adds them automatically.
 the entrypoint installs the prebuilt `github:can1357/oh-my-pi@17.4.0` into each
 `*-mise` volume on first boot (and re-adds it if missing). The nix derivation
 can't build in image environments (bun EPERM), so omp is not part of the nix
-seed. It runs as the `OMP Engineer` agent via the claude_local adapter with
-`agentCommand: "omp acp --yolo"`.
+seed. It runs as the `Fullstack Engineer` agent via the claude_local adapter
+with `agentCommand: "omp acp --yolo"`.
 
 The entrypoint check is **install-if-missing, not reconcile** — bumping the pin
 in `patches/*/opc-mise-seed.sh` only affects volumes that are still empty, so an

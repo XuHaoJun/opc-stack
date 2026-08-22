@@ -18,11 +18,11 @@ OPC Stack 是為單一操作者設計的 Docker Compose agent company runtime，
 | Agent | Runtime | 職責 |
 |---|---|---|
 | **Chief of Staff** | Front-door Hermes | 主要對話窗口；掌握上下文、判斷意圖、建立與分派工作，但不自己實作 |
-| **OMP Engineer** | OMP | Coding agent；處理要長期保留的功能、bug fix、既有 issue 與 PR |
-| **Prototyper** | OMP | Coding agent；快速建立可互動、附固定 preview URL 的產品原型 |
-| **Scientist** | Hermes expert profile | Research agent；自己寫實驗、蒐集證據並回報判斷，不直接交付 production code |
+| **Fullstack Engineer** | OMP | Durable production coding agent；負責端到端實作要長期保留的功能、bug fix、既有 issue 與 PR |
+| **Prototyper** | OMP | Prototype lane；用最小、可檢視且具名的 preview artifact 快速驗證產品方向 |
+| **Scientist** | Hermes expert profile | Research lane；用可丟棄的實驗產生證據與 backlog 建議，不直接交付 production code |
 
-兩個 coding agents 是 **OMP Engineer** 與 **Prototyper**；**Scientist** 則是跑在 Hermes gateway 裡、具獨立身分與常駐 devenv 租約的研究員。
+兩個 coding agents 是負責 durable production implementation 的 **Fullstack Engineer**，以及負責 prototype lane 的 **Prototyper**；**Scientist** 則是跑在 Hermes gateway 裡、具獨立身分與常駐 devenv 租約的 research lane。
 
 ## 架構
 
@@ -34,7 +34,7 @@ flowchart TD
     Frontdoor -->|"承諾完成"| Paperclip["Paperclip<br/>durable work authority"]
     Frontdoor <-->|"recall / capture"| Memory["TencentDB Agent Memory<br/>記憶與知識"]
 
-    Paperclip <-->|"assignment / result / status"| Runtime["Execution agents<br/>OMP Engineer · Prototyper · Scientist"]
+    Paperclip <-->|"assignment / result / status"| Runtime["Execution agents<br/>Fullstack Engineer · Prototyper · Scientist"]
     Runtime --> Git["Git repo<br/>code / docs truth"]
     Runtime -.->|"shared resource lease"| Devenv["devenv<br/>PostgreSQL · Valkey · S3 · HTTP"]
     Runtime -.->|"dedicated daemon lease"| Podenv["podenv<br/>rootless nested containers"]
