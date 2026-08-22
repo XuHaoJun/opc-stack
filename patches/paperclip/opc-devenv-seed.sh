@@ -103,6 +103,24 @@ opc_devenv_check_port_pool() {
     _dv_base="${DEVENV_HTTP_PORT_BASE:-21000}"
     _dv_count="${DEVENV_HTTP_PORT_COUNT:-16}"
     _dv_end="${DEVENV_HTTP_PORT_RANGE_END:-}"
+
+    # Validate BEFORE the arithmetic, not after: `$((...))` on a non-numeric
+    # operand is an EXPANSION error under dash, not a command that returns
+    # nonzero — it aborts the shell outright, and the caller's `|| true`
+    # does NOT save it (the crash happens before there is a command to
+    # attach `||` to). A typo'd DEVENV_HTTP_PORT_BASE/COUNT in `.env` used to
+    # crash-loop paperclip's entrypoint this way. Warn and skip instead —
+    # this check is a warning-only nicety, not load-bearing.
+    case "$_dv_base" in
+        ''|*[!0-9]*)
+            echo "[devenv-seed] WARNING DEVENV_HTTP_PORT_BASE='$_dv_base' is not a positive integer — skipping the port-pool check" >&2
+            return 0 ;;
+    esac
+    case "$_dv_count" in
+        ''|*[!0-9]*)
+            echo "[devenv-seed] WARNING DEVENV_HTTP_PORT_COUNT='$_dv_count' is not a positive integer — skipping the port-pool check" >&2
+            return 0 ;;
+    esac
     _dv_last=$((_dv_base + _dv_count - 1))
 
     # (1) RANGE_END out of sync with BASE + COUNT. compose cannot do

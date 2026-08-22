@@ -35,9 +35,20 @@ opc_podenv_seed_schema() {
         echo "[podenv-seed] $_pe_db on $_pe_host:$_pe_port unreachable — skipping" >&2
         return 0
     fi
+    # Fold-in (review): this used to swallow psql's stderr entirely on
+    # failure ("schema apply failed — podenv will not work", no reason) and
+    # never retried. devenv's twin (opc_devenv_seed_schema, same concurrent-
+    # apply reasoning: two callers — the entrypoint and, in devenv's case,
+    # the devenv-expert-leases one-shot — can race the same idempotent DDL)
+    # retries once and only swallows stderr on attempts that still have
+    # another chance; match it here so the operator actually learns why on
+    # a genuine failure instead of a dead end.
     if PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" PGOPTIONS='-c client_min_messages=warning' \
         psql -h "$_pe_host" -p "$_pe_port" -U "$_pe_user" -d "$_pe_db" \
-             -q -v ON_ERROR_STOP=1 -f "$_pe_sql" >/dev/null 2>&1; then
+             -q -v ON_ERROR_STOP=1 -f "$_pe_sql" >/dev/null 2>&1 \
+        || PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" PGOPTIONS='-c client_min_messages=warning' \
+        psql -h "$_pe_host" -p "$_pe_port" -U "$_pe_user" -d "$_pe_db" \
+             -q -v ON_ERROR_STOP=1 -f "$_pe_sql" >/dev/null; then
         echo "[podenv-seed] $_pe_db schema ready (podenv_lease + podenv_usage)"
     else
         echo "[podenv-seed] schema apply failed — podenv will not work" >&2
@@ -54,6 +65,27 @@ opc_podenv_check_port_pool() {
     _pe_base="${PODENV_PORT_BASE:-23000}"
     _pe_count="${PODENV_PORT_COUNT:-16}"
     _pe_end="${PODENV_PORT_RANGE_END:-}"
+
+    # Validate BEFORE the arithmetic, not after: `$((...))` on a non-numeric
+    # operand is an EXPANSION error under dash, not a command that returns
+    # nonzero — it aborts the shell outright, and the caller's `|| true`
+    # (opc_podenv_seed) does NOT save it, because the crash happens before
+    # there is a command left to attach `||` to. This is a line-for-line
+    # copy of opc-devenv-seed.sh's opc_devenv_check_port_pool and had the
+    # identical bug: a typo'd PODENV_PORT_BASE/COUNT in `.env` crash-loops
+    # paperclip's entrypoint. Warn and skip instead — this check is a
+    # warning-only nicety, not load-bearing. (Fixed in both copies together
+    # — one fixed and one not would be worse than either extreme.)
+    case "$_pe_base" in
+        ''|*[!0-9]*)
+            echo "[podenv-seed] WARNING PODENV_PORT_BASE='$_pe_base' is not a positive integer — skipping the port-pool check" >&2
+            return 0 ;;
+    esac
+    case "$_pe_count" in
+        ''|*[!0-9]*)
+            echo "[podenv-seed] WARNING PODENV_PORT_COUNT='$_pe_count' is not a positive integer — skipping the port-pool check" >&2
+            return 0 ;;
+    esac
     _pe_last=$((_pe_base + _pe_count - 1))
 
     if [ -n "$_pe_end" ] && [ "$_pe_end" -ne "$_pe_last" ]; then
