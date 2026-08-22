@@ -87,9 +87,7 @@ for _c in $_ids; do
     # `start` returning 0 is not proof of life (see header) — verify by
     # actually reaching the lease's own published port, the same standard
     # opc-prototype-restore.sh holds preview servers to: never trust a
-    # daemon's recorded state, probe it. A bare TCP connect (not an HTTP
-    # request) is the probe, since a lease can be any protocol podenv leases
-    # out (postgres, redis, mysql, ...), not just HTTP.
+    # daemon's recorded state, probe it.
     _portline="$(podman_r port "$_c" 2>/dev/null | head -1)"
     _port="$(printf '%s' "$_portline" | sed -n 's/.*:\([0-9]\+\)[[:space:]]*$/\1/p')"
     if [ -z "$_port" ]; then
@@ -101,19 +99,56 @@ for _c in $_ids; do
         continue
     fi
 
+    # CORRECTED (this task, previous claim measured false — see
+    # task-5-report.md): this used to say a bare TCP connect (`: <
+    # /dev/tcp/...`) proves the lease "answers." Measured: pasta's
+    # port-forwarder completes the TCP handshake with the caller EVEN WHEN
+    # NOTHING IS LISTENING on the forwarded port inside the container — it
+    # accepts the connection optimistically, then makes its OWN inner
+    # connect to the backend, and only resets once that inner connect fails.
+    # A bare connect against a container that is genuinely RUNNING but has
+    # nothing bound to its port (measured directly: an alpine lease sleeping
+    # forever, never binding anything) returns success — proving only "the
+    # forwarder is up," never "something answered." When the container is
+    # fully exited the connect DOES correctly fail (pasta is gone with it),
+    # so this only matters in the window where the container runs and the
+    # daemon has not bound yet — exactly the window a legitimately slow
+    # daemon (mysql initialising its data directory) passes through too, so
+    # the fix cannot just fail faster; it has to look harder.
+    #
+    # Fix: exchange data instead of stopping at the handshake. Write a
+    # syntactically-terminated minimal HTTP GET (the trailing blank line
+    # matters: without it, a real HTTP server just keeps waiting for the
+    # rest of a request that will never arrive, which is
+    # indistinguishable from a hang) and try to read one byte back with a
+    # bounded timeout. Measured against every lease shape this probe has to
+    # tell apart: a running-but-unbound alpine lease fails the read almost
+    # instantly ("connection reset by peer" — pasta's inner connect refused,
+    # same signature every time); a genuinely dead (exited) container fails
+    # to connect at all; and four real, different-protocol daemons (HTTP via
+    # traefik/whoami, Redis, Postgres, MySQL) all react to the same
+    # unsolicited bytes fast enough to read back at least one byte — Redis
+    # and MySQL answer unsolicited or on receipt, Postgres and a real HTTP
+    # server reject the garbage and close cleanly, all distinct from the
+    # reset-on-nothing-bound case. A read that only times out (connection
+    # open, nothing back yet) is treated as "not yet" and this keeps
+    # polling, same as before the fix.
     _alive=0
     _n=0
     while [ "$_n" -lt 15 ]; do
-        if timeout 2 sh -c ": < /dev/tcp/127.0.0.1/${_port}" 2>/dev/null; then
+        if ( exec 3<>"/dev/tcp/127.0.0.1/${_port}" 2>/dev/null || exit 1
+             printf 'GET / HTTP/1.0\r\n\r\n' >&3 2>/dev/null
+             timeout 2 head -c 1 <&3 >/dev/null 2>/dev/null
+           ) 2>/dev/null; then
             _alive=1
             break
         fi
         _n=$((_n + 1)); sleep 2
     done
     if [ "$_alive" -eq 1 ]; then
-        echo "[podenv-restore] restored $_c (verified: 127.0.0.1:${_port} answers)"
+        echo "[podenv-restore] restored $_c (verified: 127.0.0.1:${_port} exchanged data, not just accepted a connection)"
     else
-        echo "[podenv-restore] WARNING $_c started but 127.0.0.1:${_port} never answered after 30s — likely still dead; inspect by hand: docker compose exec -T -u ${PODENV_UID} -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/${PODENV_UID} podenv podman logs $_c" >&2
+        echo "[podenv-restore] WARNING $_c started but 127.0.0.1:${_port} never exchanged any data after 30s (a bare connect would not prove this — see the comment above) — likely still dead; inspect by hand: docker compose exec -T -u ${PODENV_UID} -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/${PODENV_UID} podenv podman logs $_c" >&2
     fi
 done
 exit 0

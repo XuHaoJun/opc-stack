@@ -396,32 +396,71 @@ is valkey 9.1), say why and it will be recorded on the lease:
     # curl, not a bare /dev/tcp connect: this runs in the paperclip image
     # under dash (no bashisms), which has no /dev/tcp redirection, and no
     # nc/socat/python3 is guaranteed present — curl is (existing gates rely
-    # on it). `%{time_connect}` is populated by curl the moment the TCP
-    # handshake completes, BEFORE it evaluates the response as HTTP — it
-    # stays the literal string "0.000000" if the handshake never completed.
-    # That makes it a reasonable proxy for "something is listening" even for
-    # a lease that is not actually speaking HTTP (mysql, postgres, ...): a
-    # foreign protocol's unsolicited bytes may confuse curl's HTTP parser
-    # afterward, but the connect already succeeded and time_connect already
-    # recorded it. Measured against a real dead port: time_connect reads
-    # "0.000000" and curl exits 7.
+    # on it). CORRECTED (this task, measured false — see task-5-report.md):
+    # this used to stop at "the TCP handshake completed" (curl's
+    # %{time_connect}) and call that a reasonable proxy for "something is
+    # listening." It is not — see the comment directly above the probe
+    # below for the measurement and the fix (require an actual data
+    # exchange, classify curl's exit code).
     if podman_remote container exists "$slug" 2>/dev/null; then
         podman_remote stop -t 0 "$slug" >/dev/null 2>&1 || true
         podman_remote start "$slug" >/dev/null 2>&1 \
             || die "podman could not (re)start the existing container '$slug' for lease '$key'. See why: docker compose exec podenv podman logs $slug" 5
+        # CORRECTED (previous claim measured false — see task-5-report.md,
+        # this task's measurements): this used to call the lease alive once
+        # curl's %{time_connect} was populated, i.e. once the TCP handshake
+        # completed. Measured: pasta's port-forwarder completes that
+        # handshake with the caller EVEN WHEN NOTHING IS LISTENING on the
+        # forwarded port inside the container — it accepts the connection
+        # optimistically, then tries its own inner connect to the backend,
+        # and only sends a reset back once that inner connect fails. So
+        # time_connect being populated proves "the forwarder is up," never
+        # "the daemon answers" — measured directly against a lease that is
+        # genuinely RUNNING but has nothing bound to its port (curl exit 56,
+        # "Recv failure: Connection reset by peer", while time_connect still
+        # read a real, nonzero value).
+        #
+        # The fix is to require an actual data exchange, not just a
+        # completed handshake, and classify curl's exit code rather than
+        # time_connect: a plain GET (terminated with the blank line an HTTP
+        # request needs, so a real HTTP server does not just sit there
+        # waiting for the rest of a request that will never arrive) reliably
+        # provokes a fast reaction from every backend measured — HTTP
+        # (traefik/whoami: real response), Redis (unsolicited nothing, but
+        # the garbage is read and rejected instead of hanging), Postgres
+        # (rejects it as an invalid startup packet and closes cleanly), and
+        # MySQL (sends its own handshake unsolicited, before ever seeing our
+        # bytes). Only two curl exit codes correspond to "nothing is really
+        # there": 7 (could not connect at all — the fully-dead case) and 56
+        # (connected, then reset while receiving — the exact lie this probe
+        # used to fall for). 28 (timed out waiting for a response) is left
+        # as "not yet" rather than folded into either bucket, since a
+        # legitimately slow daemon (mysql initialising its data directory)
+        # can genuinely take longer than one attempt's --max-time to answer
+        # — failing the lease for that would trade this bug for a worse one.
+        # Every other exit code (0, 1, 52, ...) means SOMETHING on the other
+        # end reacted to real bytes, which a bare connect can never prove.
         _prov_alive=0
         _prov_n=0
         while [ "$_prov_n" -lt 15 ]; do
-            _prov_tc="$(curl -s -o /dev/null --connect-timeout 2 --max-time 3 \
-                -w '%{time_connect}' "http://${PODENV_HOST_NAME}:${hport}/" 2>/dev/null || true)"
-            if [ -n "$_prov_tc" ] && [ "$_prov_tc" != "0.000000" ]; then
-                _prov_alive=1
-                break
-            fi
+            # `|| _prov_curl_rc=$?`, not a bare call followed by `case $?`:
+            # this script runs under `set -e`, so an untested command
+            # returning nonzero (curl's normal outcome for the "not alive
+            # yet" cases below) would abort the whole script right here,
+            # never reaching the case statement at all.
+            _prov_curl_rc=0
+            curl -sS -o /dev/null --connect-timeout 2 --max-time 3 \
+                "http://${PODENV_HOST_NAME}:${hport}/" >/dev/null 2>&1 \
+                || _prov_curl_rc=$?
+            case "$_prov_curl_rc" in
+                7|56|28) ;;
+                *) _prov_alive=1 ;;
+            esac
+            [ "$_prov_alive" = 1 ] && break
             _prov_n=$((_prov_n + 1)); sleep 2
         done
         [ "$_prov_alive" = 1 ] \
-            || die "podman reports '$slug' running for lease '$key', but nothing answered at ${PODENV_HOST_NAME}:${hport} after 30s — the (re)start did not actually revive it. See why: docker compose exec podenv podman logs $slug" 5
+            || die "podman reports '$slug' running for lease '$key', but ${PODENV_HOST_NAME}:${hport} never exchanged any data after 30s (only a bare TCP handshake would not prove this — see the comment above) — the (re)start did not actually revive it. See why: docker compose exec podenv podman logs $slug" 5
     else
         set -- run -d --name "$slug" \
             --label "opc.podenv.lease=$slug" \
@@ -445,6 +484,36 @@ is valkey 9.1), say why and it will be recorded on the lease:
         set -- "$@" "$image"
         podman_remote "$@" >/dev/null \
             || die "podman could not start the lease '$key' (container '$slug', image '$image'). Run the same image by hand to see why: podman run --rm -it $image" 5
+
+        # F1: `run -d` returning 0 only proves podman ACCEPTED the request to
+        # start a container — it does not prove the container is still
+        # running a moment later. An image with no long-running foreground
+        # process (e.g. plain alpine with no CMD) exits immediately, and
+        # `run -d` still reports success because the START itself succeeded.
+        # Measured pre-fix: `podenv provision nolisten --image
+        # docker.io/library/alpine:3.20 --port 80 --as NOLISTEN_ADDR`
+        # returned exit 0 and wrote a live-looking address while `podman ps
+        # -a` showed `Exited (0)` — a lease for a container that never ran.
+        #
+        # Distinguish "not ready yet" (fine — a legitimately slow image like
+        # mysql:5.7 initialising its data directory can take tens of
+        # seconds, and failing the lease for that would be worse than this
+        # bug) from "died on startup" (unambiguous, and waiting longer never
+        # fixes it) by checking RUNNING STATE, not port readiness — the same
+        # distinction opc-podenv-restore.sh and this command's own
+        # reprovision branch make for their own, different problem (whether
+        # the daemon behind a running container actually answers). This is
+        # deliberately NOT a port probe: a container can be legitimately
+        # running for a long time before its daemon binds anything.
+        #
+        # A short grace period before deciding: a container that has already
+        # exited a couple of seconds after `run -d` did not start, full
+        # stop — there is no "maybe it's just slow" reading of that.
+        sleep 2
+        _prov_running="$(podman_remote inspect "$slug" --format '{{.State.Running}}' 2>/dev/null || true)"
+        if [ "$_prov_running" != "true" ]; then
+            die "the container for lease '$key' ('$slug', image '$image') is not running — it exited during startup instead of staying up. See why: docker compose exec podenv podman logs $slug" 5
+        fi
     fi
 
     out_file="$(mktemp)"

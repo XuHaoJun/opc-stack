@@ -592,6 +592,118 @@ docker compose exec -T -u node paperclip sh -c \
     'podenv release race-probe >/dev/null 2>&1
      rm -f /tmp/podenv-race.env /tmp/podenv-race.out' >/dev/null 2>&1
 
+echo "── task-6: create-path liveness (F1) ──"
+
+# F1: cmd_provision's fresh-create path (`run -d` on a brand new lease) had
+# NO liveness check at all — `run -d` returning 0 only proves podman
+# ACCEPTED the request, not that the container stayed up. Plain alpine with
+# no CMD exits almost instantly. RED-proved manually pre-fix (this task,
+# see task-5-report.md): this exact call returned exit 0 and wrote
+# NOLISTEN_ADDR=podenv:23000 into the env file while `podman ps -a` showed
+# `Exited (0) Less than a second ago` — a lease handed out for a container
+# that never ran, and the row was left registered (`podenv list` showed it).
+docker compose exec -T -u node paperclip sh -c \
+    'rm -f /tmp/podenv-f1-create.env /tmp/podenv-f1-create.out'
+
+expect "a die-immediately image fails provision loudly, not exit 0 (F1 create path)" "5" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1-create-gate --image docker.io/library/alpine:3.20 --port 80 \
+        --as F1_CREATE_GATE --env-file /tmp/podenv-f1-create.env >/tmp/podenv-f1-create.out 2>&1; echo $?'
+
+check "the failure message points at 'podman logs' (F1 create path)" \
+    sh -c "docker compose exec -T -u node paperclip cat /tmp/podenv-f1-create.out 2>&1 | grep -q 'podman logs'"
+
+check "the failed create wrote no stale .env entry (F1 create path)" \
+    sh -c '! docker compose exec -T -u node paperclip cat /tmp/podenv-f1-create.env >/dev/null 2>&1'
+
+# The whole point of arming the EXIT trap before container creation: a
+# provision THIS invocation failed must not leave a registry row behind —
+# `podenv list` showing a lease for a container that never ran is exactly
+# the defect class the last two review rounds were about.
+check "the die-immediately lease left no registry row behind (F1 create path)" \
+    sh -c '! docker compose exec -T -u node paperclip podenv list 2>&1 | grep -q f1-create-gate'
+
+check "the die-immediately lease left no container behind (F1 create path)" \
+    sh -c '! docker compose exec -T -u node paperclip sh -c \
+        "podman --remote --url unix:///run/podenv/podman.sock ps -a --format \"{{.Names}}\"" 2>&1 \
+        | grep -q podenv_f1_create_gate'
+
+docker compose exec -T -u node paperclip sh -c \
+    'rm -f /tmp/podenv-f1-create.env /tmp/podenv-f1-create.out' >/dev/null 2>&1
+
+echo "── task-6: liveness probe honesty (F2) ──"
+
+# F2: the previous fix round measured that pasta's port-forwarder completes
+# the TCP handshake with the caller EVEN WHEN NOTHING IS LISTENING on the
+# forwarded port inside the container — so a bare connect proves only "the
+# forwarder is up," never "the daemon answers." Reproduce the exact ambiguous
+# window here: a container that is genuinely RUNNING (so F1's check above
+# would not catch it) but has nothing bound to its leased port at all
+# (alpine sleeping, no CMD that binds anything).
+docker compose exec -T -u node paperclip sh -c \
+    'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f2_probe >/dev/null 2>&1
+     podman --remote --url unix:///run/podenv/podman.sock run -d --name podenv_f2_probe \
+       --label opc.podenv.lease=podenv_f2_probe --label opc.podenv.key=f2-probe \
+       --network=pasta -p 23011:80 docker.io/library/alpine:3.20 sleep 300 >/dev/null 2>&1'
+
+check "the F2 measurement lease is genuinely RUNNING (setup sanity)" \
+    sh -c 'docker compose exec -T -u node paperclip sh -c \
+        "podman --remote --url unix:///run/podenv/podman.sock inspect podenv_f2_probe --format \"{{.State.Running}}\"" \
+        2>/dev/null | tr -d "\r" | grep -qx true'
+
+# The measured lie itself, reproduced directly: a bare TCP connect succeeds
+# against this lease even though nothing behind it is listening.
+check "a bare TCP connect succeeds anyway (measured pasta forwarder behaviour, F2)" \
+    docker compose exec -T podenv timeout 2 sh -c ': < /dev/tcp/127.0.0.1/23011'
+
+# opc-podenv-restore.sh's own probe, run directly (idempotent, socket is
+# already up so it does not block): it must not claim this lease as
+# "restored" using language the probe cannot back up.
+_f2_restore_line="$(docker compose exec -T podenv /usr/local/bin/opc-podenv-restore.sh 2>&1 | grep podenv_f2_probe | tail -1)"
+if printf '%s\n' "$_f2_restore_line" | grep -q '^\[podenv-restore\] restored podenv_f2_probe'; then
+    fail "opc-podenv-restore.sh must not report this lease as restored — nothing answers (F2) (got: $_f2_restore_line)"
+else
+    pass "opc-podenv-restore.sh does not claim success for a lease that never exchanges data (F2)"
+fi
+if printf '%s\n' "$_f2_restore_line" | grep -qi 'answer'; then
+    fail "opc-podenv-restore.sh's wording still claims the port 'answers' — the exact overclaim F2 is about (got: $_f2_restore_line)"
+else
+    pass "opc-podenv-restore.sh's wording no longer claims the port 'answers' (F2)"
+fi
+
+# cmd_provision's reprovision branch ("container exists") on the exact same
+# lease shape: register a matching row (mirrors the F3-gate setup above) so
+# `podenv provision` takes that branch, and require the SAME honesty — it
+# must fail loudly rather than report exit 0 for a lease nothing answers on.
+docker compose exec -T paperclip sh -c \
+    'PGPASSWORD="$DEVENV_PG_ADMIN_PASSWORD" psql -h "$DEVENV_PG_HOST" -U "$DEVENV_PG_ADMIN_USER" \
+       -d "${DEVENV_CONTROL_DB:-devenv_control}" -v ON_ERROR_STOP=1 -c "
+         DELETE FROM podenv_lease WHERE key = '"'"'f2-probe'"'"';
+         INSERT INTO podenv_lease (key, slug, image, netns, container_port, host_port, env_var, created_by)
+         VALUES ('"'"'f2-probe'"'"', '"'"'podenv_f2_probe'"'"', '"'"'docker.io/library/alpine:3.20'"'"', '"'"'pasta'"'"', 80, 23011, '"'"'F2_PROBE_ADDR'"'"', '"'"'test'"'"')"' >/dev/null 2>&1
+
+docker compose exec -T -u node paperclip sh -c 'rm -f /tmp/podenv-f2.env /tmp/podenv-f2.out'
+
+expect "reprovision on a running-but-unbound lease fails loudly, not exit 0 (F2)" "5" \
+    docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f2-probe --image docker.io/library/alpine:3.20 --port 80 \
+        --as F2_PROBE_ADDR --env-file /tmp/podenv-f2.env >/tmp/podenv-f2.out 2>&1; echo $?'
+
+check "the failed reprovision wrote no stale .env entry (F2)" \
+    sh -c '! docker compose exec -T -u node paperclip cat /tmp/podenv-f2.env >/dev/null 2>&1'
+
+check "the reprovision failure message does not claim the port 'answers' (F2)" \
+    sh -c "! docker compose exec -T -u node paperclip cat /tmp/podenv-f2.out 2>&1 | grep -qi 'never answered'"
+
+# Cleanup. This key's row pre-dated the call (created_now=0 — it was
+# inserted by hand above, the same as the F3-gate section), so the rollback
+# trap correctly leaves it in place; release it by hand like an operator
+# would, same convention as the F3-gate cleanup above.
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release f2-probe >/dev/null 2>&1
+     podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f2_probe >/dev/null 2>&1
+     rm -f /tmp/podenv-f2.env /tmp/podenv-f2.out' >/dev/null 2>&1
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
