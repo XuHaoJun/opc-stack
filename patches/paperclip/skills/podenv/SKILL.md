@@ -66,7 +66,7 @@ hardcode it.
 | `--env K=V` | An environment variable for the container. Repeatable. |
 | `--password-env NAME` | Put the lease's derived password in the container under `NAME`, and make it available to `{{password}}`. |
 | `--volume H:C` | Bind-mount. `/prototypes` is visible to the runtime host, so `--volume /prototypes/myproj:/app` works. |
-| `--netns host` | Only when pasta cannot run the image. **There is no port remapping in this mode**, so `--port` must already be free across every lease. |
+| `--netns host` | Only when pasta cannot run the image. **There is no port remapping in this mode**, so `--port` must already be free across every lease AND must be **THE EXACT PORT THE DAEMON ITSELF BINDS** — not just "a port inside the container," because there is nothing to remap it to. `provision`'s create path only checks that the container stays RUNNING (deliberately, so a slow image is not punished), never that anything is actually listening on `--port` — so `--netns host --port 23005` for an image that listens on 80 by default returns exit 0, writes a live-looking `.env` entry, leaves the container running, and nothing ever answers on 23005. If the image's own port is configurable (e.g. `traefik/whoami`'s `WHOAMI_PORT_NUMBER`), pass `--env` to make it bind the same port you gave `--port`. |
 | `--dedicated "reason"` | Required to override the route gate above. |
 | `--env-file PATH` | Where to write/merge the `.env` entry. Defaults to `.env` in the current directory — the worked examples below rely on this default; pass it explicitly only when you are not running from the project's own directory. |
 
@@ -95,7 +95,14 @@ back, `provision` now FAILS (exit 5) instead of reporting success; nothing is
 left half-registered when that happens.
 
 **Never run `podenv release`.** It deletes the container AND its data volumes.
-Releasing is the user's decision, not a tidy-up step.
+Releasing is the user's decision, not a tidy-up step. It also recycles the
+port without touching whatever `.env` the lease's address was written into:
+podenv's default address form is a bare `host:port` with no credential, so
+if the operator releases a lease, its old `.env` entry can silently start
+pointing at a DIFFERENT tenant's daemon once that port gets re-leased.
+`release` warns about this at the time; if you see that warning for a lease
+you know about, remove the stale variable from the `.env` it was written
+into.
 
 **There is no per-lease memory limit.** `podenv provision --memory` is
 refused outright (exit 2) rather than silently accepted, because bare

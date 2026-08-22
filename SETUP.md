@@ -374,12 +374,20 @@ docker compose exec paperclip podenv provision <key> --image <ref> --port <n> [f
 docker compose exec paperclip podenv release <key>    # DESTROYS the container AND its data volume — operator decision only, no gc
 ```
 
-A worked example — MySQL 5.7, which is exactly what this lane exists for:
+A worked example — MySQL 5.7, which is exactly what this lane exists for.
+**Pass `--env-file` explicitly when running this by hand as the operator**:
+`podenv provision` defaults to `$PWD/.env`, and `docker compose exec`'s
+working directory in the `paperclip` container is `/app` — the SAME
+`.env` paperclip's own server loads at startup (`server/src/config.ts`,
+`override: false`). Writing into it here would sit there silently until the
+next rebuild discards it; point `--env-file` at wherever you actually want
+the connection string instead:
 
 ```bash
 docker compose exec paperclip podenv provision legacy-erp --image mysql:5.7 --port 3306 \
   --password-env MYSQL_ROOT_PASSWORD --env MYSQL_DATABASE=erp \
-  --as MYSQL_URL --url 'mysql://root:{{password}}@{{host}}:{{port}}/erp'
+  --as MYSQL_URL --url 'mysql://root:{{password}}@{{host}}:{{port}}/erp' \
+  --env-file /tmp/legacy-erp.env
 ```
 
 **Connecting a client from the host**: leases publish on
@@ -396,6 +404,19 @@ podenv`; no rebuild needed.
 requires **recreating** the `podenv` container: `docker compose up -d
 --force-recreate podenv`, because Docker fixes published ports at
 container-create time, same as devenv's preview-port range.
+
+**Requirement: `/dev/net/tun` on the host.** The `podenv` service declares
+`devices: [/dev/net/tun]`, and if the host does not have that device (the
+`tun` kernel module is not loaded), `docker run --device /dev/net/tun` fails
+at **container creation** — measured: `error gathering device information`.
+This is not a graceful degradation; `podenv` does not start at all, and
+`docker compose up` / `scripts/setup.sh` (which runs under
+`set -euo pipefail`) exits non-zero for it. If that happens:
+
+- load the `tun` module (`modprobe tun`) and re-run `docker compose up -d podenv`, or
+- if you do not want this lane, remove the `podenv` service from
+  `docker-compose.yml` (and drop the `opc-podenv-sock` mount from `paperclip`)
+  — the rest of the stack does not depend on it (invariant 8).
 
 **Troubleshooting** — start here:
 

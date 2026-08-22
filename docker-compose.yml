@@ -995,7 +995,20 @@ services:
   #                       official dind-rootless image documents --privileged).
   #                       It is confined to THIS service on purpose: paperclip
   #                       holds /keys, gh creds, the board API key and every
-  #                       prototype; this container holds nothing.
+  #                       prototype. This container is NOT empty (final
+  #                       review F4 corrects an earlier, false claim here) —
+  #                       it mounts opc-prototypes read-write too (below), so
+  #                       it can list every prototype's tree and read each
+  #                       one's .env (DATABASE_URL, VALKEY_URL,
+  #                       BETTER_AUTH_SECRET, DEVENV_KEY included). The blast
+  #                       radius really is smaller than paperclip's — no
+  #                       /keys, no gh/claude creds, no hermes home, pinned by
+  #                       tests/podenv.sh's "mounts no secret volume" check —
+  #                       but "holds nothing" overstated it for anyone judging
+  #                       whether seccomp=unconfined is acceptable here. What
+  #                       this container actually holds is every prototype's
+  #                       tree and its devenv credentials, which the agent
+  #                       already has, and no stack credentials.
   #   /dev/net/tun        pasta needs it to create its tap device. Without it
   #                       nested containers fall back to the sidecar's netns
   #                       and `-p` is discarded WITHOUT A WARNING. bridge /
@@ -1039,10 +1052,9 @@ services:
     # the LAN can. In-stack consumers do not need this at all — they reach a
     # lease at podenv:<port> over docker DNS.
     #
-    # BASE and RANGE_END are stated twice (here and in the CLI's pool) because
-    # compose cannot do arithmetic; opc-podenv-seed.sh will warn when they
-    # drift once the paperclip-side seed lands in Task 2, and tests/podenv.sh
-    # fails on it in the meantime.
+    # BASE and RANGE_END are stated twice (here and in the CLI's pool)
+    # because compose cannot do arithmetic; opc-podenv-seed.sh (paperclip's
+    # entrypoint) warns when they drift, and tests/podenv.sh fails on it too.
     ports:
       - "127.0.0.1:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}"
     volumes:
