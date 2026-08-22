@@ -334,6 +334,7 @@ Search: `nix search nixpkgs <name>`. Wipe a store: `docker volume rm opc_hermes-
 | 8096 | TencentDB proxy |
 | 8642 | Hermes API server |
 | 9119 | Hermes dashboard |
+| 23000-23015 | podenv leases (127.0.0.1 only — operator/client access; see below) |
 
 ## Useful commands
 
@@ -345,6 +346,78 @@ docker compose down -v                # DANGER: wipe all data
 docker compose exec hermes hermes --help
 docker compose exec frontdoor hermes --version
 ```
+
+## podenv — nested container leases
+
+`devenv` (above/below) is the shared, multi-tenant, modern lane: one
+PostgreSQL 18 + pgvector server, one Valkey 9.1 server, each split into
+per-tenant credentials. `podenv` is the other half — **a whole container,
+all yours**, from any OCI image — for the cases devenv structurally cannot
+serve: a daemon that refuses to be multi-tenant, or a version so old it only
+exists as an image (MySQL 5.7, Postgres 9.6, …). It runs a rootless `podman`
+daemon nested inside the `podenv` service container (docker-in-docker is not
+used or needed).
+
+**Always try devenv first.** The CLI enforces this mechanically: asking
+podenv for a postgres/pgvector/valkey/redis image (by name, tag, digest, or
+registry alias) is refused with the devenv command to run instead.
+
+Common commands (run inside the `paperclip` container, same as `devenv`):
+
+```bash
+docker compose exec paperclip podenv list             # every lease: image, port, variable, idle time, disk usage
+docker compose exec paperclip podenv provision <key> --image <ref> --port <n> [flags]   # idempotent — safe to re-run
+docker compose exec paperclip podenv release <key>    # DESTROYS the container AND its data volume — operator decision only, no gc
+```
+
+A worked example — MySQL 5.7, which is exactly what this lane exists for:
+
+```bash
+docker compose exec paperclip podenv provision legacy-erp --image mysql:5.7 --port 3306 \
+  --password-env MYSQL_ROOT_PASSWORD --env MYSQL_DATABASE=erp \
+  --as MYSQL_URL --url 'mysql://root:{{password}}@{{host}}:{{port}}/erp'
+```
+
+**Connecting a client from the host**: leases publish on
+`127.0.0.1:23000-23015` (same operator-only stance as devenv-pg's
+127.0.0.1:5433) — run `docker compose exec paperclip podenv list` to see which
+port a given lease landed on, never hardcode one.
+
+**Changing `PODENV_MEM_LIMIT`** (the whole lane's memory cap — there is no
+per-lease `--memory`, see below) takes effect with `docker compose up -d
+podenv`; no rebuild needed.
+
+**Changing the port range** (`PODENV_PORT_BASE`/`PODENV_PORT_COUNT`/
+`PODENV_PORT_RANGE_END` — keep base below 32768, the kernel ephemeral range)
+requires **recreating** the `podenv` container: `docker compose up -d
+--force-recreate podenv`, because Docker fixes published ports at
+container-create time, same as devenv's preview-port range.
+
+**Troubleshooting** — start here:
+
+```bash
+docker compose exec podenv cat /run/podenv/diagnosis
+```
+
+Three measured gotchas worth knowing before you dig further:
+
+- `podman run --memory` on a lease is silently ignored in this topology
+  (`memory.max` stays `max`, zero warnings). The only working knob is the
+  lane-wide `PODENV_MEM_LIMIT` above.
+- A lease that looks `Up` in `podman ps` may not actually be serving — a
+  stale recorded state after the `podenv` service itself restarted. `provision`
+  and the boot-time restore both probe the lease directly rather than trust
+  that state; if a lease seems dead despite showing `Up`, re-run `provision`
+  rather than assuming it is fine.
+- `--netns host` leases (used when pasta cannot run an image) have no port
+  remapping — `--port` must be the port the client actually connects to, and
+  a daemon that defaults to a different internal port (e.g. `traefik/whoami`
+  defaulting to 80) will run but never answer on the leased port.
+
+See `docs/superpowers/specs/2026-08-22-podenv-nested-container-lease-design.md`
+for the full design and the measurements behind these rules, and the
+`podenv` skill (`patches/paperclip/skills/podenv/SKILL.md`) for the complete
+CLI reference agents use.
 
 ## Known limitations
 - Hermes has no first-class omp dispatch; omp is reachable through Hermes'
