@@ -79,17 +79,17 @@ cat >"$STATE" <<'JSON'
     "metadata": {"opcManagedDefaults": {"fullstackMaxConcurrentRuns": 4}, "fixtureKeep": "yes"}
   }],
   "projects": [{
-    "id": "project-1",
+    "id": "00000000-0000-4000-8000-000000000101",
     "name": "Display Name Is Not Identity",
     "executionWorkspacePolicy": {"defaultMode": "isolated_workspace", "workspaceStrategy": {"type": "git_worktree"}},
     "primaryWorkspace": {
-      "id": "workspace-1",
+      "id": "00000000-0000-4000-8000-000000000201",
       "repoUrl": "ssh://git@github.com/Owner/Repo.git",
       "isPrimary": true,
       "metadata": {"fixture": "kept"}
     },
     "workspaces": [{
-      "id": "workspace-1",
+      "id": "00000000-0000-4000-8000-000000000201",
       "repoUrl": "ssh://git@github.com/Owner/Repo.git",
       "isPrimary": true
     }]
@@ -116,9 +116,9 @@ SHOW_ERR="$TMPDIR/show.err"
 if SHOW="$($CLI project workspace show --repo https://github.com/owner/repo/ 2>"$SHOW_ERR")"; then
 
   ok "project workspace show succeeds for canonical-equivalent SSH URL"
-  assert_eq "show project id" "project-1" "$(printf '%s' "$SHOW" | jq -r .project.id)"
+  assert_eq "show project id" "00000000-0000-4000-8000-000000000101" "$(printf '%s' "$SHOW" | jq -r .project.id)"
   assert_eq "show project display name" "Display Name Is Not Identity" "$(printf '%s' "$SHOW" | jq -r .project.name)"
-  assert_eq "show workspace id" "workspace-1" "$(printf '%s' "$SHOW" | jq -r .workspace.id)"
+  assert_eq "show workspace id" "00000000-0000-4000-8000-000000000201" "$(printf '%s' "$SHOW" | jq -r .workspace.id)"
   assert_eq "show workspace URL" "ssh://git@github.com/Owner/Repo.git" "$(printf '%s' "$SHOW" | jq -r .workspace.repoUrl)"
   assert_eq "show primary marker" "true" "$(printf '%s' "$SHOW" | jq -r .workspace.isPrimary)"
 
@@ -175,7 +175,7 @@ cat >"$STATE" <<'JSON'
   "experimental": {"enableIsolatedWorkspaces": false},
   "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
   "agents": [{
-    "id": "engineer-1",
+    "id": "00000000-0000-4000-8000-000000000011",
     "name": "Engineer One",
     "role": "engineer",
     "status": "idle"
@@ -215,15 +215,15 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as stream:
     state = json.load(stream)
 state["projects"].append({
-    "id": "project-ambiguous",
+    "id": "00000000-0000-4000-8000-000000000111",
     "name": "Ambiguous Engineering",
     "primaryWorkspace": {
-        "id": "workspace-ambiguous",
+        "id": "00000000-0000-4000-8000-000000000211",
         "repoUrl": "https://github.com/owner/repo",
         "isPrimary": True,
     },
     "workspaces": [{
-        "id": "workspace-ambiguous",
+        "id": "00000000-0000-4000-8000-000000000211",
         "repoUrl": "https://github.com/owner/repo",
         "isPrimary": True,
     }],
@@ -243,8 +243,8 @@ if printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title ambiguo
 else
   ok "ambiguous engineering projects fail closed"
 fi
-assert_contains "engineering ambiguity lists first project" "project-1" "$(cat "$AMBIGUOUS_TICKET_ERR")"
-assert_contains "engineering ambiguity lists second project" "project-ambiguous" "$(cat "$AMBIGUOUS_TICKET_ERR")"
+assert_contains "engineering ambiguity lists first project" "00000000-0000-4000-8000-000000000102" "$(cat "$AMBIGUOUS_TICKET_ERR")"
+assert_contains "engineering ambiguity lists second project" "00000000-0000-4000-8000-000000000111" "$(cat "$AMBIGUOUS_TICKET_ERR")"
 assert_eq "ambiguous engineering creates no issue" "$before_ambiguous_issues" "$(jq '.issues | length' "$STATE")"
 python3 - "$STATE" <<'PY'
 import json
@@ -292,6 +292,91 @@ else
 fi
 assert_contains "reuse_existing error names required option" "--execution-workspace-id" "$(cat "$REUSE_ERR")"
 assert_eq "reuse_existing validation creates no issue" "$before_reuse_issues" "$(jq '.issues | length' "$STATE")"
+ADAPTER_OVERRIDE_ERR="$TMPDIR/adapter-override.err"
+if printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title adapter \
+  --mode adapter_default --execution-workspace-id ignored >/dev/null 2>"$ADAPTER_OVERRIDE_ERR"; then
+  bad "adapter_default rejects execution workspace override"
+else
+  ok "adapter_default rejects execution workspace override"
+fi
+assert_contains "adapter_default error names incompatible option" "--execution-workspace-id" "$(cat "$ADAPTER_OVERRIDE_ERR")"
+
+printf 'line one\nline two\n' | "$CLI" engineering-ticket create --repo Owner/Repo \
+  --title newline-description --mode reuse_existing \
+  --execution-workspace-id "$(jq -r '.projects[0].primaryWorkspace.id' "$STATE")" >/dev/null
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+assert state["issues"][-1]["description"] == "line one\nline two\n"
+assert state["issues"][-1]["executionWorkspacePreference"] == "reuse_existing"
+assert state["issues"][-1]["executionWorkspaceId"] == state["issues"][-1]["projectWorkspaceId"]
+assert "executionWorkspaceId" not in state["issues"][-1]["executionWorkspaceSettings"]
+PY
+ok "reuse_existing stores top-level execution workspace fields"
+ok "description preserves trailing newline"
+before_ineligible_issues="$(jq '.issues | length' "$STATE")"
+stop_fixture
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["agents"][0]["status"] = "paused"
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+start_fixture
+PAUSED_ERR="$TMPDIR/paused-engineer.err"
+if printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title paused \
+  >/dev/null 2>"$PAUSED_ERR"; then
+  bad "paused engineer fails closed"
+else
+  ok "paused engineer fails closed"
+fi
+assert_contains "paused engineer error is actionable" "no active Paperclip agent" "$(cat "$PAUSED_ERR")"
+assert_eq "paused engineer creates no issue" "$before_ineligible_issues" "$(jq '.issues | length' "$STATE")"
+stop_fixture
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["agents"][0]["status"] = "pending_approval"
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+start_fixture
+PENDING_ERR="$TMPDIR/pending-engineer.err"
+if printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title pending \
+  >/dev/null 2>"$PENDING_ERR"; then
+  bad "pending-approval engineer fails closed"
+else
+  ok "pending-approval engineer fails closed"
+fi
+assert_contains "pending engineer error is actionable" "no active Paperclip agent" "$(cat "$PENDING_ERR")"
+assert_eq "pending engineer creates no issue" "$before_ineligible_issues" "$(jq '.issues | length' "$STATE")"
+stop_fixture
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["agents"][0]["status"] = "idle"
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+start_fixture
+export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
+export PAPERCLIP_API_KEY="$TOKEN"
 
 stop_fixture
 cat >"$STATE" <<'JSON'
@@ -300,11 +385,11 @@ cat >"$STATE" <<'JSON'
   "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
   "agents": [],
   "projects": [{
-    "id": "project-ambiguous",
+    "id": "00000000-0000-4000-8000-000000000111",
     "name": "Ambiguous",
     "workspaces": [
-      {"id": "workspace-a", "repoUrl": "https://github.com/owner/repo", "isPrimary": true},
-      {"id": "workspace-b", "repoUrl": "https://github.com/owner/repo/", "isPrimary": true}
+      {"id": "00000000-0000-4000-8000-000000000211", "repoUrl": "https://github.com/owner/repo", "isPrimary": true},
+      {"id": "00000000-0000-4000-8000-000000000212", "repoUrl": "https://github.com/owner/repo/", "isPrimary": true}
     ]
   }],
   "issues": []
@@ -329,18 +414,18 @@ cat >"$STATE" <<'JSON'
   "agents": [],
   "projects": [
     {
-      "id": "project-a",
+      "id": "00000000-0000-4000-8000-000000000121",
 
       "name": "Alpha",
       "workspaces": [
-        {"id": "workspace-a", "repoUrl": "https://github.com/owner/repo", "isPrimary": true}
+        {"id": "00000000-0000-4000-8000-000000000221", "repoUrl": "https://github.com/owner/repo", "isPrimary": true}
       ]
     },
     {
-      "id": "project-b",
+      "id": "00000000-0000-4000-8000-000000000122",
       "name": "Beta",
       "workspaces": [
-        {"id": "workspace-b", "repoUrl": "ssh://git@github.com/owner/repo.git", "isPrimary": true}
+        {"id": "00000000-0000-4000-8000-000000000222", "repoUrl": "ssh://git@github.com/owner/repo.git", "isPrimary": true}
       ]
     }
   ],
@@ -354,8 +439,8 @@ if $CLI project workspace show --repo Owner/Repo >/dev/null 2>"$DUPLICATE_ERR"; 
 else
   ok "duplicate matching projects fail closed"
 fi
-assert_contains "duplicate error includes first project ID/name" "project-a Alpha" "$(cat "$DUPLICATE_ERR")"
-assert_contains "duplicate error includes second project ID/name" "project-b Beta" "$(cat "$DUPLICATE_ERR")"
+assert_contains "duplicate error includes first project ID/name" "00000000-0000-4000-8000-000000000121 Alpha" "$(cat "$DUPLICATE_ERR")"
+assert_contains "duplicate error includes second project ID/name" "00000000-0000-4000-8000-000000000122 Beta" "$(cat "$DUPLICATE_ERR")"
 assert_not_contains "duplicate stderr omits bearer token" "$TOKEN" "$(cat "$DUPLICATE_ERR")"
 assert_not_contains "duplicate fixture log omits bearer token" "$TOKEN" "$(cat "$LOG")"
 stop_fixture
@@ -364,8 +449,8 @@ cat >"$STATE" <<'JSON'
   "experimental": {"enableIsolatedWorkspaces": false},
   "company": {"id": "00000000-0000-4000-8000-000000000001", "name": "Fixture"},
   "agents": [
-    {"id": "engineer-a", "name": "Engineer A", "role": "engineer"},
-    {"id": "engineer-b", "name": "Engineer B", "role": "engineer"}
+    {"id": "00000000-0000-4000-8000-000000000031", "name": "Engineer A", "role": "engineer"},
+    {"id": "00000000-0000-4000-8000-000000000032", "name": "Engineer B", "role": "engineer"}
   ],
   "projects": [],
   "issues": []

@@ -402,6 +402,25 @@ verify_project_policy() {
     ' >/dev/null 2>&1 || die "Paperclip project workspace policy was not verified" 4
 }
 
+verify_workspace_marker() {
+    _project_id="$1"
+    _workspace_id="$2"
+    _lane="$3"
+    _mode="$4"
+    _strategy="$5"
+    _project="$(api_request GET "/projects/$_project_id")" ||
+        die "failed to verify Paperclip workspace marker" 4
+    _workspace="$(primary_workspace_json "$_project")"
+    printf '%s' "$_workspace" | jq -e \
+        --arg workspace "$_workspace_id" --arg lane "$_lane" \
+        --arg mode "$_mode" --arg strategy "$_strategy" '
+        .id == $workspace
+        and .metadata.opcWorkspaceDefaults.lane == $lane
+        and .metadata.opcWorkspaceDefaults.mode == $mode
+        and .metadata.opcWorkspaceDefaults.strategyType == $strategy
+    ' >/dev/null 2>&1 || die "Paperclip workspace marker did not persist" 4
+}
+
 reconcile_engineering_project() {
     _project="$1"
     _workspace="$(primary_workspace_json "$_project")"
@@ -428,6 +447,7 @@ reconcile_engineering_project() {
              and .metadata.opcWorkspaceDefaults.mode == "isolated_workspace"
              and .metadata.opcWorkspaceDefaults.strategyType == "git_worktree"' \
             >/dev/null 2>&1 || die "engineering workspace marker was not verified" 4
+        verify_workspace_marker "$_project_id" "$_workspace_id" engineering isolated_workspace git_worktree
         _project="$(api_request GET "/projects/$_project_id")" ||
             die "failed to read engineering project after marker update" 4
     else
@@ -477,6 +497,7 @@ engineering_project() {
             _response="$(api_request GET "/projects/$_project_id")" ||
                 die "failed to verify engineering project policy" 4
             verify_project_policy "$_response" "$_workspace_id" isolated_workspace git_worktree
+            _workspace="$(primary_workspace_json "$_response")"
             _metadata="$(workspace_marker_payload "$_response" "$_workspace" engineering isolated_workspace git_worktree)"
             _response="$(api_request PATCH "/projects/$_project_id/workspaces/$_workspace_id" "$(
                 jq -nc --argjson metadata "$_metadata" '{metadata:$metadata}'
@@ -486,6 +507,7 @@ engineering_project() {
                  and .metadata.opcWorkspaceDefaults.mode == "isolated_workspace"
                  and .metadata.opcWorkspaceDefaults.strategyType == "git_worktree"' \
                 >/dev/null 2>&1 || die "engineering workspace marker was not verified" 4
+            verify_workspace_marker "$_project_id" "$_workspace_id" engineering isolated_workspace git_worktree
             _matches="$(projects_matching "$_canonical")"
             _count="$(project_match_count "$_matches")"
             [ "$_count" -eq 1 ] || {
@@ -577,8 +599,11 @@ cmd_project_workspace_set() {
         _project="$(resolve_project --project-id "$_project_id")"
     fi
     _id="$(printf '%s' "$_project" | jq -r '.id // empty')"
+    [ -n "$_id" ] || die "Paperclip project has no id" 4
     _workspace="$(primary_workspace_json "$_project")"
+    [ "$_workspace" != null ] || die "project must have exactly one primary workspace" 3
     _workspace_id="$(printf '%s' "$_workspace" | jq -r '.id // empty')"
+    [ -n "$_workspace_id" ] || die "project primary workspace has no id" 3
     _policy="$(project_policy_with_defaults "$_project" "$_workspace_id" "$_mode" "$_strategy" "$_shared")"
     _response="$(api_request PATCH "/projects/$_id" "$(
         jq -nc --argjson policy "$_policy" '{executionWorkspacePolicy:$policy}'
@@ -634,6 +659,7 @@ cmd_project_workspace_reset() {
         and .metadata.opcWorkspaceDefaults.mode == $mode
         and .metadata.opcWorkspaceDefaults.strategyType == $strategy
     ' >/dev/null 2>&1 || die "Paperclip workspace reset marker was not verified" 4
+    verify_workspace_marker "$_id" "$_workspace_id" "$_lane" "$_mode" "$_strategy"
     printf '%s' "$_response" | jq -c '{id,metadata}'
 }
 
@@ -643,8 +669,9 @@ active_engineer() {
     _matches="$(printf '%s' "$_agents" | jq -c '
         if type == "array" then
           [.[] | select(.role == "engineer")
-            | select((.status // "") != "terminated" and (.status // "") != "deleted"
-                     and (.terminatedAt // null) == null)]
+            | select((.status // "") == "active" or (.status // "") == "idle"
+                     or (.status // "") == "running" or (.status // "") == "error")
+            | select((.terminatedAt // null) == null)]
         else [] end
     ')" || die "Paperclip agents response is not an array" 4
     _count="$(printf '%s' "$_matches" | jq -r 'length')"
@@ -682,10 +709,14 @@ cmd_engineering_ticket_create() {
             [ -z "$_execution_workspace_id" ] || die "--execution-workspace-id requires --mode reuse_existing" 2 ;;
         reuse_existing)
             [ -n "$_execution_workspace_id" ] || die "reuse_existing requires --execution-workspace-id" 2 ;;
-        adapter_default) _mode=agent_default ;;
+        adapter_default)
+            [ -z "$_execution_workspace_id" ] || die "--execution-workspace-id requires --mode reuse_existing" 2
+            _mode=agent_default ;;
         *) die "unsupported engineering ticket mode: $_mode" 2 ;;
     esac
-    _description="$(cat)"
+    _description_file="$(mktemp "${TMPDIR:-/tmp}/opc-paperclip-description.XXXXXX")" ||
+        die "failed to allocate description buffer" 4
+    cat >"$_description_file"
     _canonical="$(canonical_repo_json "$_repo")"
     _project="$(engineering_project "$_canonical")"
     _project_id="$(printf '%s' "$_project" | jq -r '.id // empty')"
@@ -702,18 +733,24 @@ cmd_engineering_ticket_create() {
         isolated_workspace) _settings="$(jq -nc '{mode:"isolated_workspace",workspaceStrategy:{type:"git_worktree"}}')" ;;
         operator_branch) _settings="$(jq -nc '{mode:"operator_branch",workspaceStrategy:{type:"git_worktree}}')" ;;
         agent_default) _settings="$(jq -nc '{mode:"agent_default",workspaceStrategy:{type:"adapter_managed}}')" ;;
-        reuse_existing) _settings="$(jq -nc --arg id "$_execution_workspace_id" '{mode:"reuse_existing",executionWorkspaceId:$id}')" ;;
+        reuse_existing) _settings="$(jq -nc '{mode:"reuse_existing"}')" ;;
     esac
-    _payload="$(jq -nc --arg title "$_title" --arg description "$_description" \
-        --arg priority "$_priority" --arg status "$_status" --arg agent "$_agent_id" \
-        --arg project "$_project_id" --arg workspace "$_workspace_id" \
+    _payload="$(jq -nc --rawfile description "$_description_file" \
+        --arg title "$_title" --arg priority "$_priority" --arg status "$_status" \
+        --arg mode "$_mode" --arg execution_workspace_id "$_execution_workspace_id" \
+        --arg agent "$_agent_id" --arg project "$_project_id" --arg workspace "$_workspace_id" \
         --argjson settings "$_settings" '
         {title:$title,description:$description,assigneeAgentId:$agent,
          projectId:$project,projectWorkspaceId:$workspace,
          executionWorkspaceSettings:$settings}
         | if $priority == "" then . else .priority=$priority end
         | if $status == "" then . else .status=$status end
+        | if $mode == "reuse_existing"
+          then .executionWorkspaceId=$execution_workspace_id
+          | .executionWorkspacePreference="reuse_existing"
+          else . end
     ')"
+    rm -f "$_description_file"
     _company="$(company_id)"
     _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
         die "failed to create engineering ticket" 4
@@ -722,10 +759,15 @@ cmd_engineering_ticket_create() {
     _issue="$(api_request GET "/issues/$_issue_id")" ||
         die "failed to verify engineering ticket" 4
     printf '%s' "$_issue" | jq -e --arg agent "$_agent_id" --arg project "$_project_id" \
-        --arg workspace "$_workspace_id" --arg mode "$_mode" '
+        --arg workspace "$_workspace_id" --arg mode "$_mode" \
+        --arg execution_workspace_id "$_execution_workspace_id" '
         .assigneeAgentId == $agent and .projectId == $project
         and .projectWorkspaceId == $workspace
         and .executionWorkspaceSettings.mode == $mode
+        and (if $mode == "reuse_existing"
+             then .executionWorkspaceId == $execution_workspace_id
+                  and .executionWorkspacePreference == "reuse_existing"
+             else true end)
     ' >/dev/null 2>&1 || die "Paperclip engineering ticket response was not verified" 4
     _identifier="$(printf '%s' "$_issue" | jq -r '.identifier // empty')"
     [ -n "$_identifier" ] || die "Paperclip issue has no identifier" 4

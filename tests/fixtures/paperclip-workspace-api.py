@@ -168,6 +168,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": "company not found"})
                     return
                 issue = dict(payload)
+                settings = issue.get("executionWorkspaceSettings")
+                if isinstance(settings, dict) and settings.get("mode") == "reuse_existing":
+                    if (
+                        not issue.get("executionWorkspaceId")
+                        or issue.get("executionWorkspacePreference") != "reuse_existing"
+                        or "executionWorkspaceId" in settings
+                    ):
+                        self._send_json(400, {"error": "reuse_existing requires top-level executionWorkspaceId and executionWorkspacePreference"})
+                        return
                 issue["id"] = self._next_id("issue-", "issues")
                 issue.setdefault("identifier", self._next_identifier())
                 issue.setdefault("status", "todo")
@@ -178,42 +187,48 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
     @staticmethod
-    def _numeric_suffix(value: object, prefix: str) -> int:
-        text = str(value)
-        if text.startswith(prefix) and text[len(prefix):].isdigit():
-            return int(text[len(prefix):])
-        return 0
+    def _deterministic_uuid(base: int, ordinal: int) -> str:
+        return f"00000000-0000-4000-8000-{base + ordinal:012x}"
 
     def _next_id(self, prefix: str, collection: str) -> str:
-        values = [
-            self._numeric_suffix(item.get("id", ""), prefix)
+        base = {"projects": 0x101, "issues": 0x301}[collection]
+        existing = {
+            str(item.get("id", ""))
             for item in STATE.get(collection, [])
             if isinstance(item, dict)
-        ]
-        return f"{prefix}{max(values, default=0) + 1}"
+        }
+        ordinal = 1
+        while self._deterministic_uuid(base, ordinal) in existing:
+            ordinal += 1
+        return self._deterministic_uuid(base, ordinal)
 
     def _next_workspace_id(self) -> str:
-        values = []
+        existing = set()
         for project in STATE.get("projects", []):
             if not isinstance(project, dict):
                 continue
             workspaces = project.get("workspaces", [])
             if isinstance(workspaces, list):
-                values.extend(
-                    self._numeric_suffix(workspace.get("id", ""), "workspace-")
+                existing.update(
+                    str(workspace.get("id", ""))
                     for workspace in workspaces
                     if isinstance(workspace, dict)
                 )
             primary = project.get("primaryWorkspace")
             if isinstance(primary, dict):
-                values.append(self._numeric_suffix(primary.get("id", ""), "workspace-"))
-        return f"workspace-{max(values, default=0) + 1}"
+                existing.add(str(primary.get("id", "")))
+        ordinal = 1
+        while self._deterministic_uuid(0x201, ordinal) in existing:
+            ordinal += 1
+        return self._deterministic_uuid(0x201, ordinal)
 
     def _next_identifier(self) -> str:
         values = [
-            self._numeric_suffix(issue.get("identifier", ""), "FIX-")
+            int(str(issue.get("identifier", ""))[4:])
             for issue in STATE.get("issues", [])
             if isinstance(issue, dict)
+            and str(issue.get("identifier", "")).startswith("FIX-")
+            and str(issue.get("identifier", ""))[4:].isdigit()
         ]
         return f"FIX-{max(values, default=0) + 1}"
 
