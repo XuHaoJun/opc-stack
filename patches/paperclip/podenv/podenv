@@ -35,6 +35,11 @@ PODENV_DIAG="${PODENV_DIAG:-/run/podenv/diagnosis}"
 PODENV_HOST_NAME="${PODENV_HOST_NAME:-podenv}"
 PODENV_PORT_BASE="${PODENV_PORT_BASE:-23000}"
 PODENV_PORT_COUNT="${PODENV_PORT_COUNT:-16}"
+# A few seconds, not `-t 0` — see podenv_provision_alive's callers below
+# (task-5 F1) and the sibling comment in opc-podenv-restore.sh. Only ever
+# reached once the probe has already found nothing answering, so this is
+# never spent on a lease that was fine.
+PODENV_STOP_GRACE="${PODENV_STOP_GRACE:-5}"
 
 DEVENV_PG_HOST="${DEVENV_PG_HOST:-devenv-pg}"
 DEVENV_PG_PORT="${DEVENV_PG_PORT:-5432}"
@@ -69,6 +74,49 @@ podenv_runtime_reachable() {
     [ -S "$PODENV_SOCK" ] || return 1
     command -v podman >/dev/null 2>&1 || return 1
     podman --remote --url "unix://$PODENV_SOCK" version --format '{{.Server.Version}}' >/dev/null 2>&1
+}
+
+# podenv_provision_alive <host_port> — a single data-exchange attempt against
+# a lease's published address, used by cmd_provision's reprovision branch
+# both to PROBE FIRST (task-5 F1, before touching the container at all) and
+# to verify liveness afterward if a disruption did turn out to be necessary.
+# curl, not a bare /dev/tcp connect: this runs in the paperclip image under
+# dash (no bashisms), which has no /dev/tcp redirection, and no nc/socat/
+# python3 is guaranteed present — curl is (existing gates rely on it).
+#
+# Only two curl exit codes correspond to "nothing is really there": 7 (could
+# not connect at all — the fully-dead case) and 56 (connected, then reset
+# while receiving — pasta's port-forwarder completes the TCP handshake with
+# the caller EVEN WHEN NOTHING IS LISTENING on the forwarded port inside the
+# container, so a bare connect proves only "the forwarder is up," never "the
+# daemon answers" — measured directly against a lease that is genuinely
+# RUNNING but has nothing bound to its port). 28 (timed out waiting for a
+# response) is left as "not yet" rather than folded into either bucket,
+# since a legitimately slow daemon (mysql initialising its data directory)
+# can genuinely take longer than one attempt's --max-time to answer — for
+# THIS call site (the probe-first check) that reads as "not proven alive
+# yet," which is the conservative, safe answer for a check whose whole job
+# is to justify SKIPPING a disruption: only skip when something definitely
+# answered. Every other exit code (0, 1, 52, ...) means SOMETHING on the
+# other end reacted to real bytes — a plain GET, terminated with the blank
+# line an HTTP request needs (so a real HTTP server does not just sit there
+# waiting for the rest of a request that will never arrive), reliably
+# provokes a fast reaction from every backend measured: HTTP
+# (traefik/whoami: real response), Redis (garbage read and rejected instead
+# of hanging), Postgres (rejects it as an invalid startup packet and closes
+# cleanly), MySQL (sends its own handshake unsolicited, before ever seeing
+# our bytes).
+podenv_provision_alive() {
+    _pca_rc=0
+    # `|| _pca_rc=$?`, not a bare call: this script runs under `set -e`, so
+    # an untested command returning nonzero (curl's normal outcome for the
+    # "not alive yet" cases) would abort the whole script right here.
+    curl -sS -o /dev/null --connect-timeout 2 --max-time 3 \
+        "http://${PODENV_HOST_NAME}:${1}/" >/dev/null 2>&1 || _pca_rc=$?
+    case "$_pca_rc" in
+        7|56|28) return 1 ;;
+        *)       return 0 ;;
+    esac
 }
 
 # Three distinct failures, three distinct messages. The raw errors here are
@@ -379,88 +427,62 @@ is valkey 9.1), say why and it will be recorded on the lease:
     # This branch is worse than the restore script's version of the same bug
     # was, because it is the DOCUMENTED, routine path: the podenv skill tells
     # agents `provision` is idempotent and safe to run freely to "pick a
-    # lease back up." An agent doing exactly that after any podenv restart
-    # got the "(existing)" note, a freshly written .env, and exit 0 — the
-    # happy path silently handing back a dead address. Fixed the same way
-    # opc-podenv-restore.sh was: never trust podman's recorded state here.
-    # Force a real transition (`stop -t 0` — harmless if it really is already
-    # stopped, loud-but-ignored otherwise) then `start`, and verify the lease
-    # is actually alive — by probing the SAME host_port that goes into the
-    # .env below, which conveniently already equals the real reachable
-    # address in both netns modes (F7 sets hport=cport for --netns host) —
-    # before reporting success. `start` returning 0 is still not proof of
-    # life (same reasoning as the restore script), so this polls a few times
-    # rather than trusting the first attempt: a service that starts cleanly
-    # can take a moment past `start` returning before it actually answers.
+    # lease back up."
     #
-    # curl, not a bare /dev/tcp connect: this runs in the paperclip image
-    # under dash (no bashisms), which has no /dev/tcp redirection, and no
-    # nc/socat/python3 is guaranteed present — curl is (existing gates rely
-    # on it). CORRECTED (this task, measured false — see task-5-report.md):
-    # this used to stop at "the TCP handshake completed" (curl's
-    # %{time_connect}) and call that a reasonable proxy for "something is
-    # listening." It is not — see the comment directly above the probe
-    # below for the measurement and the fix (require an actual data
-    # exchange, classify curl's exit code).
+    # CORRECTED AGAIN (task-5 review F1, the previous fix in THIS branch
+    # measured to be a regression, not just a wart): "never trust podman's
+    # recorded state" got implemented as an UNCONDITIONAL `stop -t 0` on
+    # every re-provision call, before checking anything. That is exactly
+    # backwards for the ONE branch in this whole lane that is the
+    # documented, encouraged way to "pick a lease back up" — an agent
+    # holding, say, `legacy-erp` on `mysql:5.7` while it serves real queries
+    # re-runs `podenv provision legacy-erp` (idempotent, safe to run freely,
+    # per the podenv skill) and gets `mysqld` SIGKILLed mid-operation with no
+    # grace period, for no reason at all. RED-proved live in this repo's own
+    # stack (task-5-report.md): a genuinely healthy, serving `traefik/whoami`
+    # lease's `podman inspect --format {{.State.StartedAt}}` jumped forward
+    # by ~10 seconds across an ordinary re-provision call — killed and
+    # restarted despite never having stopped answering. That is a WORSE
+    # failure than the silent-dead-lease bug this mechanism replaced, for
+    # exactly the class of stateful single-tenant legacy daemon this lane
+    # exists to host.
+    #
+    # Fix: PROBE FIRST (podenv_provision_alive above), before touching the
+    # container at all. A healthy lease answers immediately, so the cost of
+    # checking first is negligible — probing the SAME host_port that goes
+    # into the .env below, which conveniently already equals the real
+    # reachable address in both netns modes (F7 sets hport=cport for --netns
+    # host). Only when nothing answers does this disrupt anything, and even
+    # then not with `-t 0`: `stop -t "$PODENV_STOP_GRACE"` gives a daemon
+    # that might be HUNG rather than gone a short window to flush before the
+    # kill — a container that really is already gone returns from `stop`
+    # immediately regardless, so this costs nothing in the common
+    # (already-dead) case. `start` returning 0 is still not proof of life
+    # (same reasoning as the restore script), so the post-disruption check
+    # polls a few times rather than trusting the first attempt: a service
+    # that starts cleanly can take a moment past `start` returning before it
+    # actually answers. Never `podman restart`: measured to fail outright on
+    # exactly the stale-"Up" state this branch has to recover from.
     if podman_remote container exists "$slug" 2>/dev/null; then
-        podman_remote stop -t 0 "$slug" >/dev/null 2>&1 || true
-        podman_remote start "$slug" >/dev/null 2>&1 \
-            || die "podman could not (re)start the existing container '$slug' for lease '$key'. See why: docker compose exec podenv podman logs $slug" 5
-        # CORRECTED (previous claim measured false — see task-5-report.md,
-        # this task's measurements): this used to call the lease alive once
-        # curl's %{time_connect} was populated, i.e. once the TCP handshake
-        # completed. Measured: pasta's port-forwarder completes that
-        # handshake with the caller EVEN WHEN NOTHING IS LISTENING on the
-        # forwarded port inside the container — it accepts the connection
-        # optimistically, then tries its own inner connect to the backend,
-        # and only sends a reset back once that inner connect fails. So
-        # time_connect being populated proves "the forwarder is up," never
-        # "the daemon answers" — measured directly against a lease that is
-        # genuinely RUNNING but has nothing bound to its port (curl exit 56,
-        # "Recv failure: Connection reset by peer", while time_connect still
-        # read a real, nonzero value).
-        #
-        # The fix is to require an actual data exchange, not just a
-        # completed handshake, and classify curl's exit code rather than
-        # time_connect: a plain GET (terminated with the blank line an HTTP
-        # request needs, so a real HTTP server does not just sit there
-        # waiting for the rest of a request that will never arrive) reliably
-        # provokes a fast reaction from every backend measured — HTTP
-        # (traefik/whoami: real response), Redis (unsolicited nothing, but
-        # the garbage is read and rejected instead of hanging), Postgres
-        # (rejects it as an invalid startup packet and closes cleanly), and
-        # MySQL (sends its own handshake unsolicited, before ever seeing our
-        # bytes). Only two curl exit codes correspond to "nothing is really
-        # there": 7 (could not connect at all — the fully-dead case) and 56
-        # (connected, then reset while receiving — the exact lie this probe
-        # used to fall for). 28 (timed out waiting for a response) is left
-        # as "not yet" rather than folded into either bucket, since a
-        # legitimately slow daemon (mysql initialising its data directory)
-        # can genuinely take longer than one attempt's --max-time to answer
-        # — failing the lease for that would trade this bug for a worse one.
-        # Every other exit code (0, 1, 52, ...) means SOMETHING on the other
-        # end reacted to real bytes, which a bare connect can never prove.
-        _prov_alive=0
-        _prov_n=0
-        while [ "$_prov_n" -lt 15 ]; do
-            # `|| _prov_curl_rc=$?`, not a bare call followed by `case $?`:
-            # this script runs under `set -e`, so an untested command
-            # returning nonzero (curl's normal outcome for the "not alive
-            # yet" cases below) would abort the whole script right here,
-            # never reaching the case statement at all.
-            _prov_curl_rc=0
-            curl -sS -o /dev/null --connect-timeout 2 --max-time 3 \
-                "http://${PODENV_HOST_NAME}:${hport}/" >/dev/null 2>&1 \
-                || _prov_curl_rc=$?
-            case "$_prov_curl_rc" in
-                7|56|28) ;;
-                *) _prov_alive=1 ;;
-            esac
-            [ "$_prov_alive" = 1 ] && break
-            _prov_n=$((_prov_n + 1)); sleep 2
-        done
-        [ "$_prov_alive" = 1 ] \
-            || die "podman reports '$slug' running for lease '$key', but ${PODENV_HOST_NAME}:${hport} never exchanged any data after 30s (only a bare TCP handshake would not prove this — see the comment above) — the (re)start did not actually revive it. See why: docker compose exec podenv podman logs $slug" 5
+        if ! podenv_provision_alive "$hport"; then
+            # Nothing answered on the first try — only NOW is it safe/
+            # necessary to disrupt anything.
+            podman_remote stop -t "$PODENV_STOP_GRACE" "$slug" >/dev/null 2>&1 || true
+            podman_remote start "$slug" >/dev/null 2>&1 \
+                || die "podman could not (re)start the existing container '$slug' for lease '$key'. See why: docker compose exec podenv podman logs $slug" 5
+
+            _prov_alive=0
+            _prov_n=0
+            while [ "$_prov_n" -lt 15 ]; do
+                if podenv_provision_alive "$hport"; then
+                    _prov_alive=1
+                    break
+                fi
+                _prov_n=$((_prov_n + 1)); sleep 2
+            done
+            [ "$_prov_alive" = 1 ] \
+                || die "podman reports '$slug' running for lease '$key', but ${PODENV_HOST_NAME}:${hport} never exchanged any data after 30s (only a bare TCP handshake would not prove this — see podenv_provision_alive's comment above) — the (re)start did not actually revive it. See why: docker compose exec podenv podman logs $slug" 5
+        fi
     else
         set -- run -d --name "$slug" \
             --label "opc.podenv.lease=$slug" \

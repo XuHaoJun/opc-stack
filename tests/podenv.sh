@@ -659,7 +659,11 @@ check "a bare TCP connect succeeds anyway (measured pasta forwarder behaviour, F
 # opc-podenv-restore.sh's own probe, run directly (idempotent, socket is
 # already up so it does not block): it must not claim this lease as
 # "restored" using language the probe cannot back up.
-_f2_restore_line="$(docker compose exec -T podenv /usr/local/bin/opc-podenv-restore.sh 2>&1 | grep podenv_f2_probe | tail -1)"
+# PODENV_RESTORE_RUN=1: the main pass is opt-in by default (task-5 F2) — this
+# is one of the two callers (besides the entrypoint) that deliberately wants
+# it to run, so it says so explicitly rather than relying on the old
+# execute-vs-source ambiguity.
+_f2_restore_line="$(docker compose exec -T podenv sh -c 'PODENV_RESTORE_RUN=1 /usr/local/bin/opc-podenv-restore.sh' 2>&1 | grep podenv_f2_probe | tail -1)"
 if printf '%s\n' "$_f2_restore_line" | grep -q '^\[podenv-restore\] restored podenv_f2_probe'; then
     fail "opc-podenv-restore.sh must not report this lease as restored — nothing answers (F2) (got: $_f2_restore_line)"
 else
@@ -682,14 +686,15 @@ fi
 # close and a real 1-byte answer were indistinguishable. The fix (in
 # opc-podenv-restore.sh's podenv_probe_answers) counts the bytes actually
 # captured instead. This check exercises that REAL function directly (not a
-# re-typed copy — PODENV_RESTORE_LIB=1 makes sourcing skip the main restore
-# pass, see the script's own guard) in a tight 40-attempt loop against the
-# still-running, still-nothing-bound podenv_f2_probe lease from above: at the
-# pre-fix ~1-in-7 single-attempt rate, 40 tries have a 1 - 0.857^40 ≈ 99.8%
-# chance of catching at least one false positive, vs. this being expected to
-# be silent every time once the byte count is actually checked.
+# re-typed copy — plain sourcing already skips the main restore pass by
+# default, see the script's own guard, task-5 F2) in a tight 40-attempt loop
+# against the still-running, still-nothing-bound podenv_f2_probe lease from
+# above: at the pre-fix ~1-in-7 single-attempt rate, 40 tries have a
+# 1 - 0.857^40 ≈ 99.8% chance of catching at least one false positive, vs.
+# this being expected to be silent every time once the byte count is
+# actually checked.
 _probe_flakes="$(docker compose exec -T podenv sh -c '
-    PODENV_RESTORE_LIB=1 . /usr/local/bin/opc-podenv-restore.sh
+    . /usr/local/bin/opc-podenv-restore.sh
     n=0; bad=0
     while [ "$n" -lt 40 ]; do
         podenv_probe_answers 23011 && bad=$((bad + 1))
@@ -735,6 +740,101 @@ docker compose exec -T -u node paperclip sh -c \
     'podenv release f2-probe >/dev/null 2>&1
      podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f2_probe >/dev/null 2>&1
      rm -f /tmp/podenv-f2.env /tmp/podenv-f2.out' >/dev/null 2>&1
+
+echo "── task-5 review F1: reprovision must not disrupt an already-alive lease ──"
+
+# Controller review finding F1: the previous fix for the false-authoritative-
+# state bug (podman reporting a lease "Up" when it is really dead) was an
+# UNCONDITIONAL `stop -t 0` on cmd_provision's reprovision branch before
+# checking anything. That is safe at boot (everything really is dead), but
+# this branch also runs ON DEMAND — it is the documented, encouraged way an
+# agent "picks a lease back up" — so an unconditional hard kill hits a
+# perfectly healthy, in-use daemon on every ordinary re-provision call.
+# RED-proved manually pre-fix (task-5-report.md): a genuinely serving
+# `traefik/whoami` lease's `podman inspect --format {{.State.StartedAt}}`
+# jumped forward by several seconds across an ordinary `podenv provision`
+# re-run, proving the container was killed and restarted even though it
+# never stopped answering. The fix is PROBE-FIRST: check before disrupting,
+# and only disrupt (with a grace period, not `-t 0`) when nothing answers.
+# This check proves the property directly, on the container's own recorded
+# start time — the one piece of state that changes if and only if the
+# container was actually stopped and started again.
+docker compose exec -T -u node paperclip sh -c 'rm -f /tmp/podenv-f1-disrupt.env'
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1-disrupt-gate --image docker.io/traefik/whoami --port 80 \
+        --as F1_DISRUPT_ADDR --env-file /tmp/podenv-f1-disrupt.env' >/dev/null 2>&1
+
+_f1d_addr="$(docker compose exec -T -u node paperclip sh -c \
+    'grep "^F1_DISRUPT_ADDR=" /tmp/podenv-f1-disrupt.env | cut -d= -f2-' 2>/dev/null | tr -d '\r')"
+
+expect_ok "the lease genuinely serves before re-provisioning (F1 precondition)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "[ -n '$_f1d_addr' ] || exit 1
+     curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1d_addr/'"
+
+_f1d_before="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_f1_disrupt_gate --format '{{.State.StartedAt}}' 2>/dev/null | tr -d '\r')"
+
+# The routine, encouraged action: re-run provision on a lease that is
+# already fine. Same command as the first call, verbatim.
+docker compose exec -T -u node paperclip sh -c \
+    'podenv provision f1-disrupt-gate --image docker.io/traefik/whoami --port 80 \
+        --as F1_DISRUPT_ADDR --env-file /tmp/podenv-f1-disrupt.env' >/dev/null 2>&1
+
+_f1d_after="$(docker compose exec -T -u 1000 -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/1000 podenv \
+    podman inspect podenv_f1_disrupt_gate --format '{{.State.StartedAt}}' 2>/dev/null | tr -d '\r')"
+
+if [ -n "$_f1d_before" ] && [ -n "$_f1d_after" ] && [ "$_f1d_before" = "$_f1d_after" ]; then
+    pass "reprovision of an already-alive lease does not disrupt it (StartedAt unchanged, F1)"
+else
+    fail "reprovision of an already-alive lease disrupted it — StartedAt changed from '$_f1d_before' to '$_f1d_after' (F1 — the exact regression this check exists to catch)"
+fi
+
+expect_ok "the lease still serves after the routine re-provision (F1)" "200" \
+    docker compose exec -T -u node paperclip sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://$_f1d_addr/'"
+
+docker compose exec -T -u node paperclip sh -c \
+    'podenv release f1-disrupt-gate >/dev/null 2>&1; rm -f /tmp/podenv-f1-disrupt.env' >/dev/null 2>&1
+
+echo "── task-5 review F3: --netns host restore is reported honestly as unprobeable ──"
+
+# Controller review finding F3 (minor): --netns host leases publish no port
+# at all, so opc-podenv-restore.sh cannot probe them — the code correctly
+# logs a WARNING and moves on rather than claiming "restored". That was
+# right and completely untested; a future edit could regress it silently
+# into either claiming false success or crashing on the missing port. Same
+# style as the F2 measurement section above: create the exact shape by
+# hand (a real --netns host container carrying the restore label, since
+# cmd_provision does not need to be involved for this), run the restore
+# script directly, and check its own wording for this container.
+docker compose exec -T -u node paperclip sh -c \
+    'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f3_netns_host >/dev/null 2>&1
+     podman --remote --url unix:///run/podenv/podman.sock run -d --name podenv_f3_netns_host \
+       --label opc.podenv.lease=podenv_f3_netns_host --label opc.podenv.key=f3-netns-host \
+       --network=host docker.io/library/alpine:3.20 sleep 300 >/dev/null 2>&1'
+
+check "the F3 --netns host lease is genuinely RUNNING (setup sanity)" \
+    sh -c 'docker compose exec -T -u node paperclip sh -c \
+        "podman --remote --url unix:///run/podenv/podman.sock inspect podenv_f3_netns_host --format \"{{.State.Running}}\"" \
+        2>/dev/null | tr -d "\r" | grep -qx true'
+
+_f3_restore_line="$(docker compose exec -T podenv sh -c 'PODENV_RESTORE_RUN=1 /usr/local/bin/opc-podenv-restore.sh' 2>&1 | grep podenv_f3_netns_host | tail -1)"
+
+if printf '%s\n' "$_f3_restore_line" | grep -q '^\[podenv-restore\] restored podenv_f3_netns_host'; then
+    fail "opc-podenv-restore.sh must not claim a --netns host lease as restored — it has no port to probe (F3) (got: $_f3_restore_line)"
+else
+    pass "opc-podenv-restore.sh does not claim success for a --netns host lease it cannot probe (F3)"
+fi
+if printf '%s\n' "$_f3_restore_line" | grep -qi 'cannot verify liveness by probing'; then
+    pass "opc-podenv-restore.sh reports the --netns host lease honestly as unprobeable (F3)"
+else
+    fail "opc-podenv-restore.sh's wording for the --netns host case is missing or changed (F3) (got: $_f3_restore_line)"
+fi
+
+docker compose exec -T -u node paperclip sh -c \
+    'podman --remote --url unix:///run/podenv/podman.sock rm -f -v podenv_f3_netns_host >/dev/null 2>&1'
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"

@@ -71,7 +71,12 @@ fi
 # script is orphaned to, and reaped by, PID 1 (docker-init) instead — the
 # entrypoint shell foreground-waits for the subshell itself, so that layer
 # leaves no zombie either.
+# PODENV_RESTORE_RUN=1: opc-podenv-restore.sh's main pass is opt-IN (task-5
+# F2) — sourcing or executing it with no variable set is a safe no-op, so
+# this entrypoint, as the one real production caller, has to say so
+# explicitly.
 ( PODENV_UID="$PODENV_UID" PODENV_GID="$PODENV_GID" PODENV_SOCK_DIR="$PODENV_SOCK_DIR" \
+    PODENV_RESTORE_RUN=1 \
     /usr/local/bin/opc-podenv-restore.sh & )
 
 # Spelled out rather than reusing as_runtime_user(): `exec` cannot run a shell

@@ -26,28 +26,68 @@
 # /proc/mounts), so podman keeps believing the old instance is alive.
 # `--force-recreate` builds a fresh writable layer, which is why plain
 # `start` happens to work there — but this script cannot assume which path
-# brought it up, so it never trusts recorded state at all: force a real
-# transition, then verify the lease is actually reachable before calling it
-# restored.
+# brought it up, so it never trusts recorded state at all.
+#
+# CORRECTED AGAIN (task-5 review F1, previous fix in this file measured to
+# be a regression, not just a wart): "never trust recorded state" got
+# implemented as an UNCONDITIONAL `stop -t 0` (no grace period) on every
+# matching container BEFORE checking anything. At container boot that is
+# nearly free — every lease really is dead by then (the PID namespace that
+# held its real process is gone). But the sibling branch in
+# `patches/paperclip/podenv/podenv` runs this exact shape ON DEMAND, as the
+# documented, encouraged way for an agent to "pick a lease back up" — and
+# `stop -t 0` there SIGKILLs a live daemon mid-operation. RED-proved live in
+# this repo's own stack (task-5-report.md): a genuinely healthy, serving
+# `traefik/whoami` lease was re-provisioned (the routine, idempotent path)
+# and its `podman inspect --format {{.State.StartedAt}}` jumped forward by
+# ~10 seconds across the call — killed and restarted for no reason, even
+# though it never stopped answering. For a real stateful daemon (mysql
+# mid-write) that is strictly worse than the silent-dead-lease bug this
+# mechanism replaced.
+#
+# Fix: PROBE FIRST. A healthy lease answers immediately, so checking before
+# disrupting costs nothing in the common case, and it is the only way this
+# script can tell "genuinely running" from podman's stale "Up" apart from
+# actually reaching the lease — which is the same probe already needed
+# afterward. Only when the probe finds nothing answering (or there is
+# nothing to probe at all — see the --netns host case below) does this
+# script disrupt anything, and even then not with `-t 0`: `stop
+# -t "$PODENV_STOP_GRACE"` gives a daemon that might be HUNG rather than
+# gone a short window to flush before the kill. A container that really is
+# already gone returns from `stop` immediately regardless of the timeout
+# given, so this costs nothing in the by-far-most-common (already-dead)
+# case, and can save data in the hung-not-gone one. Never `podman restart`:
+# measured to fail outright on exactly the stale-"Up" state this script
+# exists to recover from.
 #
 # Never fatal: this is recovery. Every lease is also restartable by hand with
 # `podman start <slug>`.
 #
 # SIBLING BUG, SIBLING FIX — the two must stay in agreement: the exact same
-# false-authoritative-state bug existed in `podenv provision`'s idempotent
-# re-provision branch (patches/paperclip/podenv/podenv, "container exists"
-# branch), and was worse there because it is the DOCUMENTED, routine path an
-# agent is told to run freely. It is fixed there the same way: force
-# `stop -t 0` then `start`, then verify liveness before reporting success,
-# never `podman restart`. The two cannot share a file (different images), so
-# if the measured behaviour above ever needs revising, revise the comment in
-# both places — this repo has been burned by exactly this kind of drift
-# before (see AGENTS.md's note on the two `SOUL.md` and two `paperclip-api`
-# SKILL.md copies).
+# false-authoritative-state bug (and, in this task's review round, the exact
+# same unconditional-disruption regression) existed in `podenv provision`'s
+# idempotent re-provision branch (patches/paperclip/podenv/podenv, "container
+# exists" branch), and matters MORE there because it is the DOCUMENTED,
+# routine path an agent is told to run freely. It is fixed there the same
+# shape: probe first (there, with `curl`, classifying its exit code — see
+# that file's own comment for why curl and not a bare connect), only
+# `stop -t "$PODENV_STOP_GRACE"` then `start` when the probe finds nothing,
+# then verify liveness before reporting success, never `podman restart`. The
+# two cannot share a file (different images), so if the measured behaviour
+# above ever needs revising, revise the comment in both places — this repo
+# has been burned by exactly this kind of drift before (see AGENTS.md's note
+# on the two `SOUL.md` and two `paperclip-api` SKILL.md copies).
 set -u
 
 PODENV_UID="${PODENV_UID:-1000}"
 PODENV_GID="${PODENV_GID:-1000}"
+# A few seconds, not `-t 0`: see the header comment above (task-5 F1). Only
+# reached when the probe below already found nothing answering, so the
+# common case (container already dead) returns from `stop` immediately
+# regardless of this value — this only spends real time in the rare case
+# where the daemon is genuinely hung, which is exactly when it is worth
+# spending.
+PODENV_STOP_GRACE="${PODENV_STOP_GRACE:-5}"
 PODENV_SOCK_DIR="${PODENV_SOCK_DIR:-/run/podenv}"
 PODENV_SOCK="${PODENV_SOCK_DIR}/podman.sock"
 
@@ -85,11 +125,14 @@ podman_r() {
 # never trust `head`'s exit status by itself.
 #
 # Split out as its own function (rather than left inline in the loop below)
-# so tests/podenv.sh can source this script with PODENV_RESTORE_LIB=1 and
-# call this in isolation against a guaranteed-nothing-listening port — a
-# tight loop of single attempts is a deterministic regression guard for the
-# exact bug above, where waiting out a natural ~1-in-7 flake in the full
-# gate is not.
+# so tests/podenv.sh can source this script — with NO variable needed, see
+# the guard below (task-5 F2) — and call this in isolation against a
+# guaranteed-nothing-listening port — a tight loop of single attempts is a
+# deterministic regression guard for the exact bug above, where waiting out
+# a natural ~1-in-7 flake in the full gate is not. It also doubles as the
+# PROBE-FIRST check in the main loop below (task-5 F1): the same "did
+# something real answer" question, asked before disrupting anything instead
+# of only after.
 podenv_probe_answers() {
     _pa_port="$1"
     _pa_tmp="$(mktemp)"
@@ -103,11 +146,30 @@ podenv_probe_answers() {
 }
 
 # Everything below this line is the main restore pass (wait for the socket,
-# find labelled leases, force a real transition, verify each is genuinely
-# alive). Guarded so tests/podenv.sh can source this file for
-# podenv_probe_answers alone (PODENV_RESTORE_LIB=1) without also running a
-# full restore pass as a side effect of sourcing.
-[ "${PODENV_RESTORE_LIB:-0}" = 1 ] && return 0 2>/dev/null || true
+# find labelled leases, probe before disrupting, verify each is genuinely
+# alive). Guarded so the SAFE thing — do nothing — is the DEFAULT, and only
+# the one real production caller (the entrypoint) has to opt in.
+#
+# CORRECTED (task-5 F2, measured against myself while verifying the F1 probe
+# fix above): the guard used to run the other way around — it took an
+# explicit opt-OUT (`PODENV_RESTORE_LIB=1`) to SKIP the main pass, so
+# sourcing this file with NO variable set at all ran a full restore pass and
+# then hit this script's own `exit 0` at the bottom, which — because the
+# file was SOURCED, not executed — silently terminated the CALLING shell
+# with no diagnostic whatsoever. Reproduced directly: `. opc-podenv-restore.sh`
+# with no leases to restore still printed its one status line and then the
+# sourcing shell's own next command never ran, no error, exit status of the
+# whole invocation still 0. Forgetting a variable must cost nothing, so this
+# is now an explicit opt-IN instead: nothing runs unless
+# `PODENV_RESTORE_RUN=1` is set. The entrypoint (invoked as an executed
+# script, never sourced) sets it; tests/podenv.sh's "run it directly" checks
+# set it too when they specifically want the main pass; every other caller —
+# including a plain `. opc-podenv-restore.sh` to reach podenv_probe_answers
+# alone — gets a no-op by default. `return`/`exit` split handles both
+# calling conventions: sourced, `return 0` hands control back to the caller;
+# executed directly (no function/sourcing context to return from), `return`
+# itself fails and `exit 0` takes over.
+[ "${PODENV_RESTORE_RUN:-0}" = 1 ] || return 0 2>/dev/null || exit 0
 
 _n=0
 while [ ! -S "$PODENV_SOCK" ] && [ "$_n" -lt 60 ]; do
@@ -122,17 +184,57 @@ _ids="$(podman_r ps -a --filter label=opc.podenv.lease --format '{{.Names}}' 2>/
 [ -n "$_ids" ] || { echo "[podenv-restore] no leases to restore"; exit 0; }
 
 for _c in $_ids; do
-    # Force a real state transition rather than trusting whatever podman
-    # currently believes. `stop -t 0` is harmless on a container that really
-    # is already stopped; on the stale-"Up" case it is measured to print a
-    # loud error ("conmon exited prematurely...") and still land the
-    # container in a state `start` can act on — that error is expected and
-    # ignored here. Never `podman restart`: measured to fail outright on
-    # exactly this state.
-    podman_r stop -t 0 "$_c" >/dev/null 2>&1
+    # PROBE FIRST (task-5 F1 — see the header comment for the measured
+    # regression this replaces): find the lease's published port and try it
+    # ONCE, before touching the container at all. `podman port` reads the
+    # container's recorded network config, which is available whether the
+    # container is genuinely running, stale-"Up", or truly exited — trying
+    # it here costs nothing and, when it succeeds, proves the lease never
+    # needed disrupting in the first place.
+    _portline="$(podman_r port "$_c" 2>/dev/null | head -1)"
+    _port="$(printf '%s' "$_portline" | sed -n 's/.*:\([0-9]\+\)[[:space:]]*$/\1/p')"
+
+    if [ -n "$_port" ] && podenv_probe_answers "$_port"; then
+        echo "[podenv-restore] $_c already answers on 127.0.0.1:${_port} (exchanged data) — left untouched, no stop/start needed"
+        continue
+    fi
+
+    # Either there was nothing to probe yet (a genuinely exited container
+    # publishes no live port mapping either — the pre-disruption probe above
+    # is not expected to succeed for the ordinary boot-time-dead case, only
+    # to SKIP disruption for the case that turns out to already be fine), or
+    # the probe found nothing answering. Only now is it safe/necessary to
+    # disrupt. `stop -t "$PODENV_STOP_GRACE"`, not `-t 0`: harmless on a
+    # container that really is already stopped (returns immediately either
+    # way); on the stale-"Up" case it is measured to print a loud error
+    # ("conmon exited prematurely...") and still land the container in a
+    # state `start` can act on — that error is expected and ignored here.
+    # Never `podman restart`: measured to fail outright on exactly this
+    # state.
+    podman_r stop -t "$PODENV_STOP_GRACE" "$_c" >/dev/null 2>&1
 
     if ! podman_r start "$_c" >/dev/null 2>&1; then
         echo "[podenv-restore] WARNING $_c did not start — investigate: docker compose exec -T -u ${PODENV_UID} -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/${PODENV_UID} podenv podman start $_c" >&2
+        continue
+    fi
+
+    # The pre-disruption probe above already ruled out having a port to try
+    # (host-netns leases publish none — measured: -p is discarded for that
+    # mode, so `podman port` never has anything to report, before OR after
+    # start). Re-check anyway rather than assume: a `run` config can differ
+    # from what a `port` query returned a moment ago in principle, and this
+    # costs one more cheap call.
+    if [ -z "$_port" ]; then
+        _portline="$(podman_r port "$_c" 2>/dev/null | head -1)"
+        _port="$(printf '%s' "$_portline" | sed -n 's/.*:\([0-9]\+\)[[:space:]]*$/\1/p')"
+    fi
+    if [ -z "$_port" ]; then
+        # --netns host leases publish no port at all. There is nothing here
+        # this script can probe — say so rather than silently counting it as
+        # restored, and rather than silently claiming it needed restoring at
+        # all (it may not have — this is the one lease shape this script
+        # cannot tell "was fine" from "was dead" apart on, see task-5 F3).
+        echo "[podenv-restore] WARNING $_c started but publishes no port (--netns host) — cannot verify liveness by probing; check by hand: docker compose exec -T -u ${PODENV_UID} -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/${PODENV_UID} podenv podman logs $_c" >&2
         continue
     fi
 
@@ -140,17 +242,7 @@ for _c in $_ids; do
     # actually reaching the lease's own published port, the same standard
     # opc-prototype-restore.sh holds preview servers to: never trust a
     # daemon's recorded state, probe it.
-    _portline="$(podman_r port "$_c" 2>/dev/null | head -1)"
-    _port="$(printf '%s' "$_portline" | sed -n 's/.*:\([0-9]\+\)[[:space:]]*$/\1/p')"
-    if [ -z "$_port" ]; then
-        # --netns host leases publish no port at all (measured: -p is
-        # discarded for that mode, so `podman port` has nothing to report).
-        # There is nothing here this script can probe — say so rather than
-        # silently counting it as restored.
-        echo "[podenv-restore] WARNING $_c started but publishes no port (--netns host) — cannot verify liveness by probing; check by hand: docker compose exec -T -u ${PODENV_UID} -e HOME=/home/podman -e XDG_RUNTIME_DIR=/run/user/${PODENV_UID} podenv podman logs $_c" >&2
-        continue
-    fi
-
+    #
     # CORRECTED (this task, previous claim measured false — see
     # task-5-report.md): this used to say a bare TCP connect (`: <
     # /dev/tcp/...`) proves the lease "answers." Measured: pasta's
