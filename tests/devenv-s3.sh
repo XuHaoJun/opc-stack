@@ -39,7 +39,7 @@ cleanup() {
   pc devenv release "$LEASE_B" >/dev/null 2>&1 || true
   pc devenv release s3-pg-only >/dev/null 2>&1 || true
   pc devenv release s3-default >/dev/null 2>&1 || true
-  pc rm -rf "$ENV_A" "$ENV_B" /tmp/s3-gate-object /tmp/s3-multipart /tmp/s3-pg-only.env /tmp/s3-default.env /tmp/mc-a /tmp/mc-b >/dev/null 2>&1 || true
+  pc rm -rf "$ENV_A" "$ENV_B" /tmp/s3-gate-object /tmp/s3-multipart /tmp/s3-pg-only.env /tmp/s3-default.env /tmp/mc-a /tmp/mc-b /tmp/s3-gate-a.before /tmp/s3-dead.env /tmp/s3-dead.out /tmp/cross.out /tmp/cross-put.out /tmp/cross-get.out /tmp/own-delete.out >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -58,10 +58,58 @@ check "tenant A writes its bucket" pc sh -ec '
   printf gate >/tmp/s3-gate-object
   mc cp /tmp/s3-gate-object "tenant/$S3_BUCKET/object" >/dev/null
 '
+check "tenant A reads its object" pc sh -ec '
+  . /tmp/s3-gate-a.env; export MC_CONFIG_DIR=/tmp/mc-a
+  [ "$(mc cat "tenant/$S3_BUCKET/object")" = gate ]
+'
 check "tenant A cannot list tenant B" pc sh -ec '
   . /tmp/s3-gate-a.env; other=$(sed -n "s/^S3_BUCKET=//p" /tmp/s3-gate-b.env)
   export MC_CONFIG_DIR=/tmp/mc-a
   ! mc ls "tenant/$other" >/tmp/cross.out 2>&1 && grep -qi "Access Denied" /tmp/cross.out
+'
+check "tenant A cannot PUT tenant B" pc sh -ec '
+  . /tmp/s3-gate-a.env; other=$(sed -n "s/^S3_BUCKET=//p" /tmp/s3-gate-b.env)
+  export MC_CONFIG_DIR=/tmp/mc-a
+  if mc cp /tmp/s3-gate-object "tenant/$other/forbidden" >/tmp/cross-put.out 2>&1; then exit 1; fi
+  grep -Eqi "Access Denied|Insufficient permissions" /tmp/cross-put.out
+'
+check "tenant A cannot GET tenant B" pc sh -ec '
+  . /tmp/s3-gate-a.env; other=$(sed -n "s/^S3_BUCKET=//p" /tmp/s3-gate-b.env)
+  export MC_CONFIG_DIR=/tmp/mc-a
+  if mc cat "tenant/$other/missing" >/tmp/cross-get.out 2>&1; then exit 1; fi
+  grep -Eqi "Access Denied|Insufficient permissions" /tmp/cross-get.out
+'
+check "tenant A deletes its object" pc sh -ec '
+  . /tmp/s3-gate-a.env; export MC_CONFIG_DIR=/tmp/mc-a
+  mc rm "tenant/$S3_BUCKET/object" >/dev/null
+  if mc stat "tenant/$S3_BUCKET/object" >/tmp/own-delete.out 2>&1; then exit 1; fi
+  grep -Eqi "not exist|not found" /tmp/own-delete.out
+'
+check "tenant multipart upload succeeds" pc sh -ec '
+  . /tmp/s3-gate-a.env; export MC_CONFIG_DIR=/tmp/mc-a
+  dd if=/dev/zero of=/tmp/s3-multipart bs=1M count=70 status=none
+  mc cp /tmp/s3-multipart "tenant/$S3_BUCKET/multipart" >/dev/null
+  mc stat --json "tenant/$S3_BUCKET/multipart" | jq -e ".size == 73400320" >/dev/null
+'
+check "presigned download needs no credentials" pc sh -ec '
+  . /tmp/s3-gate-a.env; export MC_CONFIG_DIR=/tmp/mc-a
+  url=$(mc share download --json --expire 5m "tenant/$S3_BUCKET/multipart" | jq -er .share)
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  [ "$(curl -fsS "$url" | wc -c)" -eq 73400320 ]
+'
+check "RustFS force-recreate succeeds" docker compose up -d --force-recreate devenv-s3
+ready=0
+for _ in $(seq 1 30); do
+  if curl -fsS "http://127.0.0.1:${DEVENV_S3_PORT:-9002}/health" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ready" -eq 1 ]; then pass "RustFS returns healthy"; else fail "RustFS returns healthy"; fi
+check "object and IAM survive recreate" pc sh -ec '
+  . /tmp/s3-gate-a.env; export MC_CONFIG_DIR=/tmp/mc-a
+  mc stat "tenant/$S3_BUCKET/multipart" >/dev/null
 '
 
 check "S3-only reprovision is byte-stable" pc sh -ec '
@@ -106,6 +154,26 @@ check "devenv list ignores dead S3" docker compose exec -T -u node \
 check "Postgres-only release ignores dead S3" docker compose exec -T -u node \
   -e DEVENV_S3_HOST=127.0.0.1 -e DEVENV_S3_PORT=1 paperclip \
   devenv release s3-pg-only
+
+check "tenant A release succeeds" pc devenv release "$LEASE_A"
+check "release removes only tenant A" pc sh -ec '
+  . /usr/local/lib/devenv/providers/s3.sh
+  s3_mc_init
+  buckets=$(mc ls devenv --json)
+  users=$(mc admin user list devenv --json)
+  policies=$(mc admin policy list devenv --json)
+  ! printf "%s\n" "$buckets" | jq -e --arg n "devenv-s3-gate-a/" "select(.key == \$n)" >/dev/null
+  ! printf "%s\n" "$users" | jq -e --arg n "devenv-s3-gate-a" "select(.accessKey == \$n)" >/dev/null
+  ! printf "%s\n" "$policies" | jq -e --arg n "devenv-s3-gate-a" "select(.policy == \$n)" >/dev/null
+  printf "%s\n" "$buckets" | jq -e --arg n "devenv-s3-gate-b/" "select(.key == \$n)" >/dev/null
+'
+check "tenant B still writes after A release" pc sh -ec '
+  . /tmp/s3-gate-b.env
+  export MC_CONFIG_DIR=/tmp/mc-b
+  mc alias set tenant-b "$AWS_ENDPOINT_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" --api S3v4 --path on >/dev/null
+  printf still-live | mc pipe "tenant-b/$S3_BUCKET/after-a-release" >/dev/null
+  [ "$(mc cat "tenant-b/$S3_BUCKET/after-a-release")" = still-live ]
+'
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
