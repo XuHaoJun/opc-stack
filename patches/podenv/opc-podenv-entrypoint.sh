@@ -49,6 +49,25 @@ if ! _st_out="$(as_runtime_user podman unshare true 2>&1)"; then
     echo "[podenv] WARNING   Check that this service still has security_opt: [seccomp=unconfined]," >&2
     echo "[podenv] WARNING   and that the host allows unprivileged user namespaces." >&2
 elif [ ! -c /dev/net/tun ]; then
+    # UNREACHABLE through the supported path (final review F3, measured):
+    # compose declares `devices: [/dev/net/tun]`, and when the HOST is
+    # missing that device, `docker run --device /dev/net/tun` fails at
+    # CONTAINER CREATION with "error gathering device information" — this
+    # entrypoint never gets exec'd at all, so this branch never runs, and the
+    # graceful-degradation story it used to tell (write a diagnosis, warn,
+    # never block `up`) does not hold for that case: `docker compose up` /
+    # `scripts/setup.sh` (set -euo pipefail) simply exits non-zero instead.
+    # See docs/superpowers/specs/2026-08-22-podenv-nested-container-lease-
+    # design.md's 錯誤處理 §3 correction and SETUP.md's podenv section.
+    #
+    # This branch is left in, relabelled rather than deleted, because it is
+    # reachable by ONE unsupported path: someone runs this image BY HAND
+    # without passing `--device /dev/net/tun` at all (no compose, no
+    # container-creation-time device check to fail first) — e.g. `docker run
+    # opc/podenv:local` directly. In that case the device node genuinely does
+    # not exist inside the running container, this self-test can actually
+    # observe it, and the diagnosis file is worth writing for whoever is
+    # debugging that ad-hoc run.
     printf 'no /dev/net/tun: pasta unavailable, leases must pass --netns host\n' > "$PODENV_DIAG"
     echo "[podenv] WARNING /dev/net/tun is missing — pasta cannot start, so port" >&2
     echo "[podenv] WARNING   remapping (-p) is unavailable. Leases must pass --netns host." >&2
