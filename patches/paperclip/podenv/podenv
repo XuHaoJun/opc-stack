@@ -326,8 +326,15 @@ is valkey 9.1), say why and it will be recorded on the lease:
         hport="$(podenv_port_alloc "$key")"
     fi
 
+    # F1 (review): fetch the WHOLE identity of an existing lease, not just its
+    # key — the existing-lease branch below needs image/container_port/netns/
+    # env_var to refuse a reprovision that silently changes any of them. One
+    # query, '|'-joined (safe: every field is already charset-validated above
+    # to exclude '|', so it cannot appear inside a value and be mistaken for
+    # a separator).
     existing="$(podenv_psql -tAc \
-        "SELECT key FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" \
+        "SELECT image || '|' || container_port || '|' || netns || '|' || env_var
+           FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" \
         | tr -d '[:space:]')"
 
     # Register BEFORE creating: the row is what makes the port exclusive, so it
@@ -381,6 +388,40 @@ is valkey 9.1), say why and it will be recorded on the lease:
             done
         fi
     else
+        # F1 (review — the seventh occurrence in this branch of "reports
+        # success while the thing is dead or is not what you asked for"):
+        # re-provisioning an EXISTING lease used to touch ONLY last_seen_at
+        # — every other parameter from THIS call (image, port, netns, --as)
+        # was silently accepted, and the .env write further down used THIS
+        # call's --as regardless of what the lease was actually created
+        # with. RED-proved live by the reviewer:
+        #   podenv provision review-drift --image traefik/whoami --port 80   --as WHOAMI_ADDR
+        #   podenv provision review-drift --image nginx:alpine   --port 8080 --as NGINX_ADDR
+        # both exited 0; the container stayed traefik/whoami on 23000, and
+        # .env gained NGINX_ADDR=podenv:23000 — a variable named for nginx
+        # that serves whoami. There is a DESTRUCTIVE sub-case too: under
+        # --netns host, hport = THIS call's --port verbatim (no remapping to
+        # fall back on — see the hport=cport comment above), so a
+        # reprovision with a typo'd --port would send podenv_provision_alive
+        # below to probe a port nothing serves; probe-first would then see
+        # "nothing answering" and stop+start a HEALTHY, serving stateful
+        # daemon before exiting 5 — a bounced database for a typo.
+        #
+        # Fix: refuse BEFORE any of that runs. Compare every parameter that
+        # changes lease IDENTITY (image, container_port, netns, env_var)
+        # against the stored row, and die on the first mismatch — before
+        # podenv_provision_alive is ever called, before anything is probed,
+        # stopped, started, or written. Re-running with IDENTICAL parameters
+        # is unaffected: it takes this same branch, finds no mismatch, and
+        # falls through to the existing probe-first logic below exactly as
+        # before (still exit 0, still non-disruptive on a healthy lease).
+        _ex_image="${existing%%|*}"; _ex_rest="${existing#*|}"
+        _ex_cport="${_ex_rest%%|*}"; _ex_rest="${_ex_rest#*|}"
+        _ex_netns="${_ex_rest%%|*}"; _ex_envvar="${_ex_rest#*|}"
+        if [ "$_ex_image" != "$image" ] || [ "$_ex_cport" != "$cport" ] \
+            || [ "$_ex_netns" != "$netns" ] || [ "$_ex_envvar" != "$as_var" ]; then
+            die "lease '$key' already holds '$_ex_image' on port $_ex_cport ($_ex_netns netns) as \$$_ex_envvar — provision never changes an existing lease's image/port/netns/--as, it only picks it back up. Release it first ('podenv release $key') or use a different key." 2
+        fi
         podenv_psql -c \
             "UPDATE podenv_lease SET last_seen_at = now() WHERE key = '$(podenv_sql_quote "$key")'" \
             >/dev/null
@@ -584,6 +625,14 @@ cmd_release() {
         note "podenv: '$key' (absent)"; return 0
     fi
     slug="$(podenv_slug "$key")"
+    # Fetched once, before the row goes away, for both the existing
+    # container-not-confirmed-removed warning below and the new stale-.env
+    # warning (fold-in, review).
+    _rel_row="$(podenv_psql -tAc \
+        "SELECT host_port || '|' || env_var FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" \
+        | tr -d '[:space:]')"
+    _rel_port="${_rel_row%%|*}"
+    _rel_envvar="${_rel_row#*|}"
 
     # `[ -S "$PODENV_SOCK" ]` alone only proves the socket FILE exists — a
     # stale one (left on the persistent volume by a previous run) or one no
@@ -608,10 +657,25 @@ cmd_release() {
     if [ "$container_gone" != 1 ]; then
         note "podenv: WARNING the container for '$key' ($slug) was NOT confirmed removed."
         note "podenv:   The registry row is going away regardless, which frees port"
-        note "podenv:   $(podenv_psql -tAc "SELECT host_port FROM podenv_lease WHERE key = '$(podenv_sql_quote "$key")'" | tr -d '[:space:]') for the next lease — and a container still holding it would"
+        note "podenv:   $_rel_port for the next lease — and a container still holding it would"
         note "podenv:   make that lease fail to start. Check and remove it by hand:"
         note "podenv:   docker compose exec podenv podman ps -a --filter name=$slug"
         note "podenv:   docker compose exec podenv podman rm -f -v $slug"
+    fi
+
+    # Fold-in (review): `release` recycles the port but does NOT touch
+    # whatever .env this lease's address was written into — podenv has no
+    # way to find it (unlike devenv, which tracks an http_exposed_at flag
+    # for its own preview ports). podenv's default address form is a bare
+    # `host:port` with NO credential, so once this port is re-leased to a
+    # different tenant, a stale $VAR left behind in any .env silently starts
+    # pointing that project at someone else's daemon — devenv is immune to
+    # this because its URLs carry a per-key derived credential that would
+    # simply fail to authenticate against the wrong tenant instead of
+    # connecting to it. Say so at release time; the skill also carries this
+    # rule (patches/paperclip/skills/podenv/SKILL.md).
+    if [ -n "$_rel_envvar" ]; then
+        note "podenv: WARNING '$key' released — if \$$_rel_envvar was written into a project's .env, it is NOT removed and now points at podenv:$_rel_port, a port that WILL be re-leased to a future, unrelated tenant. Remove \$$_rel_envvar from that .env by hand."
     fi
 
     podenv_psql -c \
@@ -626,12 +690,30 @@ cmd_release() {
 
 cmd_list() {
     podenv_require_control_schema
-    podenv_psql -c \
-        "SELECT key, image, netns, host_port, env_var,
-                CASE WHEN dedicated_reason IS NULL THEN ''
-                     ELSE 'dedicated: ' || dedicated_reason END AS dedicated,
-                date_trunc('second', idle) AS idle
-         FROM podenv_usage"
+    # Fold-in (review): opc-podenv-seed.sh applies bootstrap.sql with
+    # ON_ERROR_STOP=1 but no --single-transaction, so "podenv_lease created,
+    # podenv_usage view failed" is a reachable, PERSISTENT partial state —
+    # and podenv_require_control_schema above only checks podenv_lease (the
+    # table), not podenv_usage (the view actually queried below). Querying
+    # the view unconditionally in that state used to abort this whole
+    # command with psql's raw error under `set -eu` — exit 1, outside this
+    # CLI's own documented 0/2/3/4/5 exit-code table. `devenv list` already
+    # guards its own podenv section this exact way (same partial-schema
+    # state, degraded to a warning); apply the same reasoning to podenv's
+    # own listing of itself.
+    if [ "$(podenv_psql -tAc \
+            "SELECT to_regclass('podenv_usage') IS NOT NULL" 2>/dev/null \
+            | tr -d '[:space:]')" = "t" ]; then
+        podenv_psql -c \
+            "SELECT key, image, netns, host_port, env_var,
+                    CASE WHEN dedicated_reason IS NULL THEN ''
+                         ELSE 'dedicated: ' || dedicated_reason END AS dedicated,
+                    date_trunc('second', idle) AS idle
+             FROM podenv_usage" \
+            || note "podenv: WARNING podenv_usage query failed — listing skipped (see below)"
+    else
+        note "podenv: WARNING podenv_usage view is missing — listing skipped. Schema is partially applied; rerun opc-podenv-seed.sh (docker compose exec paperclip sh -c '. /usr/local/bin/opc-podenv-seed.sh; opc_podenv_seed_schema')."
+    fi
     # Disk lives in podman's store, which SQL cannot see. Printed here rather
     # than left out: there is no disk quota in this lane (a hard cap needs
     # CAP_SYS_ADMIN, i.e. privileged), so visibility is the only control there
