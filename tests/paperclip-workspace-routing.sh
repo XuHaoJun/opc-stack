@@ -28,13 +28,22 @@ LIVE_AGENT_ID=""
 LIVE_COMPANY_ID=""
 LIVE_ORIGINAL_AGENT=""
 LIVE_PROJECT_ID=""
+LIVE_PROJECT_PREEXISTING=0
 LIVE_PROJECT_ISSUE_IDS=""
+LIVE_TEST_PROJECT_IDS=""
 LIVE_PROTO_NAMES=""
 LIVE_TEST_AGENT_IDS=""
 LIVE_ADAPTER_SCRIPT=""
 LIVE_MARKER=""
 LIVE_CREATED_ISSUE_ID=""
+LIVE_CREATED_AGENT_ID=""
 LIVE_RELEASE=""
+LIVE_RECORD=""
+LIVE_CLEANUP_STATUS=0
+LIVE_RESPONSE_BODY=""
+LIVE_RESPONSE_STATUS=""
+LIVE_BOARD_KEY=""
+LIVE_BASE=""
 live_api() {
   local method="$1" path="$2" body="${3-}"
   if [ "$method" = GET ] || [ "$method" = DELETE ]; then
@@ -173,9 +182,69 @@ live_restore() {
   LIVE_RESTORE_NEEDED=0
   ok "restore exact original engineer runtimeConfig and metadata"
 }
+archive_test_execution_workspaces() {
+  local project_id="$1" workspaces workspace_ids workspace_id workspace_status \
+    verify_status remaining test_issue_ids
+  [ -n "$project_id" ] || return 0
+  if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/execution-workspaces?projectId=$project_id"; then
+    bad "list test execution workspaces for project $project_id (HTTP $LIVE_RESPONSE_STATUS)"
+    return 1
+  fi
+  workspaces="$LIVE_RESPONSE_BODY"
+  if ! printf '%s' "$workspaces" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    bad "list test execution workspaces for project $project_id (response is not an array)"
+    return 1
+  fi
+  test_issue_ids="$LIVE_PROJECT_ISSUE_IDS"
+  workspace_ids="$(printf '%s' "$workspaces" | jq -r --arg project "$project_id" --arg ids "$test_issue_ids" \
+    '.[] as $workspace | select($workspace.projectId == $project
+      and (($ids | split(" ")) | index($workspace.sourceIssueId)) != null) | $workspace.id // empty')"
+  for workspace_id in $workspace_ids; do
+    workspace_status="$(printf '%s' "$workspaces" | jq -r --arg id "$workspace_id" \
+      '.[] | select(.id == $id) | .status // empty')"
+    if [ "$workspace_status" = archived ]; then
+      ok "test execution workspace $workspace_id already archived"
+      continue
+    fi
+    if ! live_mutation PATCH "/execution-workspaces/$workspace_id" '{"status":"archived"}'; then
+      bad "archive test execution workspace $workspace_id (HTTP $LIVE_RESPONSE_STATUS)"
+      return 1
+    fi
+    if live_mutation GET "/execution-workspaces/$workspace_id"; then
+      verify_status="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // empty')"
+      if [ "$verify_status" = archived ]; then
+        ok "archive test execution workspace $workspace_id"
+      else
+        bad "archive test execution workspace $workspace_id (status=$verify_status)"
+        return 1
+      fi
+    else
+      case "$LIVE_RESPONSE_STATUS" in
+        404) ok "archive test execution workspace $workspace_id (absent)" ;;
+        *) bad "archive test execution workspace $workspace_id verification (HTTP $LIVE_RESPONSE_STATUS)"; return 1 ;;
+      esac
+    fi
+  done
+  if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/execution-workspaces?projectId=$project_id"; then
+    bad "verify test execution workspaces for project $project_id (HTTP $LIVE_RESPONSE_STATUS)"
+    return 1
+  fi
+  remaining="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r --arg ids "$test_issue_ids" \
+    '[.[] as $workspace | select($workspace.status != "archived"
+      and (($ids | split(" ")) | index($workspace.sourceIssueId)) != null)] | length' \
+    2>/dev/null || printf 'invalid')"
+  if [ "$remaining" = 0 ]; then
+    ok "verify test execution workspaces archived for project $project_id"
+    return 0
+  fi
+  bad "verify test execution workspaces archived for project $project_id (active=$remaining)"
+  return 1
+}
+
 
 live_cleanup() {
-  local issue name agent cleanup_status=0 gone live_runs drain_ok=1 holder_present=0
+  local issue name agent project_id cleanup_status=0 gone live_runs drain_ok=1 \
+    holder_present=0 workspace_cleanup_ok=1
   if [ -n "${LIVE_ADAPTER_SCRIPT:-}" ]; then
     if ! docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"; then
       bad "release process probe holders"
@@ -212,42 +281,63 @@ live_cleanup() {
     for agent in $LIVE_TEST_AGENT_IDS; do
       delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
     done
-    for issue in $LIVE_PROJECT_ISSUE_IDS; do
-      delete_and_verify "test issue $issue" "/issues/$issue" "/issues/$issue" absent || cleanup_status=1
+    for project_id in $LIVE_TEST_PROJECT_IDS; do
+      archive_test_execution_workspaces "$project_id" || {
+        cleanup_status=1
+        workspace_cleanup_ok=0
+      }
     done
-    if [ -n "$LIVE_PROJECT_ID" ]; then
-      delete_and_verify "test engineering project $LIVE_PROJECT_ID" \
-        "/projects/$LIVE_PROJECT_ID" "/projects/$LIVE_PROJECT_ID" absent || cleanup_status=1
+    if [ "$workspace_cleanup_ok" -eq 1 ]; then
+      for issue in $LIVE_PROJECT_ISSUE_IDS; do
+        delete_and_verify "test issue $issue" "/issues/$issue" "/issues/$issue" absent || cleanup_status=1
+      done
+      if [ -n "$LIVE_PROJECT_ID" ] && [ "$LIVE_PROJECT_PREEXISTING" -eq 0 ]; then
+        delete_and_verify "test engineering project $LIVE_PROJECT_ID" \
+          "/projects/$LIVE_PROJECT_ID" "/projects/$LIVE_PROJECT_ID" absent || cleanup_status=1
+      elif [ "$LIVE_PROJECT_PREEXISTING" -eq 1 ]; then
+        if live_mutation GET "/projects/$LIVE_PROJECT_ID"; then
+          ok "preserve pre-existing engineering project $LIVE_PROJECT_ID"
+        else
+          bad "preserve pre-existing engineering project $LIVE_PROJECT_ID (HTTP $LIVE_RESPONSE_STATUS)"
+          cleanup_status=1
+        fi
+      fi
+    else
+      echo "BLOCKER leaving test issues/projects because execution workspaces were not archived"
     fi
   else
     echo "BLOCKER leaving test agents/issues/project because holder quiescence was not proven"
   fi
-  for name in $LIVE_PROTO_NAMES; do
-    if ! printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1; then
-      bad "test prototype $name cleanup"
-      cleanup_status=1
-    else
-      gone=0
-      for _ in $(seq 1 10); do
-        if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/projects"; then
-          case "$LIVE_RESPONSE_STATUS" in
-            404) gone=1; break ;;
-            *) bad "test prototype $name cleanup verification (HTTP $LIVE_RESPONSE_STATUS)"; cleanup_status=1; break ;;
-          esac
-        elif ! printf '%s' "$LIVE_RESPONSE_BODY" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
-          gone=1
-          break
-        fi
-        sleep 1
-      done
-      if [ "$gone" -eq 1 ]; then
-        ok "test prototype $name cleanup"
-      elif [ "$cleanup_status" -eq 0 ]; then
-        bad "test prototype $name cleanup verification"
+  if [ "$drain_ok" -eq 1 ] && [ "$workspace_cleanup_ok" -eq 1 ]; then
+    for name in $LIVE_PROTO_NAMES; do
+      if ! printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1; then
+        bad "test prototype $name cleanup"
         cleanup_status=1
+      else
+        gone=0
+        for _ in $(seq 1 10); do
+          if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/projects"; then
+            case "$LIVE_RESPONSE_STATUS" in
+              404) gone=1; break ;;
+              *) bad "test prototype $name cleanup verification (HTTP $LIVE_RESPONSE_STATUS)"; cleanup_status=1; break ;;
+            esac
+          elif ! printf '%s' "$LIVE_RESPONSE_BODY" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
+            gone=1
+            break
+          fi
+          sleep 1
+        done
+        if [ "$gone" -eq 1 ]; then
+          ok "test prototype $name cleanup"
+        elif [ "$cleanup_status" -eq 0 ]; then
+          bad "test prototype $name cleanup verification"
+          cleanup_status=1
+        fi
       fi
-    fi
-  done
+    done
+  else
+    echo "BLOCKER leaving test prototypes because holder/workspace cleanup was not proven"
+  fi
   if ! docker compose exec -T paperclip sh -c "rm -f '$LIVE_RECORD' '$LIVE_RELEASE' '$LIVE_ADAPTER_SCRIPT'"; then
     bad "remove container process probe files"
     cleanup_status=1
@@ -259,8 +349,9 @@ live_cleanup() {
 }
 
 live_gate() {
-  local company agents engineer marker current experimental repo ticket second \
-    project workspace project_json workspace_show prototype project_id workspace_id \
+  local company agents engineer marker current experimental repo repo_path repo_owner repo_name \
+    preexisting_project preexisting_project_id ticket second project workspace project_json workspace_show \
+    prototype project_id workspace_id \
     test_agent issue_a issue_b issue_c run_json marker_source issue_json fail_before
   fail_before="$FAIL"
   LIVE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/opc-workspace-routing-live.XXXXXX")"
@@ -335,13 +426,30 @@ live_gate() {
     bad "live concurrency reset"
   fi
 
-  repo="https://github.com/opc-fixture/workspace-routing-$(date +%s)-$$"
+  repo="${PAPERCLIP_WORKSPACE_TEST_REPO_URL:-https://github.com/XuHaoJun/opc-stack.git}"
+  repo_path="${repo#*github.com/}"
+  [ "$repo_path" = "$repo" ] && repo_path="${repo#*github.com:}"
+  repo_path="${repo_path%/}"
+  repo_owner="${repo_path%%/*}"
+  repo_name="${repo_path#*/}"
+  repo_name="${repo_name%.git}"
+  if [ -n "$repo_owner" ] && [ -n "$repo_name" ] && [ "$repo_name" != "$repo_path" ]; then
+    second="https://github.com/${repo_owner^^}/${repo_name}.git"
+  else
+    second="$repo"
+  fi
+  preexisting_project="$("$CLI" project workspace show --repo "$repo" 2>/dev/null || true)"
+  preexisting_project_id="$(printf '%s' "$preexisting_project" | jq -r '.project.id // empty' 2>/dev/null || true)"
   ticket="$(printf '%s\n' "$LIVE_MARKER engineering backlog fixture" | "$CLI" engineering-ticket create \
     --repo "$repo" --title "$LIVE_MARKER workspace routing fixture" --status backlog)" || {
     bad "create test-owned backlog engineering ticket"
     return 1
   }
   LIVE_PROJECT_ID="$(printf '%s' "$ticket" | jq -r '.projectId // empty')"
+  if [ -n "$preexisting_project_id" ] && [ "$preexisting_project_id" = "$LIVE_PROJECT_ID" ]; then
+    LIVE_PROJECT_PREEXISTING=1
+    echo "INFO  preserving pre-existing engineering project $LIVE_PROJECT_ID"
+  fi
   issue_a="$(printf '%s' "$ticket" | jq -r '.id // empty')"
   workspace_id="$(printf '%s' "$ticket" | jq -r '.projectWorkspaceId // empty')"
   [ -n "$LIVE_PROJECT_ID" ] && [ -n "$issue_a" ] && [ -n "$workspace_id" ] || {
@@ -349,6 +457,7 @@ live_gate() {
     return 1
   }
   LIVE_PROJECT_ISSUE_IDS="$issue_a"
+  LIVE_TEST_PROJECT_IDS="$LIVE_PROJECT_ID"
   project_json="$(live_api GET "/projects/$LIVE_PROJECT_ID")"
   assert_eq "engineering project has one primary git workspace" 1 \
     "$(printf '%s' "$project_json" | jq '(.workspaces // []) | map(select(.isPrimary == true and .sourceType == "git_repo")) | length')"
@@ -363,8 +472,7 @@ live_gate() {
     "$(printf '%s' "$issue_json" | jq -r '.projectWorkspaceId')"
   assert_eq "backlog ticket inherits project policy" inherit \
     "$(printf '%s' "$issue_json" | jq -r '.executionWorkspaceSettings.mode // .executionWorkspacePreference // empty')"
-  second="${repo/github.com\/opc-fixture/github.com\/OPC-FIXTURE}"
-  ticket="$(printf 'Workspace routing fixture second.\n' | "$CLI" engineering-ticket create \
+  ticket="$(printf '%s\n' "$LIVE_MARKER engineering second backlog fixture" | "$CLI" engineering-ticket create \
     --repo "$second" --title "$LIVE_MARKER workspace routing fixture second" --status backlog)" || {
     bad "create second-form engineering ticket"
   }
@@ -395,6 +503,7 @@ live_gate() {
   fi
   prototype_id="$(live_api GET "/companies/$LIVE_COMPANY_ID/projects" | jq -r --arg n "$prototype" '[.[] | select(.name == $n)] | if length == 1 then .[0].id else empty end')"
   [ -n "$prototype_id" ] || { bad "prototype create/resume persists one project"; return 1; }
+  LIVE_TEST_PROJECT_IDS="$LIVE_TEST_PROJECT_IDS $prototype_id"
   project_json="$(live_api GET "/projects/$prototype_id")"
   assert_eq "prototype policy is shared" shared_workspace \
     "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.defaultMode')"
@@ -483,6 +592,7 @@ AGENT_SCRIPT
     bad "resolve prototype project and primary workspaces"
     return 1
   }
+  LIVE_TEST_PROJECT_IDS="$LIVE_TEST_PROJECT_IDS $prototype_two_id"
   create_process_agent prototype-a "$prototype_id" "$prototype_ws" || { bad "create prototype process agent A"; return 1; }
   test_agent_p1="$LIVE_CREATED_AGENT_ID"
   create_process_agent prototype-b "$prototype_id" "$prototype_ws" || { bad "create prototype process agent B"; return 1; }
