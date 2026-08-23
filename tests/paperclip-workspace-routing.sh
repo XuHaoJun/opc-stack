@@ -591,6 +591,7 @@ live_gate() {
     preexisting_project preexisting_project_id preexisting_project_status preexisting_project_error preexisting_project_error_text \
     ticket second project workspace project_json workspace_show prototype project_id workspace_id \
     test_agent issue_a issue_b issue_c run_json marker_source issue_json fail_before
+  fail_before="$FAIL"
   LIVE_PROJECT_PREEXISTING=0
   LIVE_PREEXISTING_PROJECT_ID=""
   LIVE_PROJECT_ID=""
