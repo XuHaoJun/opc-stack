@@ -114,6 +114,31 @@ hasall "managed prompts clear legacy prompt authority" patches/paperclip/opc-pap
 hasall "engineering routing supports custom executor names" patches/buzz/skills/paperclip-api/SKILL.md \
     'role == "engineer"' \
     'exactly one'
+hasall "Hermes knows Paperclip workspace modes" patches/buzz/skills/paperclip-api/SKILL.md \
+    'shared_workspace' 'isolated_workspace' 'operator_branch' 'adapter_default' \
+    'reuse_existing' 'git_worktree' 'project_primary'
+hasall "Hermes knows concurrency scopes" patches/buzz/skills/paperclip-api/SKILL.md \
+    'maxConcurrentRuns' 'agent-global' 'sharedWorkspaceConcurrency' 'serialize'
+hasall "Hermes uses deterministic ticket routing" patches/buzz/skills/paperclip-api/SKILL.md \
+    'opc-paperclip engineering-ticket create' \
+    'opc-paperclip prototype-ticket create'
+hasall "workspace changes require direct operator authority" patches/buzz/skills/paperclip-api/SKILL.md \
+    'direct operator request' 'memory'
+has "frontdoor installs Paperclip CLI" patches/buzz/Dockerfile \
+    'COPY opc/opc-paperclip /usr/local/bin/opc-paperclip'
+has "gateway installs Paperclip CLI" patches/hermes/Dockerfile \
+    'COPY opc/opc-paperclip /usr/local/bin/opc-paperclip'
+hasall "Paperclip CLI copies are drift guarded" scripts/prepare.sh \
+    'check_identical "paperclip CLI (buzz/hermes)"' \
+    'patches/buzz/opc-paperclip' \
+    'patches/hermes/opc-paperclip'
+hasall "Paperclip isolated workspaces are enabled" patches/paperclip/opc-paperclip-bootstrap.sh \
+    'enableIsolatedWorkspaces' \
+    '/instance/settings/experimental'
+hasall "Fullstack concurrency has a managed default" patches/paperclip/opc-paperclip-bootstrap.sh \
+    'FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT=4' \
+    'fullstackMaxConcurrentRuns' \
+    'maxConcurrentRuns'
 # Asserts the real producer action, not just that a service block named
 # devenv-expert-leases exists somewhere in the compose file. The full
 # invocation (with --env-file) is required because the bare

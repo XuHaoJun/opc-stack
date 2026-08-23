@@ -162,11 +162,14 @@ COPY opc/opc-hermes-acp.sh /usr/local/libexec/hermes
 COPY opc/opc-register-agent.sh /usr/local/bin/opc-register-agent.sh
 COPY opc/generate-keys.sh /usr/local/bin/opc-generate-keys.sh
 COPY opc/add-member.sh /usr/local/bin/opc-add-member.sh
+# Deterministic Paperclip API/workspace client shared by relay and front door.
+COPY opc/opc-paperclip /usr/local/bin/opc-paperclip
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh \
              /usr/local/bin/opc-issue-watcher.sh /usr/local/bin/buzz-entrypoint.sh \
              /usr/local/bin/frontdoor-entrypoint.sh /usr/local/bin/opc-generate-keys.sh \
-             /usr/local/bin/opc-add-member.sh /usr/local/libexec/hermes
+             /usr/local/bin/opc-add-member.sh /usr/local/bin/opc-paperclip \
+             /usr/local/libexec/hermes
 
 # Shared seed (nix + 12 tools) built once in patches/nix-seed (compose
 # service `nix-seed`); a tool-list change rebuilds only that image.

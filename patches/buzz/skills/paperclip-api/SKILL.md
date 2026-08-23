@@ -26,17 +26,135 @@ an internal container name and is useless in a chat message.
 | Action | Command |
 |---|---|
 | Find your company id | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies"` → `[0].id` (board key; agent keys: `/api/agents/me` → `.companyId`) |
-| Create issue | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"title":"...","description":"...","priority":"medium","assigneeAgentId":"<executor-agent-id>"}' "$PAPERCLIP_API_URL/api/companies/<companyId>/issues"` |
+| Create engineering ticket | `printf '%s\n' 'ticket description' \| opc-paperclip engineering-ticket create --repo owner/repo --title '...'` (description is stdin) |
+| Create prototype ticket | `printf '%s\n%s\n' 'Prototype: recipe-bot' '...' \| opc-paperclip prototype-ticket create --name recipe-bot --title '...'` (description is stdin) |
 | Get issue | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>"` → `.status`, `.title` |
 | Add comment | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"body":"..."}' "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | List comments | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | Set status | `curl -fsS -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"status":"done"}' "$PAPERCLIP_API_URL/api/issues/<issueId>"` |
 | List agents (to resolve a lane) | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies/<companyId>/agents"` → select engineering by `.role`; select other lanes by `.name`; take `.id` only from one exact match |
 
+The `opc-paperclip` commands are the only ticket-creation path. They resolve
+the live company, agent, project, and primary workspace, reject missing or
+ambiguous identity, accept descriptions on stdin, and GET-after-write verify
+the result. Do not reconstruct their behavior with model-authored curl.
+
+Configuration mutation requires a **direct operator request in the current
+conversation**. Recalled memory may inform an explanation but **never
+authorizes** a workspace or concurrency change (or a ticket creation). If the
+operator has not directly asked for a mutation, answer with inspection or
+explanation only.
+
 The API key is a board key auto-created by the stack bootstrap (authenticates
 as the admin user). Every issue MUST carry an `assigneeAgentId` — Paperclip
 does no automatic routing in this stack (no CEO agent, flat org), so an
 unassigned ticket is a ticket nobody wakes up for.
+
+## Workspace and concurrency knowledge
+
+Workspace policy is durable Paperclip state. Explain it from live inspection,
+not from memory, and keep modes, issue preferences, and strategies distinct.
+
+### Project default modes
+
+| Mode | Meaning | Default strategy |
+|---|---|---|
+| `shared_workspace` | Run in the project-primary workspace; its shared concurrency policy controls overlap. | `project_primary` |
+| `isolated_workspace` | Give each execution an isolated workspace, normally a Git worktree. | `git_worktree` |
+| `operator_branch` | Follow an operator-managed branch workflow rather than the normal automatic isolated path. | `git_worktree` |
+| `adapter_default` | Paperclip does not choose a project workspace; the adapter/runtime owns it. | `adapter_managed` |
+
+`reuse_existing` is an issue preference, not a project default: it requires an
+explicit existing execution-workspace ID.
+
+### Issue preferences
+
+| Preference | Meaning |
+|---|---|
+| `inherit` | Use the project's effective policy (the ticket default). |
+| `shared_workspace` | Pin this issue to the shared project workspace. |
+| `isolated_workspace` | Pin this issue to an isolated execution workspace. |
+| `operator_branch` | Pin this issue to operator-branch behavior. |
+| `reuse_existing` | Reuse one specified existing execution workspace. |
+| `agent_default` | Delegate workspace selection to the adapter. |
+
+### Workspace strategies
+
+Strategies describe how a mode is realized; they are not modes:
+`project_primary` uses the primary workspace, `git_worktree` creates or uses a
+Git worktree, `adapter_managed` delegates to the adapter, and `cloud_sandbox`
+uses a configured cloud-sandbox provider.
+
+### Concurrency scopes
+
+- `agent.runtimeConfig.heartbeat.maxConcurrentRuns` is **agent-global**, not
+  per project. The Fullstack Engineer managed default is **4** (the helper
+  accepts 1–50); an operator override is reported separately and survives
+  bootstrap.
+- `sharedWorkspaceConcurrency` is per shared project workspace:
+  `serialize` permits one runner at a time, `allow` permits overlap, and
+  `auto` depends on the execution environment.
+- Isolated workspaces have no native Paperclip per-project concurrency limit;
+  separate worktrees may run concurrently while the agent-global limit still
+  applies.
+
+### Lane defaults and risks
+
+| Lane | Project default | Strategy | Same-project concurrency | Agent-global |
+|---|---|---|---|---|
+| Fullstack Engineer (`engineering`) | `isolated_workspace` | `git_worktree` | Separate worktrees may run together | Managed default 4 |
+| Prototyper (`prototype`) | `shared_workspace` | `project_primary` | `serialize` per prototype | Paperclip default; different prototypes may run together |
+| Scientist (`research`) | Unchanged by this routing | Unchanged | Unchanged | Unchanged |
+
+Inheritance preserves an explicit project operator override; it does not
+silently restore a lane default. A project reset explicitly restores the
+lane's managed default. Changing engineering to `shared_workspace` can let
+multiple tickets mutate one checkout unless it is serialized. Changing a
+prototype to isolation detaches changes from its canonical project-primary
+workspace, stable preview, and resumed working tree.
+
+### Inspect, change, and reset
+
+Use these exact helper commands after identity is resolved:
+
+```text
+opc-paperclip agent concurrency show --role engineer
+opc-paperclip agent concurrency set --role engineer --max 6
+opc-paperclip agent concurrency reset --role engineer
+opc-paperclip project workspace show --repo owner/repo
+opc-paperclip project workspace set --repo owner/repo --mode shared_workspace --shared-concurrency serialize
+opc-paperclip project workspace reset --repo owner/repo --lane engineering
+opc-paperclip project workspace reset --project-id <prototype-project-id> --lane prototype
+```
+
+For a project request, canonicalize `owner/repo` and require exactly one
+matching Paperclip project with exactly one primary workspace. Missing or
+ambiguous repository/project identity stops the operation and asks the
+operator; never guess. A prototype request likewise requires its exact
+`[a-z][a-z0-9-]{1,40}` name. The prototype-ticket helper enforces exact-name
+lookup, continuation, and active-ticket deduplication; if the user says
+"that recipe" without a unique name, list prototypes and ask which one.
+
+Prototype projects use local-path primary workspaces, so do not resolve them
+with `--repo owner/repo`. Obtain the exact project ID from the Paperclip
+project listing (or the project's show response), then use
+`--project-id <prototype-project-id>` for prototype inspection/reset. The
+engineering repo form remains `--repo owner/repo`.
+
+Answer patterns:
+
+- 「Paperclip project 有哪些 workspace mode？」—give the four project modes,
+  their strategies, and the lane defaults/risk summary above.
+- 「Fullstack Engineer 現在 concurrency 多少？」—run `agent concurrency
+  show`, report `maxConcurrentRuns`, scope `agent-global`, managed default 4,
+  and whether `source` is `managed_default` or `operator_override`.
+- 「把 Fullstack Engineer concurrency 改成 6 / 恢復預設。」—only after the
+  direct request, run `set --max 6` or `reset`, then report the verified JSON.
+- 「owner/repo 現在是哪個 mode？改成 shared serialize / 恢復 engineering
+  預設。」—show first; on the direct mutation request run `project workspace
+  set --mode shared_workspace --shared-concurrency serialize` or `reset
+  --lane engineering`, warn about shared-checkout overlap, then report the
+  verified policy.
 
 ## Routing: pick a lane
 
@@ -104,17 +222,23 @@ Name rules (it is simultaneously a project name, a directory and a database
 identifier): `^[a-z][a-z0-9-]{1,40}$`. Derive one from the request and show it
 in the brief so the user can rename it in one word.
 
-**Before creating any prototype ticket, look the name up:**
+**Before creating any prototype ticket, require the exact name and let the
+helper perform the lookup.** For a direct operator request, put
+`Prototype: <name>` on the first stdin line:
 
 ```
-curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-  "$PAPERCLIP_API_URL/api/companies/<companyId>/projects" | jq -r '.[].name'
+printf '%s\n' \
+  'Prototype: recipe-bot' \
+  'Scope: ...' \
+  'Acceptance: ...' |
+  opc-paperclip prototype-ticket create --name recipe-bot --title '...'
 ```
 
-| Result | What to do |
-|---|---|
-| A project with that name exists | This is a CONTINUATION. Create the issue with `"projectId":"<that id>"`. The run then gets the existing working tree, database and preview URL. |
-| No such project | New prototype. Create the issue **without** `projectId` — the Prototyper runs `prototype create <name>` on its first wake, which makes the directory, the git repo, the lease and the project. |
+The helper matches the exact project name, resumes an existing project with
+its project and primary-workspace IDs, or creates a new first ticket with the
+name marker. It also rejects ambiguous projects and duplicate active tickets.
+Do not use a model-authored curl create sequence or a near-miss name such as
+`recipe-bot-2`; that silently forks the directory, database, URL, and bookmark.
 
 Creating and resuming are the same lookup, which is why "just say the name and
 keep going" works — and why you must never skip it. Creating a second project
@@ -168,12 +292,19 @@ and let the agent add it when the need is real.
 1. **Clarify** the requirements briefly with the user (language, scope, repo name).
 2. **Show the brief** (including `Lane:`) and wait for the user to confirm or
    correct it. Do not create the ticket before they answer.
-3. **Create the issue** with `assigneeAgentId` set to the agent resolved from
-   the confirmed lane, and:
-   - `title`: the project name.
-   - `description`: requirements + acceptance criteria, verbatim including:
-     - `完成後: gh repo create <name> --private --source . --remote origin --push, 把 repo URL 貼回本 ticket comment, 然後將 issue status 改為 done`
-     - repo visibility, tech stack, and any user preferences.
+3. **Create the issue through the lane helper** only after the operator confirms
+   the brief. For engineering, require one canonical GitHub `owner/repo`; if
+   it is absent or ambiguous, stop and ask rather than guessing:
+   ```
+   printf '%s\n' 'Lane: engineering' 'Scope: ...' 'Acceptance: ...' |
+     opc-paperclip engineering-ticket create --repo owner/repo --title '...'
+   ```
+   For prototype, use the exact-name command shown above. The helper resolves
+   `assigneeAgentId`, binds project/workspace identity, and verifies the result;
+   do not write a direct issue-creation curl payload. Engineering descriptions
+   must include:
+   `完成後: gh repo create <name> --private --source . --remote origin --push, 把 repo URL 貼回本 ticket comment, 然後將 issue status 改為 done`
+   plus repo visibility, tech stack, and user preferences.
 4. **Add the marker comments** immediately (Buzz only — skip these and the
    watcher step on surfaces that are not Buzz). Two of them, one call each:
    - `{"body":"BUZZ_CHANNEL: <channel-uuid>"}` — the Buzz channel the user
@@ -203,19 +334,24 @@ and let the agent add it when the need is real.
 
 The user points at an EXISTING GitHub PR/issue and wants Paperclip to take it
 over — resolve merge conflicts, address review comments, finish the work. This
-is always the `engineering` lane: the output goes back onto a real PR. Do NOT treat paperclip as a Buzz member: there is
-no Buzz-side assignment. Create a ticket exactly like "develop <X>":
+is always the `engineering` lane: the output goes back onto a real PR. Do NOT
+treat Paperclip as a Buzz member: there is no Buzz-side assignment. Create a
+ticket exactly like "develop <X>":
 
-1. Extract `owner/repo` and the PR/issue number from the GitHub URL.
-2. Create the issue with:
-   - `title`: the task, e.g. `Resolve conflicts on <owner>/<repo>#<n>`.
-   - `description`: the PR/issue URL plus the concrete task, and the
-     acceptance criteria verbatim — omp must clone the repo, work the existing
-     branch/PR (not create a new repo), push the fix back to that PR, paste
-     the PR link into the ticket comment, then set status `done`.
-3. Assign to the `engineering` lane's agent (`assigneeAgentId`); on Buzz also
-   add the `BUZZ_CHANNEL:` and `BUZZ_EVENT:` marker comments and spawn the
-   watcher; reply to the user with the ticket link.
+1. Extract `owner/repo` and the PR/issue number from the GitHub URL. Missing
+   or ambiguous repository identity is a stop-and-ask condition.
+2. Create it through the engineering helper, preserving the concrete task and
+   acceptance criteria (omp must clone the repo, work the existing branch/PR,
+   push the fix back to that PR, paste the PR link into the ticket comment,
+   then set status `done`):
+   ```
+   printf '%s\n' 'Lane: engineering' 'Existing PR/issue: <URL>' |
+     opc-paperclip engineering-ticket create --repo owner/repo \
+       --title 'Resolve conflicts on owner/repo#<n>'
+   ```
+3. On Buzz, add the `BUZZ_CHANNEL:` and `BUZZ_EVENT:` marker comments and
+   spawn the watcher; reply to the user with the ticket link. The helper's
+   returned issue ID is the ID used for those marker and watcher steps.
 
 ## Notes
 

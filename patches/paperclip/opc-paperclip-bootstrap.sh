@@ -11,6 +11,8 @@
 #   5. Vendored skills (/opt/opc-skills/*) → company skill library.
 #   6. Prototyper agent (omp, scoped to the prototype/prototype-workspace/devenv skills).
 #   7. Scientist agent (hermes_gateway adapter → the gateway's agt-scientist profile).
+#   8. Instance experimental features (isolated workspaces) — last and
+#      non-fatal, so an instance-admin 403 cannot cost us 1-7.
 #
 # Re-run reconciles bootstrap-owned state. The key file is the source of truth:
 # if it exists, the key is not re-created (the token is only returned once)
@@ -35,6 +37,33 @@ SKILLS_SRC="${OPC_SKILLS_DIR:-/opt/opc-skills}"
 FULLSTACK_PROMPT="/opt/opc-agent-prompts/fullstack-engineer.md"
 PROTOTYPER_PROMPT="/opt/opc-agent-prompts/prototyper.md"
 KEY_NAME="${PAPERCLIP_KEY_NAME:-frontdoor}"
+FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT=4
+FULLSTACK_MAX_CONCURRENT_RUNS_UPSTREAM_DEFAULT=20
+
+opc_managed_concurrency_action() { # current marker default
+    _omca_current="$1"
+    _omca_marker="$2"
+    _omca_default="$3"
+    if [ -z "$_omca_marker" ]; then
+        case "$_omca_current" in
+            "$FULLSTACK_MAX_CONCURRENT_RUNS_UPSTREAM_DEFAULT"|\
+            "$_omca_default") printf '%s\n' apply ;;
+            *) printf '%s\n' preserve ;;
+        esac
+    elif [ "$_omca_current" = "$_omca_marker" ]; then
+        if [ "$_omca_marker" = "$_omca_default" ]; then
+            printf '%s\n' keep
+        else
+            printf '%s\n' apply
+        fi
+    else
+        printf '%s\n' preserve
+    fi
+}
+if [ "${OPC_PAPERCLIP_BOOTSTRAP_LIB_ONLY:-0}" = 1 ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 JAR=/tmp/pc-cookies.txt
 
 [ -n "$ADMIN_PASSWORD" ] || { echo "PAPERCLIP_ADMIN_PASSWORD is required (set in .env)"; exit 1; }
@@ -86,6 +115,21 @@ api_patch_raw() { # path  (body on stdin)
     fi
 }
 
+api_patch_code() { # path  (body on stdin) -> HTTP status only
+    # api_patch_raw swallows curl failures and returns an empty body, which
+    # cannot tell "forbidden" from "route gone" from "server down". Where that
+    # difference is the whole message, ask for the status instead.
+    if [ "$AUTH_MODE" = key ]; then
+        curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" \
+            -H 'Content-Type: application/json' -H "Origin: $ORIGIN" \
+            -X PATCH "$API$1" --data-binary @- 2>/dev/null || printf '000'
+    else
+        curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" \
+            -H 'Content-Type: application/json' -H "Origin: $ORIGIN" \
+            -X PATCH "$API$1" --data-binary @- 2>/dev/null || printf '000'
+    fi
+}
+
 api_put_raw() { # path  (body on stdin)
     if [ "$AUTH_MODE" = key ]; then
         curl -fsS -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
@@ -95,6 +139,7 @@ api_put_raw() { # path  (body on stdin)
             -H "Origin: $ORIGIN" -X PUT "$API$1" --data-binary @- 2>/dev/null || true
     fi
 }
+
 
 reconcile_agent_instructions() { # agent-id source-file
     _rai_id="$1"
@@ -227,7 +272,9 @@ if [ -z "$agent_id" ]; then
         --arg c "$EXECUTOR_CAPABILITIES" \
         '{name:$n, role:$r, title:$t, capabilities:$c,
           adapterType:"claude_local",
-          adapterConfig:{engine:"acp", agentCommand:"omp acp --yolo"}}' \
+          adapterConfig:{engine:"acp", agentCommand:"omp acp --yolo"},
+          runtimeConfig:{heartbeat:{maxConcurrentRuns:4}},
+          metadata:{opcManagedDefaults:{fullstackMaxConcurrentRuns:4}}}' \
         | api_post_raw "/companies/$company_id/agents")"
     agent_id="$(printf '%s' "$_create_response" | jq -r '.id // empty')"
     if [ -z "$agent_id" ] || ! printf '%s' "$_create_response" | jq -e \
@@ -266,6 +313,70 @@ else
         echo "[pc-bootstrap] executor metadata reconciled: $agent_id"
     fi
 fi
+
+_executor_live="$(api_get "/companies/$company_id/agents" | \
+    jq -c --arg id "$agent_id" '.[]? | select(.id == $id)' 2>/dev/null | head -1)"
+if ! printf '%s' "$_executor_live" | jq -e --arg id "$agent_id" '.id == $id' >/dev/null 2>&1; then
+    echo "[pc-bootstrap] executor concurrency lookup failed: $agent_id" >&2
+    exit 1
+fi
+_executor_current="$(printf '%s' "$_executor_live" | \
+    jq -r '.runtimeConfig.heartbeat.maxConcurrentRuns // empty')"
+_executor_marker="$(printf '%s' "$_executor_live" | \
+    jq -r '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns // empty')"
+_executor_action="$(opc_managed_concurrency_action \
+    "$_executor_current" "$_executor_marker" "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT")"
+if [ "$_executor_action" = keep ] && printf '%s' "$_executor_live" | jq -e '
+    ((.runtimeConfig.modelProfiles? | type) == "object")
+    and ((.runtimeConfig.modelProfiles.cheap? | type) == "object")
+    and ((.runtimeConfig.modelProfiles.cheap.adapterConfig? | type) != "object")
+' >/dev/null 2>&1; then
+    _executor_action=apply
+fi
+
+if [ "$_executor_action" = apply ]; then
+    _new_runtime="$(printf '%s' "$_executor_live" | jq \
+        --argjson n "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" '
+        (.runtimeConfig // {}) as $r
+        | $r * {heartbeat:(($r.heartbeat // {})
+          * {maxConcurrentRuns:$n})}
+        | if ((.modelProfiles? | type) == "object")
+             and ((.modelProfiles.cheap? | type) == "object")
+             and ((.modelProfiles.cheap.adapterConfig? | type) != "object")
+          then .modelProfiles.cheap.adapterConfig = {}
+          else .
+          end
+    ')"
+    _new_metadata="$(printf '%s' "$_executor_live" | jq \
+        --argjson n "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" '
+        (.metadata // {}) as $m
+        | $m * {opcManagedDefaults:(($m.opcManagedDefaults // {})
+          * {fullstackMaxConcurrentRuns:$n})}
+    ')"
+    _executor_response="$(jq -nc \
+        --argjson runtime "$_new_runtime" --argjson metadata "$_new_metadata" \
+        '{runtimeConfig:$runtime, metadata:$metadata}' \
+        | api_patch_raw "/agents/$agent_id")"
+    if ! printf '%s' "$_executor_response" | jq -e \
+        --argjson n "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" \
+        '.runtimeConfig.heartbeat.maxConcurrentRuns == $n
+         and .metadata.opcManagedDefaults.fullstackMaxConcurrentRuns == $n' \
+        >/dev/null 2>&1; then
+        echo "[pc-bootstrap] executor concurrency reconciliation failed: $agent_id" >&2
+        exit 1
+    fi
+fi
+_executor_live="$(api_get "/companies/$company_id/agents" | \
+    jq -c --arg id "$agent_id" '.[]? | select(.id == $id)' 2>/dev/null | head -1)"
+if ! printf '%s' "$_executor_live" | jq -e \
+    --arg id "$agent_id" \
+    '.id == $id and (.runtimeConfig.heartbeat.maxConcurrentRuns | type == "number")' \
+    >/dev/null 2>&1; then
+    echo "[pc-bootstrap] executor concurrency verification failed: $agent_id" >&2
+    exit 1
+fi
+echo "[pc-bootstrap] executor concurrency: $_executor_action ($agent_id)"
+
 
 reconcile_agent_instructions "$agent_id" "$FULLSTACK_PROMPT" || true
 
@@ -654,6 +765,38 @@ if [ -z "$SCIENTIST_KEY" ]; then
     echo "[pc-bootstrap] WARNING HERMES_SCIENTIST_API_KEY empty — skipping Scientist agent" >&2
 else
     reconcile_agent "$SCIENTIST_NAME" hermes_gateway sci_desired_config || true
+fi
+
+# ── 8. Instance experimental features (isolated workspaces) ──
+# Last, and non-fatal, on purpose. This used to run before section 2, and it
+# exited 1 on failure — so a 403 (the PATCH is instance-admin only:
+# instance-settings.ts assertCanManageInstanceSettings) or a renamed route in a
+# future Paperclip tag would turn a working fresh install into "no company, no
+# agents, no board key", with a message that could not tell permission from
+# availability. Nothing else in this script depends on the flag.
+#
+# Same stance as devenv (`opc-devenv-seed.sh`): a resource problem must surface
+# when the resource is used — here, a ticket asking for isolated_workspace /
+# git_worktree — not at boot, where it takes the whole stack down with it.
+#
+# Re-runs are cheap: once the flag is on, the GET short-circuits and no PATCH
+# is attempted (which also matters because reconcile runs authenticate with the
+# board key rather than the admin session).
+_experimental_live="$(api_get "/instance/settings/experimental")"
+if printf '%s' "$_experimental_live" \
+    | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
+    echo "[pc-bootstrap] instance isolated workspaces: already enabled"
+else
+    _experimental_code="$(jq -nc '{enableIsolatedWorkspaces:true}' \
+        | api_patch_code "/instance/settings/experimental")"
+    _experimental_live="$(api_get "/instance/settings/experimental")"
+    if printf '%s' "$_experimental_live" \
+        | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] instance isolated workspaces: enabled"
+    else
+        echo "[pc-bootstrap] WARNING isolated workspaces not enabled (PATCH HTTP ${_experimental_code:-000})" >&2
+        echo "[pc-bootstrap] WARNING isolated_workspace / git_worktree tickets will be rejected until an instance admin enables it" >&2
+    fi
 fi
 
 echo "[pc-bootstrap] done. admin=$ADMIN_EMAIL company=$company_id agent=$AGENT_NAME"
