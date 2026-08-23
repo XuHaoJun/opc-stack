@@ -11,6 +11,8 @@
 #   5. Vendored skills (/opt/opc-skills/*) → company skill library.
 #   6. Prototyper agent (omp, scoped to the prototype/prototype-workspace/devenv skills).
 #   7. Scientist agent (hermes_gateway adapter → the gateway's agt-scientist profile).
+#   8. Instance experimental features (isolated workspaces) — last and
+#      non-fatal, so an instance-admin 403 cannot cost us 1-7.
 #
 # Re-run reconciles bootstrap-owned state. The key file is the source of truth:
 # if it exists, the key is not re-created (the token is only returned once)
@@ -113,6 +115,21 @@ api_patch_raw() { # path  (body on stdin)
     fi
 }
 
+api_patch_code() { # path  (body on stdin) -> HTTP status only
+    # api_patch_raw swallows curl failures and returns an empty body, which
+    # cannot tell "forbidden" from "route gone" from "server down". Where that
+    # difference is the whole message, ask for the status instead.
+    if [ "$AUTH_MODE" = key ]; then
+        curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" \
+            -H 'Content-Type: application/json' -H "Origin: $ORIGIN" \
+            -X PATCH "$API$1" --data-binary @- 2>/dev/null || printf '000'
+    else
+        curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" \
+            -H 'Content-Type: application/json' -H "Origin: $ORIGIN" \
+            -X PATCH "$API$1" --data-binary @- 2>/dev/null || printf '000'
+    fi
+}
+
 api_put_raw() { # path  (body on stdin)
     if [ "$AUTH_MODE" = key ]; then
         curl -fsS -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
@@ -193,27 +210,6 @@ else
         *) echo "[pc-bootstrap] bootstrap/claim failed: HTTP $code"; exit 1 ;;
     esac
 fi
-
-# ── 2. Instance experimental features ──
-_experimental_live="$(api_get "/instance/settings/experimental")"
-if ! printf '%s' "$_experimental_live" \
-    | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
-    _experimental_response="$(jq -nc \
-        '{enableIsolatedWorkspaces:true}' \
-        | api_patch_raw "/instance/settings/experimental")"
-    if ! printf '%s' "$_experimental_response" \
-        | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
-        echo "[pc-bootstrap] isolated workspaces enable failed" >&2
-        exit 1
-    fi
-fi
-_experimental_live="$(api_get "/instance/settings/experimental")"
-if ! printf '%s' "$_experimental_live" \
-    | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
-    echo "[pc-bootstrap] isolated workspaces verification failed" >&2
-    exit 1
-fi
-echo "[pc-bootstrap] instance isolated workspaces: enabled/current"
 
 # ── 2. Company ──
 company_id="$(api_get "/companies" | jq -r '.[0].id // empty' 2>/dev/null)"
@@ -769,6 +765,38 @@ if [ -z "$SCIENTIST_KEY" ]; then
     echo "[pc-bootstrap] WARNING HERMES_SCIENTIST_API_KEY empty — skipping Scientist agent" >&2
 else
     reconcile_agent "$SCIENTIST_NAME" hermes_gateway sci_desired_config || true
+fi
+
+# ── 8. Instance experimental features (isolated workspaces) ──
+# Last, and non-fatal, on purpose. This used to run before section 2, and it
+# exited 1 on failure — so a 403 (the PATCH is instance-admin only:
+# instance-settings.ts assertCanManageInstanceSettings) or a renamed route in a
+# future Paperclip tag would turn a working fresh install into "no company, no
+# agents, no board key", with a message that could not tell permission from
+# availability. Nothing else in this script depends on the flag.
+#
+# Same stance as devenv (`opc-devenv-seed.sh`): a resource problem must surface
+# when the resource is used — here, a ticket asking for isolated_workspace /
+# git_worktree — not at boot, where it takes the whole stack down with it.
+#
+# Re-runs are cheap: once the flag is on, the GET short-circuits and no PATCH
+# is attempted (which also matters because reconcile runs authenticate with the
+# board key rather than the admin session).
+_experimental_live="$(api_get "/instance/settings/experimental")"
+if printf '%s' "$_experimental_live" \
+    | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
+    echo "[pc-bootstrap] instance isolated workspaces: already enabled"
+else
+    _experimental_code="$(jq -nc '{enableIsolatedWorkspaces:true}' \
+        | api_patch_code "/instance/settings/experimental")"
+    _experimental_live="$(api_get "/instance/settings/experimental")"
+    if printf '%s' "$_experimental_live" \
+        | jq -e '.enableIsolatedWorkspaces == true' >/dev/null 2>&1; then
+        echo "[pc-bootstrap] instance isolated workspaces: enabled"
+    else
+        echo "[pc-bootstrap] WARNING isolated workspaces not enabled (PATCH HTTP ${_experimental_code:-000})" >&2
+        echo "[pc-bootstrap] WARNING isolated_workspace / git_worktree tickets will be rejected until an instance admin enables it" >&2
+    fi
 fi
 
 echo "[pc-bootstrap] done. admin=$ADMIN_EMAIL company=$company_id agent=$AGENT_NAME"
