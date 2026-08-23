@@ -1013,8 +1013,8 @@ cmd_engineering_ticket_create() {
         inherit) _settings="$(jq -nc '{mode:"inherit"}')" ;;
         shared_workspace) _settings="$(jq -nc '{mode:"shared_workspace",workspaceStrategy:{type:"project_primary"}}')" ;;
         isolated_workspace) _settings="$(jq -nc '{mode:"isolated_workspace",workspaceStrategy:{type:"git_worktree"}}')" ;;
-        operator_branch) _settings="$(jq -nc '{mode:"operator_branch",workspaceStrategy:{type:"git_worktree}}')" ;;
-        agent_default) _settings="$(jq -nc '{mode:"agent_default",workspaceStrategy:{type:"adapter_managed}}')" ;;
+        operator_branch) _settings="$(jq -nc '{mode:"operator_branch",workspaceStrategy:{type:"git_worktree"}}')" ;;
+        agent_default) _settings="$(jq -nc '{mode:"agent_default",workspaceStrategy:{type:"adapter_managed"}}')" ;;
         reuse_existing) _settings="$(jq -nc '{mode:"reuse_existing"}')" ;;
     esac
     _payload="$(jq -nc --rawfile description "$_description_file" \
