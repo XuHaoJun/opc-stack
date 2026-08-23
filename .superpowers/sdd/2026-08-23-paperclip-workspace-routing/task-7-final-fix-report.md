@@ -71,3 +71,10 @@ The follow-up scoped review required five additional safety corrections:
 The scoped corrections passed the same focused fixture gate (**133 pass, 0 fail**), audit gate (**39 pass, 0 fail**), shell/Python syntax checks, `scripts/prepare.sh` drift guard, and `git diff --check`.
 
 An additional source-derivation guard treats legacy managed markers without explicit enabled/default-workspace keys as owning the managed values (`enabled:true` and that primary workspace), so divergence in those values is also reported as `operator_override`.
+
+## Final scoped corrections
+
+- Recovery now passes the exact newline-preserving engineering description marker (`printf '%s\n'` semantics) for both helper calls, while retaining exact project/issue cardinality checks.
+- Live-gate state is explicitly reset before cleanup-sensitive paths, and cleanup preserves only the immutable snapshotted project ID; a routed ID that differs from the snapshot is test-owned and disposable.
+
+Final checks after these corrections: fixture **133 pass, 0 fail**; audit **39 pass, 0 fail**; all shell/Python syntax checks, `scripts/prepare.sh`, and `git diff --check` passed.
