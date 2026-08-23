@@ -11,6 +11,7 @@ assert_not_contains() { local label="$1" needle="$2" haystack="$3"; [[ "$haystac
 CLI=patches/hermes/opc-paperclip
 MODE=fixture
 RUN_LIVE_AFTER_FIXTURE=0
+# Fresh-install rehearsal sets OPC_WORKSPACE_ROUTING_EPHEMERAL=1; main-stack live runs remain strict by default.
 case "${1-}" in
   "") MODE=fixture; RUN_LIVE_AFTER_FIXTURE=1 ;;
   --fixture) MODE=fixture ;;
@@ -581,7 +582,9 @@ live_cleanup() {
   fi
   live_restore || cleanup_status=1
   restore_preexisting_project || cleanup_status=1
-  if [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ]; then
+  if [ "${OPC_WORKSPACE_ROUTING_EPHEMERAL:-0}" = 1 ]; then
+    echo "INFO  ephemeral routing gate: enclosing fresh-install teardown owns test record cleanup"
+  elif [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ]; then
     echo "BLOCKER leaving test agents/issues/projects because ticket ownership is unknown"
     cleanup_status=1
   elif [ "$drain_ok" -eq 1 ]; then

@@ -53,3 +53,12 @@ Final verification:
 - `bash -n tests/paperclip-workspace-routing.sh` — passed.
 - `tests/paperclip-workspace-routing.sh --fixture` — 133 pass, 0 fail.
 - `tests/paperclip-workspace-routing.sh --live` — routing, exact-path Git checks, scheduled-retry/workspace-busy, different-prototype concurrency, and git-worktree archival passed. Some automatically generated comments remained undeletable because the API rejected every available test-agent/engineer owner key; the gate reported those failures and conservatively skipped prototype/project deletion. No false PASS was emitted.
+
+## Ephemeral fresh-install cleanup mode (2026-08-23)
+
+The fresh-install clone now invokes the live routing gate with the explicit `OPC_WORKSPACE_ROUTING_EPHEMERAL=1` environment variable. In that mode the gate still releases and drains process holders, restores the exact saved engineer/pre-existing-project state, and removes container/host probe files, but defers all per-record agent/comment/issue/workspace/project/prototype deletion to the enclosing fresh-install volume teardown. The default main-stack live path remains strict and unchanged; skipped cleanup is not counted as a failure in ephemeral mode, while routing assertion failures remain failures.
+
+Verification:
+
+- `bash -n tests/paperclip-workspace-routing.sh && bash -n tests/fresh-install.sh` — passed.
+- `tests/paperclip-workspace-routing.sh --fixture` — 133 pass, 0 fail.
