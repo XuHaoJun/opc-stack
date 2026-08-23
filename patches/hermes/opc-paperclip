@@ -332,6 +332,10 @@ safe_policy_json() {
          workspaceStrategy:{type:(.workspaceStrategy.type // null)}}
     '
 }
+safe_issue_json() {
+    _issue="$1"
+    printf '%s' "$_issue" | jq -c '{id,identifier,title,projectId,projectWorkspaceId,status}'
+}
 
 workspace_source() {
     _project="$1"
@@ -346,8 +350,17 @@ workspace_source() {
         printf '%s\n' unmanaged
         return
     fi
+    _marker_lane="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.lane // empty')"
     _marker_mode="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.mode // empty')"
     _marker_strategy="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.strategyType // empty')"
+    if [ "$_marker_lane" != engineering ] && [ "$_marker_lane" != prototype ]; then
+        printf '%s\n' unmanaged
+        return
+    fi
+    if [ -z "$_marker_mode" ] || [ -z "$_marker_strategy" ]; then
+        printf '%s\n' unmanaged
+        return
+    fi
     _marker_shared="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency // empty')"
     _marker_enabled="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.enabled // true')"
     _marker_workspace="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.defaultProjectWorkspaceId // .id // empty')"
@@ -542,6 +555,22 @@ reconcile_engineering_project() {
         _marker_lane="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.lane // empty')"
         _marker_mode="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.mode // empty')"
         _marker_strategy="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.strategyType // empty')"
+        _marker_source="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.source // empty')"
+        [ "$_marker_lane" = engineering ] &&
+            [ -n "$_marker_mode" ] && [ -n "$_marker_strategy" ] ||
+            die "engineering workspace marker is incomplete or has the wrong lane" 4
+        case "$_marker_mode" in
+            shared_workspace|isolated_workspace|operator_branch|adapter_default) ;;
+            *) die "engineering workspace marker has an unsupported mode" 4 ;;
+        esac
+        case "$_marker_strategy" in
+            project_primary|git_worktree|adapter_managed) ;;
+            *) die "engineering workspace marker has an unsupported strategy" 4 ;;
+        esac
+        case "$_marker_source" in
+            ""|managedDefault|operatorOverride) ;;
+            *) die "engineering workspace marker has an unsupported source" 4 ;;
+        esac
         _live_mode="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.defaultMode // empty')"
         _live_strategy="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type // empty')"
         if [ "$_marker_lane" = engineering ] &&
@@ -850,9 +879,10 @@ prototype_ticket_create() {
                 1)
                     _existing_id="$(printf '%s' "$_active" | jq -r '.[0].id // empty')"
                     [ -n "$_existing_id" ] || die "existing prototype ticket has no id" 4
-                    rm -f "$_description_file"
-                    api_request GET "/issues/$_existing_id" ||
+                    _issue="$(api_request GET "/issues/$_existing_id")" ||
                         die "failed to read existing prototype ticket" 4
+                    safe_issue_json "$_issue"
+                    rm -f "$_description_file"
                     return 0
                     ;;
                 *) _details="$(printf '%s' "$_active" | jq -r '.[] | "\(.id // "<no-id>") \(.identifier // "<no-identifier>")"' \
@@ -912,7 +942,7 @@ prototype_ticket_create() {
         and (if $project == "" then (.projectId // null) == null
              else .projectId == $project and .projectWorkspaceId == $workspace end)
     ' >/dev/null 2>&1 || die "Paperclip prototype ticket response was not verified" 4
-    printf '%s' "$_issue"
+    safe_issue_json "$_issue"
 }
 
 active_engineer() {
