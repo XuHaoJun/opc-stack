@@ -69,3 +69,5 @@ The follow-up scoped review required five additional safety corrections:
 - Prototype reconciliation recognizes `source: operatorOverride` before legacy shared-concurrency migration and preserves both marker and live policy. Legacy markers without that source still receive the managed shared-concurrency augmentation.
 
 The scoped corrections passed the same focused fixture gate (**133 pass, 0 fail**), audit gate (**39 pass, 0 fail**), shell/Python syntax checks, `scripts/prepare.sh` drift guard, and `git diff --check`.
+
+An additional source-derivation guard treats legacy managed markers without explicit enabled/default-workspace keys as owning the managed values (`enabled:true` and that primary workspace), so divergence in those values is also reported as `operator_override`.
