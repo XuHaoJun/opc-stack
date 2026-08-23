@@ -78,3 +78,7 @@ An additional source-derivation guard treats legacy managed markers without expl
 - Live-gate state is explicitly reset before cleanup-sensitive paths, and cleanup preserves only the immutable snapshotted project ID; a routed ID that differs from the snapshot is test-owned and disposable.
 
 Final checks after these corrections: fixture **133 pass, 0 fail**; audit **39 pass, 0 fail**; all shell/Python syntax checks, `scripts/prepare.sh`, and `git diff --check` passed.
+
+## Final regression correction
+
+Restored `fail_before="$FAIL"` at the beginning of `live_gate`, before any live mutations or cleanup traps. The live gate's normal-exit delta accounting is therefore preserved alongside the ownership-state initialization.
