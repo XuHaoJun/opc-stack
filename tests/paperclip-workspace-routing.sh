@@ -467,7 +467,7 @@ archive_test_execution_workspaces() {
 
 live_cleanup() {
   local issue name agent project_id cleanup_status=0 gone live_runs drain_ok=1 \
-    holder_present=0 workspace_cleanup_ok=1
+    holder_present=0 workspace_cleanup_ok=1 prototype_cleanup_ok=1
   if [ -n "${LIVE_ADAPTER_SCRIPT:-}" ]; then
     if ! docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"; then
       bad "release process probe holders"
@@ -511,14 +511,47 @@ live_cleanup() {
     if ! cancel_test_issues_for_cleanup; then
       cleanup_status=1
       workspace_cleanup_ok=0
+    else
+      for project_id in $LIVE_TEST_PROJECT_IDS; do
+        archive_test_execution_workspaces "$project_id" || {
+          cleanup_status=1
+          workspace_cleanup_ok=0
+        }
+      done
+      if [ "$workspace_cleanup_ok" -eq 1 ]; then
+        for name in $LIVE_PROTO_NAMES; do
+          if ! printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1; then
+            bad "test prototype $name cleanup"
+            cleanup_status=1
+            prototype_cleanup_ok=0
+          else
+            gone=0
+            for _ in $(seq 1 10); do
+              if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/projects"; then
+                case "$LIVE_RESPONSE_STATUS" in
+                  404) gone=1; break ;;
+                  *) bad "test prototype $name cleanup verification (HTTP $LIVE_RESPONSE_STATUS)"; cleanup_status=1; break ;;
+                esac
+              elif ! printf '%s' "$LIVE_RESPONSE_BODY" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
+                gone=1
+                break
+              fi
+              sleep 1
+            done
+            if [ "$gone" -eq 1 ]; then
+              ok "test prototype $name cleanup"
+            else
+              bad "test prototype $name cleanup verification"
+              cleanup_status=1
+              prototype_cleanup_ok=0
+            fi
+          fi
+        done
+      else
+        echo "BLOCKER leaving test prototypes because execution workspaces were not archived"
+      fi
     fi
-    for project_id in $LIVE_TEST_PROJECT_IDS; do
-      archive_test_execution_workspaces "$project_id" || {
-        cleanup_status=1
-        workspace_cleanup_ok=0
-      }
-    done
-    if [ "$workspace_cleanup_ok" -eq 1 ]; then
+    if [ "$workspace_cleanup_ok" -eq 1 ] && [ "$prototype_cleanup_ok" -eq 1 ]; then
       for issue in $LIVE_PROJECT_ISSUE_IDS; do
         delete_and_verify "test issue $issue" "/issues/$issue" "/issues/$issue" absent || cleanup_status=1
       done
@@ -540,41 +573,13 @@ live_cleanup() {
         bad "refusing to classify routed project ownership during cleanup"
         cleanup_status=1
       fi
-    else
+    elif [ "$workspace_cleanup_ok" -ne 1 ]; then
       echo "BLOCKER leaving test issues/projects because execution workspaces were not archived"
+    else
+      echo "BLOCKER leaving test issues/projects because test prototypes were not destroyed"
     fi
   else
     echo "BLOCKER leaving test agents/issues/project because holder quiescence was not proven"
-  fi
-  if [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 0 ] && [ "$drain_ok" -eq 1 ] && [ "$workspace_cleanup_ok" -eq 1 ]; then
-    for name in $LIVE_PROTO_NAMES; do
-      if ! printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1; then
-        bad "test prototype $name cleanup"
-        cleanup_status=1
-      else
-        gone=0
-        for _ in $(seq 1 10); do
-          if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/projects"; then
-            case "$LIVE_RESPONSE_STATUS" in
-              404) gone=1; break ;;
-              *) bad "test prototype $name cleanup verification (HTTP $LIVE_RESPONSE_STATUS)"; cleanup_status=1; break ;;
-            esac
-          elif ! printf '%s' "$LIVE_RESPONSE_BODY" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
-            gone=1
-            break
-          fi
-          sleep 1
-        done
-        if [ "$gone" -eq 1 ]; then
-          ok "test prototype $name cleanup"
-        elif [ "$cleanup_status" -eq 0 ]; then
-          bad "test prototype $name cleanup verification"
-          cleanup_status=1
-        fi
-      fi
-    done
-  else
-    echo "BLOCKER leaving test prototypes because holder/workspace cleanup was not proven"
   fi
   if ! docker compose exec -T paperclip sh -c "rm -f '$LIVE_RECORD' '$LIVE_RELEASE' '$LIVE_ADAPTER_SCRIPT'"; then
     bad "remove container process probe files"
