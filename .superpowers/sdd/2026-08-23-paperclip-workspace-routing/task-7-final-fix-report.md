@@ -57,3 +57,15 @@ Implemented the nine final whole-branch review findings from the SDD ledger in o
 ## Live gate
 
 `tests/paperclip-workspace-routing.sh --live` was run without destructive volume teardown. The gate intentionally remains nonzero on the already-known runtime blockers: the process adapter produced no execution-workspace records and the second same-prototype dispatch did not report the expected scheduled retry. Those are reported as failures/blockers, not fabricated passes. Cleanup restored the engineer runtime/metadata and removed the test projects/agents that were disposable; several issue deletes returned the existing Paperclip HTTP 500 behavior and therefore remained explicit cleanup failures in the gate output.
+
+## Scoped re-review corrections
+
+The follow-up scoped review required five additional safety corrections:
+
+- Live ownership recovery now validates project/issue responses as arrays with object/id/type checks, requires exactly one canonical project and exactly one exact description-marker/project issue, excludes IDs tracked before the failed helper, rejects zero/multiple/malformed matches, and marks ownership unknown. Destructive cleanup is skipped whenever ownership is unknown.
+- Pre-existing restoration attempts policy and workspace metadata independently. A policy PATCH/GET failure no longer prevents the metadata PATCH/GET attempt; either failure blocks cleanup and is reported.
+- `LIVE_PREEXISTING_PROJECT_ID` is immutable and separate from the routed `LIVE_PROJECT_ID`. Only an exact routed-ID match is preserved; a newly routed project after the probe is treated as disposable test ownership, while the snapshotted project is never deleted.
+- Workspace source derivation now compares every available marker-owned field, including shared concurrency and the newly persisted enabled/default-workspace fields. Any divergence reports `operator_override`.
+- Prototype reconciliation recognizes `source: operatorOverride` before legacy shared-concurrency migration and preserves both marker and live policy. Legacy markers without that source still receive the managed shared-concurrency augmentation.
+
+The scoped corrections passed the same focused fixture gate (**133 pass, 0 fail**), audit gate (**39 pass, 0 fail**), shell/Python syntax checks, `scripts/prepare.sh` drift guard, and `git diff --check`.
