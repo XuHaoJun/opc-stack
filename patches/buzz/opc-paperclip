@@ -233,6 +233,12 @@ cmd_agent_concurrency_write() {
         (.runtimeConfig // {}) as $r
         | $r * {heartbeat:(($r.heartbeat // {})
               * {maxConcurrentRuns:($value | tonumber)})}
+        | if ((.modelProfiles // {}) | type == "object")
+             and ((.modelProfiles.cheap // {}) | type == "object")
+             and ((.modelProfiles.cheap.adapterConfig? | type) != "object")
+          then .modelProfiles.cheap.adapterConfig = {}
+          else .
+          end
     ')"
     if [ "$_reset_marker" = reset ]; then
         _new_metadata="$(printf '%s' "$_agent" | jq --arg value "$_max" '

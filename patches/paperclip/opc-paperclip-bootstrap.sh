@@ -336,6 +336,12 @@ if [ "$_executor_action" = apply ]; then
         (.runtimeConfig // {}) as $r
         | $r * {heartbeat:(($r.heartbeat // {})
           * {maxConcurrentRuns:$n})}
+        | if ((.modelProfiles // {}) | type == "object")
+             and ((.modelProfiles.cheap // {}) | type == "object")
+             and ((.modelProfiles.cheap.adapterConfig? | type) != "object")
+          then .modelProfiles.cheap.adapterConfig = {}
+          else .
+          end
     ')"
     _new_metadata="$(printf '%s' "$_executor_live" | jq \
         --argjson n "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" '

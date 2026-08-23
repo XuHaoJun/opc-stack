@@ -640,7 +640,7 @@ cat >"$STATE" <<'JSON'
     "name": "Fullstack Engineer",
     "role": "engineer",
     "status": "idle",
-    "runtimeConfig": {"heartbeat": {"maxConcurrentRuns": 4, "fixtureKeep": true}},
+    "runtimeConfig": {"heartbeat": {"maxConcurrentRuns": 4, "fixtureKeep": true}, "modelProfiles": {"cheap": {"enabled": false, "label": "fixture"}}},
     "metadata": {"opcManagedDefaults": {"fullstackMaxConcurrentRuns": 4}, "fixtureKeep": "yes"}
   }],
   "projects": [{
@@ -701,6 +701,18 @@ assert_eq "operator concurrency set" "6" \
   "$($CLI agent concurrency show --role engineer | jq -r .maxConcurrentRuns)"
 assert_eq "set is marked override" "operator_override" \
   "$($CLI agent concurrency show --role engineer | jq -r .source)"
+assert_eq "agent PATCH repairs cheap profile schema" "object" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].runtimeConfig.modelProfiles.cheap.adapterConfig | type')"
+assert_eq "agent PATCH preserves cheap profile enabled" "false" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].runtimeConfig.modelProfiles.cheap.enabled')"
+assert_eq "agent PATCH preserves cheap profile label" "fixture" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].runtimeConfig.modelProfiles.cheap.label')"
 assert_eq "agent PATCH preserves runtime sibling" "true" \
   "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
     "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
@@ -724,6 +736,10 @@ assert_eq "reset updates managed marker" "4" \
   "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
     "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
     | jq -r '.[0].metadata.opcManagedDefaults.fullstackMaxConcurrentRuns')"
+assert_eq "reset preserves cheap profile schema" "object" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].runtimeConfig.modelProfiles.cheap.adapterConfig | type')"
 for invalid_max in 0 51; do
   before="$(cat "$STATE")"
   if $CLI agent concurrency set --role engineer --max "$invalid_max" >/dev/null 2>&1; then
