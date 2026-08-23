@@ -740,6 +740,25 @@ assert_eq "reset preserves cheap profile schema" "object" \
   "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
     "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
     | jq -r '.[0].runtimeConfig.modelProfiles.cheap.adapterConfig | type')"
+curl -fsS -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  "$PAPERCLIP_API_URL/api/agents/00000000-0000-4000-8000-000000000010" \
+  -d '{"runtimeConfig":{"heartbeat":{"maxConcurrentRuns":4},"modelProfiles":{}}}' >/dev/null
+$CLI agent concurrency set --role engineer --max 6 >/dev/null
+assert_eq "set leaves absent cheap profile absent" "null" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].runtimeConfig.modelProfiles.cheap // null')"
+curl -fsS -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  "$PAPERCLIP_API_URL/api/agents/00000000-0000-4000-8000-000000000010" \
+  -d '{"runtimeConfig":{"heartbeat":{"maxConcurrentRuns":4},"modelProfiles":{"cheap":null}}}' >/dev/null
+$CLI agent concurrency reset --role engineer >/dev/null
+assert_eq "reset leaves null cheap profile null" "null" \
+  "$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+    "$PAPERCLIP_API_URL/api/companies/00000000-0000-4000-8000-000000000001/agents" \
+    | jq -r '.[0].runtimeConfig.modelProfiles.cheap // null')"
+
 for invalid_max in 0 51; do
   before="$(cat "$STATE")"
   if $CLI agent concurrency set --role engineer --max "$invalid_max" >/dev/null 2>&1; then

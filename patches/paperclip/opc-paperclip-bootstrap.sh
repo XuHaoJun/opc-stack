@@ -330,14 +330,22 @@ _executor_marker="$(printf '%s' "$_executor_live" | \
     jq -r '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns // empty')"
 _executor_action="$(opc_managed_concurrency_action \
     "$_executor_current" "$_executor_marker" "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT")"
+if [ "$_executor_action" = keep ] && printf '%s' "$_executor_live" | jq -e '
+    ((.runtimeConfig.modelProfiles? | type) == "object")
+    and ((.runtimeConfig.modelProfiles.cheap? | type) == "object")
+    and ((.runtimeConfig.modelProfiles.cheap.adapterConfig? | type) != "object")
+' >/dev/null 2>&1; then
+    _executor_action=apply
+fi
+
 if [ "$_executor_action" = apply ]; then
     _new_runtime="$(printf '%s' "$_executor_live" | jq \
         --argjson n "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" '
         (.runtimeConfig // {}) as $r
         | $r * {heartbeat:(($r.heartbeat // {})
           * {maxConcurrentRuns:$n})}
-        | if ((.modelProfiles // {}) | type == "object")
-             and ((.modelProfiles.cheap // {}) | type == "object")
+        | if ((.modelProfiles? | type) == "object")
+             and ((.modelProfiles.cheap? | type) == "object")
              and ((.modelProfiles.cheap.adapterConfig? | type) != "object")
           then .modelProfiles.cheap.adapterConfig = {}
           else .

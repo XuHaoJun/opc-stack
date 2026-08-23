@@ -233,8 +233,8 @@ cmd_agent_concurrency_write() {
         (.runtimeConfig // {}) as $r
         | $r * {heartbeat:(($r.heartbeat // {})
               * {maxConcurrentRuns:($value | tonumber)})}
-        | if ((.modelProfiles // {}) | type == "object")
-             and ((.modelProfiles.cheap // {}) | type == "object")
+        | if ((.modelProfiles? | type) == "object")
+             and ((.modelProfiles.cheap? | type) == "object")
              and ((.modelProfiles.cheap.adapterConfig? | type) != "object")
           then .modelProfiles.cheap.adapterConfig = {}
           else .
