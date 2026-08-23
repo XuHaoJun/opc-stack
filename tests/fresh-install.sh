@@ -483,7 +483,7 @@ for g in $GATES; do
     step "$g (from the clone)"
     rc=0
     if [ "$g" = "tests/paperclip-workspace-routing.sh" ]; then
-        ( cd "$CLONE" && tests/paperclip-workspace-routing.sh --live ) || rc=$?
+        ( cd "$CLONE" && OPC_WORKSPACE_ROUTING_EPHEMERAL=1 tests/paperclip-workspace-routing.sh --live ) || rc=$?
     else
         ( cd "$CLONE" && "./$g" ) || rc=$?
     fi
