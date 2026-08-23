@@ -405,6 +405,7 @@ archive_test_execution_workspaces() {
   test_issue_ids="$LIVE_PROJECT_ISSUE_IDS"
   workspace_ids="$(printf '%s' "$workspaces" | jq -r --arg project "$project_id" --arg ids "$test_issue_ids" \
     '.[] as $workspace | select($workspace.projectId == $project
+      and $workspace.strategyType == "git_worktree"
       and (($ids | split(" ")) | index($workspace.sourceIssueId)) != null) | $workspace.id // empty')"
   for workspace_id in $workspace_ids; do
     workspace_status="$(printf '%s' "$workspaces" | jq -r --arg id "$workspace_id" \
@@ -452,6 +453,7 @@ archive_test_execution_workspaces() {
   fi
   remaining="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r --arg ids "$test_issue_ids" \
     '[.[] as $workspace | select($workspace.status != "archived"
+      and $workspace.strategyType == "git_worktree"
       and (($ids | split(" ")) | index($workspace.sourceIssueId)) != null)] | length' \
     2>/dev/null || printf 'invalid')"
   if [ "$remaining" = 0 ] && [ "$archive_ok" -eq 1 ]; then
@@ -836,8 +838,8 @@ AGENT_SCRIPT
       && [ -n "$path_a" ] && [ -n "$path_b" ] && [ "$path_a" != "$path_b" ] \
       && ok "engineering runs report distinct managed git worktrees" \
       || bad "engineering runs report distinct managed git worktrees"
-    if docker compose exec -T paperclip git -C "$path_a" rev-parse --git-dir >/dev/null 2>&1 \
-      && docker compose exec -T paperclip git -C "$path_b" rev-parse --git-dir >/dev/null 2>&1; then
+    if docker compose exec -T -u node paperclip git -C "$path_a" rev-parse --git-dir >/dev/null 2>&1 \
+      && docker compose exec -T -u node paperclip git -C "$path_b" rev-parse --git-dir >/dev/null 2>&1; then
       ok "execution workspace paths are real Git worktrees"
     else
       bad "execution workspace paths are real Git worktrees"
