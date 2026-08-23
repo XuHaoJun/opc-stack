@@ -18,6 +18,13 @@
 # backends through HTTP, and destroys it. Exit 0 = the template still works.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# Host-side calls must honour PAPERCLIP_PORT: on a stack whose board port is
+# remapped (tests/fresh-install.sh publishes every port +1000) a hardcoded
+# 127.0.0.1:3100 would PATCH the project policy of whatever else is on 3100 —
+# on this machine, the live stack. Container-internal URLs below stay :3100,
+# which is the port inside the compose network and never remapped.
+. ./scripts/load-env.sh; opc_load_env ./.env
+PC_API="http://127.0.0.1:${PAPERCLIP_PORT:-3100}"
 
 TEMPLATE="${1:-nextjs}"
 shift || true
@@ -92,10 +99,12 @@ legacy_metadata="$(printf '%s' "$project_json" | jq -c '
 ')"
 legacy_policy="$(jq -nc --arg workspace "$workspace_id" '{executionWorkspacePolicy:{enabled:true,defaultMode:"shared_workspace",sharedWorkspaceConcurrency:"allow",defaultProjectWorkspaceId:$workspace,workspaceStrategy:{type:"project_primary"}}}')"
 curl -fsS -X PATCH -H "Authorization: Bearer $board_key" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:3100/api/projects/$project_id" -d "$legacy_policy" >/dev/null
+  "$PC_API/api/projects/$project_id" -d "$legacy_policy" >/dev/null \
+  || bad "legacy policy fixture PATCH"
 legacy_workspace_payload="$(jq -nc --argjson metadata "$legacy_metadata" '{metadata:$metadata}')"
 curl -fsS -X PATCH -H "Authorization: Bearer $board_key" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:3100/api/projects/$project_id/workspaces/$workspace_id" -d "$legacy_workspace_payload" >/dev/null
+  "$PC_API/api/projects/$project_id/workspaces/$workspace_id" -d "$legacy_workspace_payload" >/dev/null \
+  || bad "legacy workspace metadata fixture PATCH"
 $PC prototype create "$NAME" >/dev/null 2>&1 \
   && ok "prototype legacy marker resume succeeds" \
   || bad "prototype legacy marker resume succeeds"
@@ -110,7 +119,8 @@ assert_eq "legacy marker preserves unrelated field" "yes" \
 board_key="$($PC sh -c 'cat /paperclip/.opc/board-api.key' | tr -d '\r\n')"
 override_payload="$(jq -nc --arg workspace "$workspace_id" '{executionWorkspacePolicy:{enabled:true,defaultMode:"isolated_workspace",sharedWorkspaceConcurrency:"allow",defaultProjectWorkspaceId:$workspace,workspaceStrategy:{type:"git_worktree"},workspaceRuntime:{keep:true}}}')"
 curl -fsS -X PATCH -H "Authorization: Bearer $board_key" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:3100/api/projects/$project_id" -d "$override_payload" >/dev/null
+  "$PC_API/api/projects/$project_id" -d "$override_payload" >/dev/null \
+  || bad "operator override fixture PATCH"
 $PC prototype create "$NAME" >/dev/null 2>&1 \
   && ok "prototype resume succeeds with operator override" \
   || bad "prototype resume succeeds with operator override"
@@ -128,7 +138,7 @@ assert_eq "prototype operator strategy survives resume" "git_worktree" \
 assert_eq "prototype operator metadata survives resume" "true" \
   "$(printf '%s' "$project_json" | jq -r '.executionWorkspacePolicy.workspaceRuntime.keep')"
 
-PAPERCLIP_API_URL=http://127.0.0.1:3100 PAPERCLIP_API_KEY="$board_key" \
+PAPERCLIP_API_URL="$PC_API" PAPERCLIP_API_KEY="$board_key" \
   patches/hermes/opc-paperclip project workspace reset \
     --project-id "$project_id" --lane prototype >/dev/null \
     && ok "prototype policy reset command" || bad "prototype policy reset command"
