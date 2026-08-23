@@ -492,7 +492,20 @@ live_gate() {
   fi
   preexisting_project_error="$LIVE_TMPDIR/preexisting-project.err"
   if preexisting_project="$("$CLI" project workspace show --repo "$repo" 2>"$preexisting_project_error")"; then
-    preexisting_project_id="$(printf '%s' "$preexisting_project" | jq -r '.project.id // empty' 2>/dev/null || true)"
+    if ! preexisting_project_id="$(printf '%s' "$preexisting_project" | jq -er '
+      if type != "object"
+         or (.project | type) != "object"
+         or (.workspace | type) != "object"
+         or (.project.id | type) != "string"
+         or (.project.id | length) == 0
+         or (.workspace.id | type) != "string"
+         or (.workspace.id | length) == 0
+      then error("invalid project workspace response")
+      else .project.id
+      end' 2>/dev/null)"; then
+      bad "resolve whether engineering project is pre-existing (malformed CLI response)"
+      return 1
+    fi
   else
     preexisting_project_status=$?
     preexisting_project_error_text="$(cat "$preexisting_project_error")"
