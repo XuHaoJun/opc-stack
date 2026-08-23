@@ -74,6 +74,22 @@ live_mutation() {
   LIVE_RESPONSE_STATUS="$status"
   case "$status" in 2??) return 0 ;; *) return 1 ;; esac
 }
+live_key_mutation() {
+  local key="$1" method="$2" path="$3" body="${4-}" response status
+  response="$(mktemp "$LIVE_TMPDIR/response.XXXXXX")"
+  if [ -n "$body" ]; then
+    status="$(curl -sS -o "$response" -w '%{http_code}' -X "$method" \
+      -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
+      --data-binary "$body" "$LIVE_BASE$path")" || status=000
+  else
+    status="$(curl -sS -o "$response" -w '%{http_code}' -X "$method" \
+      -H "Authorization: Bearer $key" "$LIVE_BASE$path")" || status=000
+  fi
+  LIVE_RESPONSE_BODY="$(cat "$response")"
+  rm -f "$response"
+  LIVE_RESPONSE_STATUS="$status"
+  case "$status" in 2??) return 0 ;; *) return 1 ;; esac
+}
 delete_and_verify() {
   local label="$1" delete_path="$2" verify_path="$3" expected="$4"
   if ! live_mutation DELETE "$delete_path"; then
@@ -388,6 +404,70 @@ cancel_test_issues_for_cleanup() {
   done
   [ "$cleanup_ok" -eq 1 ]
 }
+delete_test_issue_comments() {
+  local issue comments comment_ids comment_id cleanup_status=1 cleanup_agent \
+    cleanup_key cleanup_key_id key_name comment_deleted
+  for issue in $LIVE_PROJECT_ISSUE_IDS; do
+    if ! live_mutation GET "/issues/$issue/comments"; then
+      bad "list comments for test issue $issue (HTTP $LIVE_RESPONSE_STATUS)"
+      cleanup_status=0
+      continue
+    fi
+    comments="$LIVE_RESPONSE_BODY"
+    if ! printf '%s' "$comments" | jq -e '
+      type == "array"
+      and all(.[]; type == "object" and (.id | type == "string" and length > 0))
+    ' >/dev/null 2>&1; then
+      bad "list comments for test issue $issue (response is not a valid array)"
+      cleanup_status=0
+      continue
+    fi
+    comment_ids="$(printf '%s' "$comments" | jq -r '.[].id')"
+    while IFS= read -r comment_id; do
+      [ -n "$comment_id" ] || continue
+      comment_deleted=0
+      for cleanup_agent in $LIVE_TEST_AGENT_IDS $LIVE_AGENT_ID; do
+        key_name="opc-workspace-routing-cleanup-$issue-$comment_id-$$"
+        cleanup_key=""
+        cleanup_key_id=""
+        if live_mutation POST "/agents/$cleanup_agent/keys" \
+          "$(jq -nc --arg n "$key_name" '{name:$n}')"; then
+          cleanup_key="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.token // empty')"
+          cleanup_key_id="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.id // empty')"
+        fi
+        if [ -n "$cleanup_key" ] && [ -n "$cleanup_key_id" ]; then
+          if live_key_mutation "$cleanup_key" DELETE "/issues/$issue/comments/$comment_id"; then
+            comment_deleted=1
+          fi
+          if ! live_mutation DELETE "/agents/$cleanup_agent/keys/$cleanup_key_id"; then
+            bad "revoke temporary comment-cleanup key for test agent $cleanup_agent (HTTP $LIVE_RESPONSE_STATUS)"
+            cleanup_status=0
+          fi
+        elif [ -n "$cleanup_key_id" ]; then
+          live_mutation DELETE "/agents/$cleanup_agent/keys/$cleanup_key_id" || true
+        fi
+        [ "$comment_deleted" -eq 1 ] && break
+      done
+      if [ "$comment_deleted" -eq 1 ]; then
+        ok "test issue comment $comment_id cleanup"
+      else
+        bad "test issue comment $comment_id delete (no owning test-agent key accepted)"
+        cleanup_status=0
+      fi
+    done <<EOF
+$comment_ids
+EOF
+    if live_mutation GET "/issues/$issue/comments" &&
+      [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r 'if type == "array" then length else -1 end')" = 0 ]; then
+      ok "verify test issue comments removed $issue"
+    else
+      bad "verify test issue comments removed $issue"
+      cleanup_status=0
+    fi
+  done
+  [ "$cleanup_status" -eq 1 ]
+}
+
 
 archive_test_execution_workspaces() {
   local project_id="$1" workspaces workspace_ids workspace_id workspace_status \
@@ -467,7 +547,7 @@ archive_test_execution_workspaces() {
 
 live_cleanup() {
   local issue name agent project_id cleanup_status=0 gone live_runs drain_ok=1 \
-    holder_present=0 workspace_cleanup_ok=1 prototype_cleanup_ok=1
+    holder_present=0 workspace_cleanup_ok=1 issue_cleanup_ok=1 prototype_cleanup_ok=1
   if [ -n "${LIVE_ADAPTER_SCRIPT:-}" ]; then
     if ! docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"; then
       bad "release process probe holders"
@@ -505,9 +585,6 @@ live_cleanup() {
     echo "BLOCKER leaving test agents/issues/projects because ticket ownership is unknown"
     cleanup_status=1
   elif [ "$drain_ok" -eq 1 ]; then
-    for agent in $LIVE_TEST_AGENT_IDS; do
-      delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
-    done
     if ! cancel_test_issues_for_cleanup; then
       cleanup_status=1
       workspace_cleanup_ok=0
@@ -519,65 +596,84 @@ live_cleanup() {
         }
       done
       if [ "$workspace_cleanup_ok" -eq 1 ]; then
-        for name in $LIVE_PROTO_NAMES; do
-          if ! printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1; then
-            bad "test prototype $name cleanup"
-            cleanup_status=1
-            prototype_cleanup_ok=0
-          else
-            gone=0
-            for _ in $(seq 1 10); do
-              if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/projects"; then
-                case "$LIVE_RESPONSE_STATUS" in
-                  404) gone=1; break ;;
-                  *) bad "test prototype $name cleanup verification (HTTP $LIVE_RESPONSE_STATUS)"; cleanup_status=1; break ;;
-                esac
-              elif ! printf '%s' "$LIVE_RESPONSE_BODY" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
-                gone=1
-                break
-              fi
-              sleep 1
-            done
-            if [ "$gone" -eq 1 ]; then
-              ok "test prototype $name cleanup"
-            else
-              bad "test prototype $name cleanup verification"
+        if ! delete_test_issue_comments; then
+          cleanup_status=1
+          issue_cleanup_ok=0
+        else
+          for issue in $LIVE_PROJECT_ISSUE_IDS; do
+            delete_and_verify "test issue $issue" "/issues/$issue" "/issues/$issue" absent || {
+              cleanup_status=1
+              issue_cleanup_ok=0
+            }
+          done
+        fi
+        if [ "$issue_cleanup_ok" -eq 1 ]; then
+          for name in $LIVE_PROTO_NAMES; do
+            if ! printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1; then
+              bad "test prototype $name cleanup"
               cleanup_status=1
               prototype_cleanup_ok=0
+            else
+              gone=0
+              for _ in $(seq 1 10); do
+                if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/projects"; then
+                  case "$LIVE_RESPONSE_STATUS" in
+                    404) gone=1; break ;;
+                    *) bad "test prototype $name cleanup verification (HTTP $LIVE_RESPONSE_STATUS)"; cleanup_status=1; break ;;
+                  esac
+                elif ! printf '%s' "$LIVE_RESPONSE_BODY" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
+                  gone=1
+                  break
+                fi
+                sleep 1
+              done
+              if [ "$gone" -eq 1 ]; then
+                ok "test prototype $name cleanup"
+              else
+                bad "test prototype $name cleanup verification"
+                cleanup_status=1
+                prototype_cleanup_ok=0
+              fi
             fi
-          fi
-        done
+          done
+        else
+          echo "BLOCKER leaving test prototypes because issue cleanup was not proven"
+        fi
       else
         echo "BLOCKER leaving test prototypes because execution workspaces were not archived"
       fi
-    fi
-    if [ "$workspace_cleanup_ok" -eq 1 ] && [ "$prototype_cleanup_ok" -eq 1 ]; then
-      for issue in $LIVE_PROJECT_ISSUE_IDS; do
-        delete_and_verify "test issue $issue" "/issues/$issue" "/issues/$issue" absent || cleanup_status=1
-      done
-      if [ -n "$LIVE_PROJECT_ID" ] &&
-         [ "$LIVE_PROJECT_PREEXISTING" -eq 0 ] &&
-         [ "$LIVE_PROJECT_ID" != "$LIVE_PREEXISTING_PROJECT_ID" ]; then
-        delete_and_verify "test engineering project $LIVE_PROJECT_ID" \
-          "/projects/$LIVE_PROJECT_ID" "/projects/$LIVE_PROJECT_ID" absent || cleanup_status=1
-      elif [ "$LIVE_PROJECT_PREEXISTING" -eq 1 ] &&
-           [ -n "$LIVE_PREEXISTING_PROJECT_ID" ] &&
-           [ "$LIVE_PROJECT_ID" = "$LIVE_PREEXISTING_PROJECT_ID" ]; then
-        if live_mutation GET "/projects/$LIVE_PREEXISTING_PROJECT_ID"; then
-          ok "preserve pre-existing engineering project $LIVE_PREEXISTING_PROJECT_ID"
-        else
-          bad "preserve pre-existing engineering project $LIVE_PREEXISTING_PROJECT_ID (HTTP $LIVE_RESPONSE_STATUS)"
+      if [ "$workspace_cleanup_ok" -eq 1 ] &&
+         [ "$issue_cleanup_ok" -eq 1 ] &&
+         [ "$prototype_cleanup_ok" -eq 1 ]; then
+        if [ -n "$LIVE_PROJECT_ID" ] &&
+           [ "$LIVE_PROJECT_PREEXISTING" -eq 0 ] &&
+           [ "$LIVE_PROJECT_ID" != "$LIVE_PREEXISTING_PROJECT_ID" ]; then
+          delete_and_verify "test engineering project $LIVE_PROJECT_ID" \
+            "/projects/$LIVE_PROJECT_ID" "/projects/$LIVE_PROJECT_ID" absent || cleanup_status=1
+        elif [ "$LIVE_PROJECT_PREEXISTING" -eq 1 ] &&
+             [ -n "$LIVE_PREEXISTING_PROJECT_ID" ] &&
+             [ "$LIVE_PROJECT_ID" = "$LIVE_PREEXISTING_PROJECT_ID" ]; then
+          if live_mutation GET "/projects/$LIVE_PREEXISTING_PROJECT_ID"; then
+            ok "preserve pre-existing engineering project $LIVE_PREEXISTING_PROJECT_ID"
+          else
+            bad "preserve pre-existing engineering project $LIVE_PREEXISTING_PROJECT_ID (HTTP $LIVE_RESPONSE_STATUS)"
+            cleanup_status=1
+          fi
+        elif [ -n "$LIVE_PROJECT_ID" ]; then
+          bad "refusing to classify routed project ownership during cleanup"
           cleanup_status=1
         fi
-      elif [ -n "$LIVE_PROJECT_ID" ]; then
-        bad "refusing to classify routed project ownership during cleanup"
-        cleanup_status=1
+      elif [ "$workspace_cleanup_ok" -ne 1 ]; then
+        echo "BLOCKER leaving test issues/projects because execution workspaces were not archived"
+      elif [ "$issue_cleanup_ok" -ne 1 ]; then
+        echo "BLOCKER leaving test prototypes/projects because issue cleanup was not proven"
+      else
+        echo "BLOCKER leaving test engineering project because test prototypes were not destroyed"
       fi
-    elif [ "$workspace_cleanup_ok" -ne 1 ]; then
-      echo "BLOCKER leaving test issues/projects because execution workspaces were not archived"
-    else
-      echo "BLOCKER leaving test issues/projects because test prototypes were not destroyed"
     fi
+    for agent in $LIVE_TEST_AGENT_IDS; do
+      delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
+    done
   else
     echo "BLOCKER leaving test agents/issues/project because holder quiescence was not proven"
   fi
@@ -843,10 +939,35 @@ AGENT_SCRIPT
       && [ -n "$path_a" ] && [ -n "$path_b" ] && [ "$path_a" != "$path_b" ] \
       && ok "engineering runs report distinct managed git worktrees" \
       || bad "engineering runs report distinct managed git worktrees"
-    if docker compose exec -T -u node paperclip git -C "$path_a" rev-parse --git-dir >/dev/null 2>&1 \
-      && docker compose exec -T -u node paperclip git -C "$path_b" rev-parse --git-dir >/dev/null 2>&1; then
+    worktree_a_ok=0
+    worktree_b_ok=0
+    if docker compose exec -T paperclip test -d "$path_a" \
+      && docker compose exec -T paperclip git -c safe.directory="$path_a" -C "$path_a" rev-parse --git-dir >/dev/null 2>&1; then
+      worktree_a_ok=1
+    fi
+    if docker compose exec -T paperclip test -d "$path_b" \
+      && docker compose exec -T paperclip git -c safe.directory="$path_b" -C "$path_b" rev-parse --git-dir >/dev/null 2>&1; then
+      worktree_b_ok=1
+    fi
+    if [ "$worktree_a_ok" -eq 1 ] && [ "$worktree_b_ok" -eq 1 ]; then
       ok "execution workspace paths are real Git worktrees"
     else
+      echo "INFO  worktree A path: $path_a"
+      if docker compose exec -T paperclip test -d "$path_a"; then
+        echo "INFO  worktree A directory exists"
+      else
+        echo "INFO  worktree A directory missing"
+      fi
+      docker compose exec -T paperclip git -c safe.directory="$path_a" -C "$path_a" rev-parse --git-dir 2>&1 \
+        | sed -n '1,5p' || true
+      echo "INFO  worktree B path: $path_b"
+      if docker compose exec -T paperclip test -d "$path_b"; then
+        echo "INFO  worktree B directory exists"
+      else
+        echo "INFO  worktree B directory missing"
+      fi
+      docker compose exec -T paperclip git -c safe.directory="$path_b" -C "$path_b" rev-parse --git-dir 2>&1 \
+        | sed -n '1,5p' || true
       bad "execution workspace paths are real Git worktrees"
     fi
   else

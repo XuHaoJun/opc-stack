@@ -43,3 +43,13 @@ Final correction verification:
 - `bash -n tests/paperclip-workspace-routing.sh` — passed.
 - `tests/paperclip-workspace-routing.sh --fixture` — 133 pass, 0 fail.
 - `tests/paperclip-workspace-routing.sh --live` — routing, node-owned Git checks, same-project `scheduled_retry/workspace_busy`, different-project concurrency, and git-worktree archival passed. The gate remained nonzero because the two explicit prototype-destroy project-absence verifications failed; issue/project deletion was conservatively skipped.
+
+## Comment-FK cleanup and exact-path verification (2026-08-23)
+
+Cleanup now validates each test issue's comment list, attempts checked comment deletion through the Paperclip comment endpoint using temporary test-agent owner keys, verifies the list is empty, and only then deletes the issue. Temporary keys are revoked after each attempt; test agents are deleted after comment/issue cleanup. Git validation uses each exact path with `git -c safe.directory=<path> -C <path> rev-parse --git-dir` and bounded path/command diagnostics on failure; no global Git configuration is written.
+
+Final verification:
+
+- `bash -n tests/paperclip-workspace-routing.sh` — passed.
+- `tests/paperclip-workspace-routing.sh --fixture` — 133 pass, 0 fail.
+- `tests/paperclip-workspace-routing.sh --live` — routing, exact-path Git checks, scheduled-retry/workspace-busy, different-prototype concurrency, and git-worktree archival passed. Some automatically generated comments remained undeletable because the API rejected every available test-agent/engineer owner key; the gate reported those failures and conservatively skipped prototype/project deletion. No false PASS was emitted.
