@@ -145,7 +145,7 @@ reconcile_workspace_policy() {
             (.metadata // {}) as $metadata
             | $metadata * {opcWorkspaceDefaults:
                 (($metadata.opcWorkspaceDefaults // {})
-                 * {sharedWorkspaceConcurrency:"serialize"})}
+                 * {sharedWorkspaceConcurrency:"serialize",source:"managedDefault"})}
         ')"
         api PATCH "/projects/$_project_id/workspaces/$_workspace_id" <<EOF >/dev/null
 $(jq -nc --argjson metadata "$_metadata" '{metadata:$metadata}')
@@ -160,6 +160,7 @@ EOF
             and .metadata.opcWorkspaceDefaults.mode == "shared_workspace"
             and .metadata.opcWorkspaceDefaults.strategyType == "project_primary"
             and .metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency == "serialize"
+            and .metadata.opcWorkspaceDefaults.source == "managedDefault"
         ' >/dev/null 2>&1 || die "legacy prototype workspace marker was not verified" 4
         return 0
     fi
@@ -207,7 +208,8 @@ EOF
             (($metadata.opcWorkspaceDefaults // {})
              * {lane:"prototype", mode:"shared_workspace",
                 strategyType:"project_primary",
-                sharedWorkspaceConcurrency:"serialize"})}
+                sharedWorkspaceConcurrency:"serialize",
+                source:"managedDefault"})}
     ')"
     api PATCH "/projects/$_project_id/workspaces/$_workspace_id" <<EOF >/dev/null
 $(jq -nc --argjson metadata "$_metadata" '{metadata:$metadata}')
@@ -222,6 +224,7 @@ EOF
         and .metadata.opcWorkspaceDefaults.mode == "shared_workspace"
         and .metadata.opcWorkspaceDefaults.strategyType == "project_primary"
         and .metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency == "serialize"
+        and .metadata.opcWorkspaceDefaults.source == "managedDefault"
     ' >/dev/null 2>&1 || die "prototype workspace marker was not verified" 4
 }
 

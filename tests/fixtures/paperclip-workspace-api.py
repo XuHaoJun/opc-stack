@@ -326,6 +326,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": "project not found"})
                     return
                 project.update(update)
+                faults = STATE.get("faults", {})
+                omitted = faults.get("omitProjectPolicyFields", []) if isinstance(faults, dict) else []
+                policy = project.get("executionWorkspacePolicy")
+                if isinstance(policy, dict) and isinstance(omitted, list):
+                    for field in omitted:
+                        if isinstance(field, str):
+                            policy.pop(field, None)
                 save_state()
                 self._send_json(200, project)
             elif (
