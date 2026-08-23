@@ -33,3 +33,13 @@ Follow-up verification:
 - `bash -n tests/paperclip-workspace-routing.sh` — passed.
 - `tests/paperclip-workspace-routing.sh --fixture` — 133 pass, 0 fail.
 - `tests/paperclip-workspace-routing.sh --live` — engineering Git-worktree validation passed; same-prototype `scheduled_retry/workspace_busy` and different-prototype concurrency passed; all selected test-owned git-worktree rows archived; both test prototypes explicitly destroyed. The gate exited nonzero because two prototype issue deletes returned HTTP 500, which remained reported rather than converted to PASS.
+
+## Final cleanup-order correction (2026-08-23)
+
+Cleanup now cancels test issues, archives and verifies only test-owned `git_worktree` execution rows, destroys each test prototype exactly once and verifies project absence, then deletes tracked issues (accepting 404 cascades) and finally deletes or preserves the engineering project. If cancellation, archive, or prototype verification fails, dependent deletion is skipped and the failure remains a blocker.
+
+Final correction verification:
+
+- `bash -n tests/paperclip-workspace-routing.sh` — passed.
+- `tests/paperclip-workspace-routing.sh --fixture` — 133 pass, 0 fail.
+- `tests/paperclip-workspace-routing.sh --live` — routing, node-owned Git checks, same-project `scheduled_retry/workspace_busy`, different-project concurrency, and git-worktree archival passed. The gate remained nonzero because the two explicit prototype-destroy project-absence verifications failed; issue/project deletion was conservatively skipped.
