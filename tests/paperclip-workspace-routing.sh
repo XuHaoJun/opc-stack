@@ -522,16 +522,23 @@ live_cleanup() {
       for issue in $LIVE_PROJECT_ISSUE_IDS; do
         delete_and_verify "test issue $issue" "/issues/$issue" "/issues/$issue" absent || cleanup_status=1
       done
-      if [ -n "$LIVE_PROJECT_ID" ] && [ "$LIVE_PROJECT_PREEXISTING" -eq 0 ]; then
+      if [ -n "$LIVE_PROJECT_ID" ] &&
+         [ "$LIVE_PROJECT_PREEXISTING" -eq 0 ] &&
+         [ "$LIVE_PROJECT_ID" != "$LIVE_PREEXISTING_PROJECT_ID" ]; then
         delete_and_verify "test engineering project $LIVE_PROJECT_ID" \
           "/projects/$LIVE_PROJECT_ID" "/projects/$LIVE_PROJECT_ID" absent || cleanup_status=1
-      elif [ "$LIVE_PROJECT_PREEXISTING" -eq 1 ]; then
-        if live_mutation GET "/projects/$LIVE_PROJECT_ID"; then
-          ok "preserve pre-existing engineering project $LIVE_PROJECT_ID"
+      elif [ "$LIVE_PROJECT_PREEXISTING" -eq 1 ] &&
+           [ -n "$LIVE_PREEXISTING_PROJECT_ID" ] &&
+           [ "$LIVE_PROJECT_ID" = "$LIVE_PREEXISTING_PROJECT_ID" ]; then
+        if live_mutation GET "/projects/$LIVE_PREEXISTING_PROJECT_ID"; then
+          ok "preserve pre-existing engineering project $LIVE_PREEXISTING_PROJECT_ID"
         else
-          bad "preserve pre-existing engineering project $LIVE_PROJECT_ID (HTTP $LIVE_RESPONSE_STATUS)"
+          bad "preserve pre-existing engineering project $LIVE_PREEXISTING_PROJECT_ID (HTTP $LIVE_RESPONSE_STATUS)"
           cleanup_status=1
         fi
+      elif [ -n "$LIVE_PROJECT_ID" ]; then
+        bad "refusing to classify routed project ownership during cleanup"
+        cleanup_status=1
       fi
     else
       echo "BLOCKER leaving test issues/projects because execution workspaces were not archived"
@@ -584,7 +591,9 @@ live_gate() {
     preexisting_project preexisting_project_id preexisting_project_status preexisting_project_error preexisting_project_error_text \
     ticket second project workspace project_json workspace_show prototype project_id workspace_id \
     test_agent issue_a issue_b issue_c run_json marker_source issue_json fail_before
-  fail_before="$FAIL"
+  LIVE_PROJECT_PREEXISTING=0
+  LIVE_PREEXISTING_PROJECT_ID=""
+  LIVE_PROJECT_ID=""
   LIVE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/opc-workspace-routing-live.XXXXXX")"
   chmod 700 "$LIVE_TMPDIR"
   LIVE_ORIGINAL_AGENT="$LIVE_TMPDIR/original-agent.json"
@@ -697,7 +706,7 @@ live_gate() {
   fi
   if ! ticket="$(printf '%s\n' "$LIVE_MARKER engineering backlog fixture" | "$CLI" engineering-ticket create \
     --repo "$repo" --title "$LIVE_MARKER workspace routing fixture" --status backlog)"; then
-    recover_live_ticket_ownership "$repo" "$LIVE_MARKER engineering backlog fixture" || true
+    recover_live_ticket_ownership "$repo" "$LIVE_MARKER engineering backlog fixture"$'\n' || true
     bad "create test-owned backlog engineering ticket (ownership recovery attempted)"
     [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ] && echo "BLOCKER ticket ownership unknown after helper failure"
     return 1
@@ -733,7 +742,7 @@ live_gate() {
     "$(printf '%s' "$issue_json" | jq -r '.executionWorkspaceSettings.mode // .executionWorkspacePreference // empty')"
   if ! ticket="$(printf '%s\n' "$LIVE_MARKER engineering second backlog fixture" | "$CLI" engineering-ticket create \
     --repo "$second" --title "$LIVE_MARKER workspace routing fixture second" --status backlog)"; then
-    recover_live_ticket_ownership "$second" "$LIVE_MARKER engineering second backlog fixture" || true
+    recover_live_ticket_ownership "$second" "$LIVE_MARKER engineering second backlog fixture"$'\n' || true
     bad "create second-form engineering ticket (ownership recovery attempted)"
     [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ] && echo "BLOCKER second ticket ownership unknown after helper failure"
     return 1
