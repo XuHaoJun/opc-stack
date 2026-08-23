@@ -783,9 +783,16 @@ cmd_project_workspace_reset() {
     safe_project_workspace_json "$_response" "$_workspace" managed_default
 }
 
+# Two statements, not one pipeline: a pipeline's exit status is jq's, and jq
+# on empty stdin exits 0 with no output, so a failed list_projects used to
+# reach the caller as an empty count and land in the "multiple projects"
+# branch — an outage reported as an ambiguous name (exit 3).
 prototype_project_matches() {
     _name="$1"
-    list_projects | jq -c --arg n "$_name" '[.[] | select(.name == $n)]'
+    _projects="$(list_projects)" || die "failed to list Paperclip projects" 4
+    printf '%s' "$_projects" | jq -c --arg n "$_name" '
+        if type == "array" then [.[] | select(.name == $n)] else error("not an array") end
+    ' 2>/dev/null || die "Paperclip projects response is not an array" 4
 }
 
 list_prototype_marker_issues() {
@@ -864,6 +871,7 @@ prototype_ticket_create() {
     _project_count="$(printf '%s' "$_matches" | jq -r 'length')"
     _allow_duplicate=false
     case "$_project_count" in
+        ''|*[!0-9]*) die "unexpected Paperclip projects response" 4 ;;
         0)
             _matching="$(list_prototype_marker_issues "$_company" "Prototype: $_name")"
             _active="$(printf '%s' "$_matching" | jq -c '
