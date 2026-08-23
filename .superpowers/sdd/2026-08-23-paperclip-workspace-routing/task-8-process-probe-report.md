@@ -23,3 +23,13 @@ The child validates those arguments, records key/project/workspace plus its actu
 - `tests/paperclip-workspace-routing.sh --live` — process records were produced; engineering runs passed distinct managed Git-worktree routing and same-prototype `scheduled_retry/workspace_busy` checks. The gate still exited nonzero on pre-existing unrelated live blockers: container-side Git worktree verification failed, different-prototype dispatch was not observed, and two prototype execution-workspace records were `cleanup_failed`; cleanup correctly left dependent prototype records in place rather than claiming success or deleting them.
 
 No upstream source was modified.
+
+## Follow-up cleanup and ownership corrections (2026-08-23)
+
+The live gate now verifies managed engineering worktree paths as the container `node` user, avoiding Git's `safe.directory` ownership guard while still requiring `git rev-parse --git-dir` for both paths. Cleanup selection and active-row verification now include only test-owned rows with `strategyType == "git_worktree"`; persistent `project_primary` rows are excluded and remain owned by the explicit test-prototype destroy path.
+
+Follow-up verification:
+
+- `bash -n tests/paperclip-workspace-routing.sh` — passed.
+- `tests/paperclip-workspace-routing.sh --fixture` — 133 pass, 0 fail.
+- `tests/paperclip-workspace-routing.sh --live` — engineering Git-worktree validation passed; same-prototype `scheduled_retry/workspace_busy` and different-prototype concurrency passed; all selected test-owned git-worktree rows archived; both test prototypes explicitly destroyed. The gate exited nonzero because two prototype issue deletes returned HTTP 500, which remained reported rather than converted to PASS.
