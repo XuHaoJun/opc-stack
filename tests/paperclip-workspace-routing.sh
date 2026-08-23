@@ -402,8 +402,8 @@ live_cleanup() {
 
 live_gate() {
   local company agents engineer marker current experimental repo repo_path repo_owner repo_name \
-    preexisting_project preexisting_project_id ticket second project workspace project_json workspace_show \
-    prototype project_id workspace_id \
+    preexisting_project preexisting_project_id preexisting_project_status preexisting_project_error preexisting_project_error_text \
+    ticket second project workspace project_json workspace_show prototype project_id workspace_id \
     test_agent issue_a issue_b issue_c run_json marker_source issue_json fail_before
   fail_before="$FAIL"
   LIVE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/opc-workspace-routing-live.XXXXXX")"
@@ -490,8 +490,17 @@ live_gate() {
   else
     second="$repo"
   fi
-  preexisting_project="$("$CLI" project workspace show --repo "$repo" 2>/dev/null || true)"
-  preexisting_project_id="$(printf '%s' "$preexisting_project" | jq -r '.project.id // empty' 2>/dev/null || true)"
+  preexisting_project_error="$LIVE_TMPDIR/preexisting-project.err"
+  if preexisting_project="$("$CLI" project workspace show --repo "$repo" 2>"$preexisting_project_error")"; then
+    preexisting_project_id="$(printf '%s' "$preexisting_project" | jq -r '.project.id // empty' 2>/dev/null || true)"
+  else
+    preexisting_project_status=$?
+    preexisting_project_error_text="$(cat "$preexisting_project_error")"
+    case "$preexisting_project_error_text" in
+      *"no Paperclip project matches"*) preexisting_project_id="" ;;
+      *) bad "resolve whether engineering project is pre-existing (CLI status=$preexisting_project_status)"; return 1 ;;
+    esac
+  fi
   ticket="$(printf '%s\n' "$LIVE_MARKER engineering backlog fixture" | "$CLI" engineering-ticket create \
     --repo "$repo" --title "$LIVE_MARKER workspace routing fixture" --status backlog)" || {
     bad "create test-owned backlog engineering ticket"
