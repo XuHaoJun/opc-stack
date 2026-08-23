@@ -348,9 +348,19 @@ workspace_source() {
     fi
     _marker_mode="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.mode // empty')"
     _marker_strategy="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.strategyType // empty')"
+    _marker_shared="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency // empty')"
+    _marker_enabled="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.enabled // empty')"
+    _marker_workspace="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.defaultProjectWorkspaceId // empty')"
+    _live_enabled="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.enabled // empty')"
     _live_mode="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.defaultMode // empty')"
     _live_strategy="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type // empty')"
-    if [ "$_live_mode" = "$_marker_mode" ] && [ "$_live_strategy" = "$_marker_strategy" ]; then
+    _live_shared="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.sharedWorkspaceConcurrency // empty')"
+    _live_workspace="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId // empty')"
+    if [ "$_live_mode" = "$_marker_mode" ] &&
+       [ "$_live_strategy" = "$_marker_strategy" ] &&
+       { [ -z "$_marker_shared" ] || [ "$_live_shared" = "$_marker_shared" ]; } &&
+       { [ -z "$_marker_enabled" ] || [ "$_live_enabled" = "$_marker_enabled" ]; } &&
+       { [ -z "$_marker_workspace" ] || [ "$_live_workspace" = "$_marker_workspace" ]; }; then
         printf '%s\n' managed_default
     else
         printf '%s\n' operator_override
@@ -451,11 +461,12 @@ workspace_marker_payload() {
     _source="${7-managedDefault}"
     printf '%s' "$_workspace" | jq -c \
         --arg lane "$_lane" --arg mode "$_mode" --arg strategy "$_strategy" \
-        --arg shared "$_shared" --arg source "$_source" '
+        --arg shared "$_shared" --arg source "$_source" --arg workspace "$_workspace_id" '
         (.metadata // {}) as $metadata
         | $metadata * {opcWorkspaceDefaults:
             (($metadata.opcWorkspaceDefaults // {})
-             * {lane:$lane, mode:$mode, strategyType:$strategy, source:$source}
+             * {lane:$lane, mode:$mode, strategyType:$strategy, source:$source,
+                enabled:true, defaultProjectWorkspaceId:$workspace}
              | if $shared == "" then . else .sharedWorkspaceConcurrency = $shared end)}
     '
 }

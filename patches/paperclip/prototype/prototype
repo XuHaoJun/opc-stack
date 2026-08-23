@@ -130,11 +130,19 @@ reconcile_workspace_policy() {
     _marker_mode="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.mode // empty')"
     _marker_strategy="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.strategyType // empty')"
     _marker_shared="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.sharedWorkspaceConcurrency // empty')"
+    _marker_source="$(printf '%s' "$_workspace" | jq -r '.metadata.opcWorkspaceDefaults.source // empty')"
     _live_enabled="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.enabled // false')"
     _live_mode="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.defaultMode // empty')"
     _live_shared="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.sharedWorkspaceConcurrency // empty')"
     _live_strategy="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.workspaceStrategy.type // empty')"
     _live_workspace="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId // empty')"
+    if [ "$_marker_type" = object ] &&
+       [ "$_marker_lane" = prototype ] &&
+       [ "$_marker_source" = operatorOverride ] &&
+       [ -z "$_marker_shared" ]; then
+        note "prototype: operator override marker preserved without shared-concurrency migration"
+        return 0
+    fi
 
     if [ "$_marker_type" = object ] &&
        [ "$_marker_lane" = prototype ] &&

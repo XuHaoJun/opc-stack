@@ -28,7 +28,7 @@ LIVE_AGENT_ID=""
 LIVE_COMPANY_ID=""
 LIVE_ORIGINAL_AGENT=""
 LIVE_PROJECT_ID=""
-LIVE_PROJECT_PREEXISTING=0
+LIVE_PREEXISTING_PROJECT_ID=""
 LIVE_PROJECT_ISSUE_IDS=""
 LIVE_TEST_PROJECT_IDS=""
 LIVE_PROTO_NAMES=""
@@ -158,10 +158,11 @@ snapshot_preexisting_project() {
     '{projectId:.id,workspaceId:$w,policy:$policy,metadata:$metadata}' >"$LIVE_PREEXISTING_SNAPSHOT"
   chmod 600 "$LIVE_PREEXISTING_SNAPSHOT"
   LIVE_PREEXISTING_RESTORE_NEEDED=1
+  LIVE_PREEXISTING_PROJECT_ID="$project_id"
 }
 restore_preexisting_project() {
   [ "$LIVE_PREEXISTING_RESTORE_NEEDED" -eq 1 ] || return 0
-  local snapshot project_id workspace_id policy metadata project workspace
+  local snapshot project_id workspace_id policy metadata project workspace restore_status=0
   snapshot="$(cat "$LIVE_PREEXISTING_SNAPSHOT")" || {
     bad "restore pre-existing project (snapshot unreadable)"
     return 1
@@ -172,31 +173,40 @@ restore_preexisting_project() {
   metadata="$(printf '%s' "$snapshot" | jq -c '.metadata')"
   if ! live_mutation PATCH "/projects/$project_id" "$(jq -nc --argjson policy "$policy" '{executionWorkspacePolicy:$policy}')"; then
     bad "restore pre-existing project policy $project_id (HTTP $LIVE_RESPONSE_STATUS)"
-    return 1
-  fi
-  project="$(live_api GET "/projects/$project_id" 2>/dev/null || true)"
-  if [ "$(printf '%s' "$project" | jq -c '.executionWorkspacePolicy // {}' 2>/dev/null)" != "$policy" ]; then
-    bad "restore exact pre-existing project policy $project_id (GET mismatch)"
-    return 1
+    restore_status=1
+  else
+    project="$(live_api GET "/projects/$project_id" 2>/dev/null || true)"
+    if [ "$(printf '%s' "$project" | jq -c '.executionWorkspacePolicy // {}' 2>/dev/null)" != "$policy" ]; then
+      bad "restore exact pre-existing project policy $project_id (GET mismatch)"
+      restore_status=1
+    fi
   fi
   if ! live_mutation PATCH "/projects/$project_id/workspaces/$workspace_id" "$(jq -nc --argjson metadata "$metadata" '{metadata:$metadata}')"; then
     bad "restore pre-existing workspace metadata $workspace_id (HTTP $LIVE_RESPONSE_STATUS)"
-    return 1
+    restore_status=1
+  else
+    project="$(live_api GET "/projects/$project_id" 2>/dev/null || true)"
+    workspace="$(printf '%s' "$project" | jq -c --arg w "$workspace_id" '
+      if (.primaryWorkspace? | type) == "object" and .primaryWorkspace.id == $w then .primaryWorkspace
+      else ([.workspaces // [] | .[] | select(.id == $w)][0] // {}) end
+    ' 2>/dev/null || true)"
+    if [ "$(printf '%s' "$workspace" | jq -c '.metadata // {}' 2>/dev/null)" != "$metadata" ]; then
+      bad "restore exact pre-existing workspace metadata $workspace_id (GET mismatch)"
+      restore_status=1
+    fi
   fi
-  project="$(live_api GET "/projects/$project_id" 2>/dev/null || true)"
-  workspace="$(printf '%s' "$project" | jq -c --arg w "$workspace_id" '
-    if (.primaryWorkspace? | type) == "object" and .primaryWorkspace.id == $w then .primaryWorkspace
-    else ([.workspaces // [] | .[] | select(.id == $w)][0] // {}) end
-  ' 2>/dev/null || true)"
-  if [ "$(printf '%s' "$workspace" | jq -c '.metadata // {}' 2>/dev/null)" != "$metadata" ]; then
-    bad "restore exact pre-existing workspace metadata $workspace_id (GET mismatch)"
-    return 1
+  if [ "$restore_status" -eq 0 ]; then
+    LIVE_PREEXISTING_RESTORE_NEEDED=0
+    ok "restore exact pre-existing project policy and workspace metadata"
+    return 0
   fi
-  LIVE_PREEXISTING_RESTORE_NEEDED=0
-  ok "restore exact pre-existing project policy and workspace metadata"
+  return 1
 }
 recover_live_ticket_ownership() {
-  local repo="$1" marker canonical projects project_ids project_id issues issue_ids
+  local repo="$1" marker="$2" canonical projects project_rows project_ids project_id repo_url \
+    project_count issues issue_rows issue_ids issue_id existing_projects existing_issues live_identity
+  existing_projects="$LIVE_TEST_PROJECT_IDS"
+  existing_issues="$LIVE_PROJECT_ISSUE_IDS"
   canonical="$("$CLI" repo normalize "$repo" 2>/dev/null | jq -r '.identity // empty')" || canonical=""
   if [ -z "$canonical" ]; then
     bad "ticket ownership unknown after helper failure (repository identity unavailable)"
@@ -209,36 +219,86 @@ recover_live_ticket_ownership() {
     return 1
   fi
   projects="$LIVE_RESPONSE_BODY"
-  project_ids="$(printf '%s' "$projects" | jq -r '.[] | [.id, (.primaryWorkspace.repoUrl // ((.workspaces // []) | map(select(.isPrimary == true))[0].repoUrl // ""))] | @tsv' |
+  if ! printf '%s' "$projects" | jq -e '
+    type == "array"
+    and all(.[]; type == "object"
+      and (.id | type == "string" and length > 0)
+      and ((.primaryWorkspace? == null)
+        or ((.primaryWorkspace | type) == "object"
+          and ((.primaryWorkspace.repoUrl? == null)
+            or (.primaryWorkspace.repoUrl | type) == "string")))
+      and ((.workspaces? == null)
+        or ((.workspaces | type) == "array"
+          and all(.workspaces[]; type == "object")))
+    )
+  ' >/dev/null 2>&1; then
+    bad "ticket ownership unknown after helper failure (malformed project API response)"
+    LIVE_OWNERSHIP_UNKNOWN=1
+    return 1
+  fi
+  project_rows="$(printf '%s' "$projects" | jq -r '.[] | [.id, (.primaryWorkspace.repoUrl // ((.workspaces // []) | map(select(.isPrimary == true))[0].repoUrl // ""))] | @tsv')"
+  project_ids="$(
     while IFS="$(printf '\t')" read -r project_id repo_url; do
-      [ -n "$project_id" ] || continue
+      [ -n "$project_id" ] && [ -n "$repo_url" ] || continue
       live_identity="$("$CLI" repo normalize "$repo_url" 2>/dev/null | jq -r '.identity // empty' || true)"
       [ "$live_identity" = "$canonical" ] && printf '%s\n' "$project_id"
-    done)"
-  for project_id in $project_ids; do
-    case " $LIVE_TEST_PROJECT_IDS " in *" $project_id "*) ;; *) LIVE_TEST_PROJECT_IDS="$LIVE_TEST_PROJECT_IDS $project_id" ;; esac
-    [ -n "$LIVE_PROJECT_ID" ] || LIVE_PROJECT_ID="$project_id"
-  done
+    done <<EOF
+$project_rows
+EOF
+  )"
+  project_count="$(printf '%s\n' "$project_ids" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [ "$project_count" -ne 1 ]; then
+    bad "ticket ownership unknown after helper failure (expected one canonical project, found $project_count)"
+    LIVE_OWNERSHIP_UNKNOWN=1
+    return 1
+  fi
+  project_id="$(printf '%s\n' "$project_ids" | sed '/^$/d')"
+  case " $existing_projects " in
+    *" $project_id "*) ;;
+    *) LIVE_TEST_PROJECT_IDS="$LIVE_TEST_PROJECT_IDS $project_id" ;;
+  esac
+  [ -n "$LIVE_PROJECT_ID" ] || LIVE_PROJECT_ID="$project_id"
   if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/issues?limit=1000"; then
     bad "ticket ownership unknown after helper failure (issue API HTTP $LIVE_RESPONSE_STATUS)"
     LIVE_OWNERSHIP_UNKNOWN=1
     return 1
   fi
   issues="$LIVE_RESPONSE_BODY"
-  issue_ids="$(printf '%s' "$issues" | jq -r --arg marker "$marker" --arg projects "$project_ids" '
-    .[] | select((.description // "") | index($marker) != null)
-    | select((.projectId // "") as $p | $projects | split(" ") | index($p) != null)
-    | .id // empty
-  ')"
-  for issue_id in $issue_ids; do
-    case " $LIVE_PROJECT_ISSUE_IDS " in *" $issue_id "*) ;; *) LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $issue_id" ;; esac
-  done
-  if [ -z "$project_ids" ] && [ -z "$issue_ids" ]; then
-    bad "ticket ownership unknown after helper failure (no unique project or issue marker)"
+  if ! printf '%s' "$issues" | jq -e '
+    type == "array"
+    and all(.[]; type == "object"
+      and (.id | type == "string" and length > 0)
+      and ((.description? == null) or (.description | type == "string"))
+      and ((.projectId? == null) or (.projectId | type == "string"))
+    )
+  ' >/dev/null 2>&1; then
+    bad "ticket ownership unknown after helper failure (malformed issue API response)"
     LIVE_OWNERSHIP_UNKNOWN=1
     return 1
   fi
-  ok "recover ticket ownership after helper failure"
+  issue_rows="$(printf '%s' "$issues" | jq -r --arg marker "$marker" --arg project "$project_id" '
+    .[] | select(.description == $marker and .projectId == $project) | .id
+  ')"
+  issue_ids="$(
+    while IFS= read -r issue_id; do
+      [ -n "$issue_id" ] || continue
+      case " $existing_issues " in
+        *" $issue_id "*) ;;
+        *) printf '%s\n' "$issue_id" ;;
+      esac
+    done <<EOF
+$issue_rows
+EOF
+  )"
+  issue_count="$(printf '%s\n' "$issue_ids" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [ "$issue_count" -ne 1 ]; then
+    bad "ticket ownership unknown after helper failure (expected one exact marker/project issue, found $issue_count)"
+    LIVE_OWNERSHIP_UNKNOWN=1
+    return 1
+  fi
+  issue_id="$(printf '%s\n' "$issue_ids" | sed '/^$/d')"
+  LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $issue_id"
+  ok "recover exactly one ticket ownership record after helper failure"
   return 0
 }
 create_process_agent() {
@@ -441,7 +501,10 @@ live_cleanup() {
   fi
   live_restore || cleanup_status=1
   restore_preexisting_project || cleanup_status=1
-  if [ "$drain_ok" -eq 1 ]; then
+  if [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ]; then
+    echo "BLOCKER leaving test agents/issues/projects because ticket ownership is unknown"
+    cleanup_status=1
+  elif [ "$drain_ok" -eq 1 ]; then
     for agent in $LIVE_TEST_AGENT_IDS; do
       delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
     done
@@ -476,7 +539,7 @@ live_cleanup() {
   else
     echo "BLOCKER leaving test agents/issues/project because holder quiescence was not proven"
   fi
-  if [ "$drain_ok" -eq 1 ] && [ "$workspace_cleanup_ok" -eq 1 ]; then
+  if [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 0 ] && [ "$drain_ok" -eq 1 ] && [ "$workspace_cleanup_ok" -eq 1 ]; then
     for name in $LIVE_PROTO_NAMES; do
       if ! printf '%s\n' "$name" | docker compose exec -T paperclip prototype destroy "$name" >/dev/null 2>&1; then
         bad "test prototype $name cleanup"
@@ -621,10 +684,9 @@ live_gate() {
       bad "resolve whether engineering project is pre-existing (malformed CLI response)"
       return 1
     fi
-    LIVE_PROJECT_ID="$preexisting_project_id"
-    LIVE_PROJECT_PREEXISTING=1
+    LIVE_PREEXISTING_PROJECT_ID="$preexisting_project_id"
     snapshot_preexisting_project "$preexisting_project_id" || return 1
-    echo "INFO  preserving pre-existing engineering project $LIVE_PROJECT_ID"
+    echo "INFO  preserving pre-existing engineering project $LIVE_PREEXISTING_PROJECT_ID"
   else
     preexisting_project_status=$?
     preexisting_project_error_text="$(cat "$preexisting_project_error")"
@@ -635,15 +697,17 @@ live_gate() {
   fi
   if ! ticket="$(printf '%s\n' "$LIVE_MARKER engineering backlog fixture" | "$CLI" engineering-ticket create \
     --repo "$repo" --title "$LIVE_MARKER workspace routing fixture" --status backlog)"; then
-    recover_live_ticket_ownership "$repo" "$LIVE_MARKER" || true
+    recover_live_ticket_ownership "$repo" "$LIVE_MARKER engineering backlog fixture" || true
     bad "create test-owned backlog engineering ticket (ownership recovery attempted)"
     [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ] && echo "BLOCKER ticket ownership unknown after helper failure"
     return 1
   fi
   LIVE_PROJECT_ID="$(printf '%s' "$ticket" | jq -r '.projectId // empty')"
-  if [ -n "$preexisting_project_id" ] && [ "$preexisting_project_id" = "$LIVE_PROJECT_ID" ]; then
+  if [ -n "$LIVE_PREEXISTING_PROJECT_ID" ] && [ "$LIVE_PREEXISTING_PROJECT_ID" = "$LIVE_PROJECT_ID" ]; then
     LIVE_PROJECT_PREEXISTING=1
-    echo "INFO  preserving pre-existing engineering project $LIVE_PROJECT_ID"
+    echo "INFO  preserving pre-existing engineering project $LIVE_PREEXISTING_PROJECT_ID"
+  else
+    LIVE_PROJECT_PREEXISTING=0
   fi
   issue_a="$(printf '%s' "$ticket" | jq -r '.id // empty')"
   workspace_id="$(printf '%s' "$ticket" | jq -r '.projectWorkspaceId // empty')"
@@ -669,7 +733,7 @@ live_gate() {
     "$(printf '%s' "$issue_json" | jq -r '.executionWorkspaceSettings.mode // .executionWorkspacePreference // empty')"
   if ! ticket="$(printf '%s\n' "$LIVE_MARKER engineering second backlog fixture" | "$CLI" engineering-ticket create \
     --repo "$second" --title "$LIVE_MARKER workspace routing fixture second" --status backlog)"; then
-    recover_live_ticket_ownership "$second" "$LIVE_MARKER" || true
+    recover_live_ticket_ownership "$second" "$LIVE_MARKER engineering second backlog fixture" || true
     bad "create second-form engineering ticket (ownership recovery attempted)"
     [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ] && echo "BLOCKER second ticket ownership unknown after helper failure"
     return 1
