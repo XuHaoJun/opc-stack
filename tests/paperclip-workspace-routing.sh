@@ -182,9 +182,43 @@ live_restore() {
   LIVE_RESTORE_NEEDED=0
   ok "restore exact original engineer runtimeConfig and metadata"
 }
+cancel_test_issues_for_cleanup() {
+  local issue issue_status cleanup_ok=1
+  for issue in $LIVE_PROJECT_ISSUE_IDS; do
+    if ! live_mutation GET "/issues/$issue"; then
+      case "$LIVE_RESPONSE_STATUS" in
+        404) ok "test issue $issue already absent before workspace cleanup" ;;
+        *) bad "inspect test issue $issue before workspace cleanup (HTTP $LIVE_RESPONSE_STATUS)"; cleanup_ok=0 ;;
+      esac
+      continue
+    fi
+    issue_status="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // empty')"
+    case "$issue_status" in
+      done|cancelled)
+        ok "test issue $issue is already terminal"
+        ;;
+      *)
+        if ! live_mutation PATCH "/issues/$issue" '{"status":"cancelled"}'; then
+          bad "cancel test issue $issue before workspace cleanup (HTTP $LIVE_RESPONSE_STATUS)"
+          cleanup_ok=0
+          continue
+        fi
+        if live_mutation GET "/issues/$issue" &&
+          [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // empty')" = cancelled ]; then
+          ok "cancel test issue $issue before workspace cleanup"
+        else
+          bad "verify test issue $issue cancelled before workspace cleanup"
+          cleanup_ok=0
+        fi
+        ;;
+    esac
+  done
+  [ "$cleanup_ok" -eq 1 ]
+}
+
 archive_test_execution_workspaces() {
   local project_id="$1" workspaces workspace_ids workspace_id workspace_status \
-    verify_status remaining test_issue_ids
+    verify_status remaining test_issue_ids archive_ok=1 workspace_ok attempt
   [ -n "$project_id" ] || return 0
   if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/execution-workspaces?projectId=$project_id"; then
     bad "list test execution workspaces for project $project_id (HTTP $LIVE_RESPONSE_STATUS)"
@@ -206,22 +240,36 @@ archive_test_execution_workspaces() {
       ok "test execution workspace $workspace_id already archived"
       continue
     fi
-    if ! live_mutation PATCH "/execution-workspaces/$workspace_id" '{"status":"archived"}'; then
+    attempt=1
+    workspace_ok=1
+    while :; do
+      if live_mutation PATCH "/execution-workspaces/$workspace_id" '{"status":"archived"}'; then
+        break
+      fi
+      if [ "$LIVE_RESPONSE_STATUS" = 409 ] && [ "$attempt" -lt 30 ]; then
+        attempt=$((attempt + 1))
+        sleep 1
+        continue
+      fi
       bad "archive test execution workspace $workspace_id (HTTP $LIVE_RESPONSE_STATUS)"
-      return 1
-    fi
+      workspace_ok=0
+      archive_ok=0
+      break
+    done
+    [ "$workspace_ok" -eq 1 ] || continue
     if live_mutation GET "/execution-workspaces/$workspace_id"; then
       verify_status="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // empty')"
       if [ "$verify_status" = archived ]; then
         ok "archive test execution workspace $workspace_id"
       else
         bad "archive test execution workspace $workspace_id (status=$verify_status)"
-        return 1
+        workspace_ok=0
+        archive_ok=0
       fi
     else
       case "$LIVE_RESPONSE_STATUS" in
         404) ok "archive test execution workspace $workspace_id (absent)" ;;
-        *) bad "archive test execution workspace $workspace_id verification (HTTP $LIVE_RESPONSE_STATUS)"; return 1 ;;
+        *) bad "archive test execution workspace $workspace_id verification (HTTP $LIVE_RESPONSE_STATUS)"; workspace_ok=0; archive_ok=0 ;;
       esac
     fi
   done
@@ -233,7 +281,7 @@ archive_test_execution_workspaces() {
     '[.[] as $workspace | select($workspace.status != "archived"
       and (($ids | split(" ")) | index($workspace.sourceIssueId)) != null)] | length' \
     2>/dev/null || printf 'invalid')"
-  if [ "$remaining" = 0 ]; then
+  if [ "$remaining" = 0 ] && [ "$archive_ok" -eq 1 ]; then
     ok "verify test execution workspaces archived for project $project_id"
     return 0
   fi
@@ -281,6 +329,10 @@ live_cleanup() {
     for agent in $LIVE_TEST_AGENT_IDS; do
       delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
     done
+    if ! cancel_test_issues_for_cleanup; then
+      cleanup_status=1
+      workspace_cleanup_ok=0
+    fi
     for project_id in $LIVE_TEST_PROJECT_IDS; do
       archive_test_execution_workspaces "$project_id" || {
         cleanup_status=1
