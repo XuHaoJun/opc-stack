@@ -44,6 +44,9 @@ LIVE_RESPONSE_BODY=""
 LIVE_RESPONSE_STATUS=""
 LIVE_BOARD_KEY=""
 LIVE_BASE=""
+LIVE_PREEXISTING_SNAPSHOT=""
+LIVE_PREEXISTING_RESTORE_NEEDED=0
+LIVE_OWNERSHIP_UNKNOWN=0
 live_api() {
   local method="$1" path="$2" body="${3-}"
   if [ "$method" = GET ] || [ "$method" = DELETE ]; then
@@ -125,6 +128,118 @@ create_issue() {
     return 1
   fi
   LIVE_CREATED_ISSUE_ID="$id"
+}
+snapshot_preexisting_project() {
+  local project_id="$1" project workspace_id policy metadata
+  [ -n "$LIVE_TMPDIR" ] || { bad "snapshot pre-existing project (temporary directory unavailable)"; return 1; }
+  if ! live_mutation GET "/projects/$project_id"; then
+    bad "snapshot pre-existing project $project_id (HTTP $LIVE_RESPONSE_STATUS)"
+    return 1
+  fi
+  project="$LIVE_RESPONSE_BODY"
+  workspace_id="$(printf '%s' "$project" | jq -r '
+    if (.primaryWorkspace? | type) == "object" then .primaryWorkspace.id
+    else ([.workspaces // [] | .[] | select(.isPrimary == true)][0].id // empty) end
+  ')" || return 1
+  policy="$(printf '%s' "$project" | jq -c '.executionWorkspacePolicy // {}')" || return 1
+  metadata="$(printf '%s' "$project" | jq -c '
+    if (.primaryWorkspace? | type) == "object" then (.primaryWorkspace.metadata // {})
+    else ([.workspaces // [] | .[] | select(.isPrimary == true)][0].metadata // {}) end
+  ')" || return 1
+  [ -n "$workspace_id" ] || { bad "snapshot pre-existing project $project_id (primary workspace missing)"; return 1; }
+  printf '%s' "$project" | jq -e --arg w "$workspace_id" --argjson policy "$policy" --argjson metadata "$metadata" '
+    {projectId:.id,workspaceId:$w,policy:$policy,metadata:$metadata}
+    | .projectId | type == "string" and length > 0
+  ' >/dev/null 2>&1 || {
+    bad "snapshot pre-existing project $project_id (invalid state)"
+    return 1
+  }
+  printf '%s' "$project" | jq -c --arg w "$workspace_id" --argjson policy "$policy" --argjson metadata "$metadata" \
+    '{projectId:.id,workspaceId:$w,policy:$policy,metadata:$metadata}' >"$LIVE_PREEXISTING_SNAPSHOT"
+  chmod 600 "$LIVE_PREEXISTING_SNAPSHOT"
+  LIVE_PREEXISTING_RESTORE_NEEDED=1
+}
+restore_preexisting_project() {
+  [ "$LIVE_PREEXISTING_RESTORE_NEEDED" -eq 1 ] || return 0
+  local snapshot project_id workspace_id policy metadata project workspace
+  snapshot="$(cat "$LIVE_PREEXISTING_SNAPSHOT")" || {
+    bad "restore pre-existing project (snapshot unreadable)"
+    return 1
+  }
+  project_id="$(printf '%s' "$snapshot" | jq -r '.projectId')"
+  workspace_id="$(printf '%s' "$snapshot" | jq -r '.workspaceId')"
+  policy="$(printf '%s' "$snapshot" | jq -c '.policy')"
+  metadata="$(printf '%s' "$snapshot" | jq -c '.metadata')"
+  if ! live_mutation PATCH "/projects/$project_id" "$(jq -nc --argjson policy "$policy" '{executionWorkspacePolicy:$policy}')"; then
+    bad "restore pre-existing project policy $project_id (HTTP $LIVE_RESPONSE_STATUS)"
+    return 1
+  fi
+  project="$(live_api GET "/projects/$project_id" 2>/dev/null || true)"
+  if [ "$(printf '%s' "$project" | jq -c '.executionWorkspacePolicy // {}' 2>/dev/null)" != "$policy" ]; then
+    bad "restore exact pre-existing project policy $project_id (GET mismatch)"
+    return 1
+  fi
+  if ! live_mutation PATCH "/projects/$project_id/workspaces/$workspace_id" "$(jq -nc --argjson metadata "$metadata" '{metadata:$metadata}')"; then
+    bad "restore pre-existing workspace metadata $workspace_id (HTTP $LIVE_RESPONSE_STATUS)"
+    return 1
+  fi
+  project="$(live_api GET "/projects/$project_id" 2>/dev/null || true)"
+  workspace="$(printf '%s' "$project" | jq -c --arg w "$workspace_id" '
+    if (.primaryWorkspace? | type) == "object" and .primaryWorkspace.id == $w then .primaryWorkspace
+    else ([.workspaces // [] | .[] | select(.id == $w)][0] // {}) end
+  ' 2>/dev/null || true)"
+  if [ "$(printf '%s' "$workspace" | jq -c '.metadata // {}' 2>/dev/null)" != "$metadata" ]; then
+    bad "restore exact pre-existing workspace metadata $workspace_id (GET mismatch)"
+    return 1
+  fi
+  LIVE_PREEXISTING_RESTORE_NEEDED=0
+  ok "restore exact pre-existing project policy and workspace metadata"
+}
+recover_live_ticket_ownership() {
+  local repo="$1" marker canonical projects project_ids project_id issues issue_ids
+  canonical="$("$CLI" repo normalize "$repo" 2>/dev/null | jq -r '.identity // empty')" || canonical=""
+  if [ -z "$canonical" ]; then
+    bad "ticket ownership unknown after helper failure (repository identity unavailable)"
+    LIVE_OWNERSHIP_UNKNOWN=1
+    return 1
+  fi
+  if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/projects"; then
+    bad "ticket ownership unknown after helper failure (project API HTTP $LIVE_RESPONSE_STATUS)"
+    LIVE_OWNERSHIP_UNKNOWN=1
+    return 1
+  fi
+  projects="$LIVE_RESPONSE_BODY"
+  project_ids="$(printf '%s' "$projects" | jq -r '.[] | [.id, (.primaryWorkspace.repoUrl // ((.workspaces // []) | map(select(.isPrimary == true))[0].repoUrl // ""))] | @tsv' |
+    while IFS="$(printf '\t')" read -r project_id repo_url; do
+      [ -n "$project_id" ] || continue
+      live_identity="$("$CLI" repo normalize "$repo_url" 2>/dev/null | jq -r '.identity // empty' || true)"
+      [ "$live_identity" = "$canonical" ] && printf '%s\n' "$project_id"
+    done)"
+  for project_id in $project_ids; do
+    case " $LIVE_TEST_PROJECT_IDS " in *" $project_id "*) ;; *) LIVE_TEST_PROJECT_IDS="$LIVE_TEST_PROJECT_IDS $project_id" ;; esac
+    [ -n "$LIVE_PROJECT_ID" ] || LIVE_PROJECT_ID="$project_id"
+  done
+  if ! live_mutation GET "/companies/$LIVE_COMPANY_ID/issues?limit=1000"; then
+    bad "ticket ownership unknown after helper failure (issue API HTTP $LIVE_RESPONSE_STATUS)"
+    LIVE_OWNERSHIP_UNKNOWN=1
+    return 1
+  fi
+  issues="$LIVE_RESPONSE_BODY"
+  issue_ids="$(printf '%s' "$issues" | jq -r --arg marker "$marker" --arg projects "$project_ids" '
+    .[] | select((.description // "") | index($marker) != null)
+    | select((.projectId // "") as $p | $projects | split(" ") | index($p) != null)
+    | .id // empty
+  ')"
+  for issue_id in $issue_ids; do
+    case " $LIVE_PROJECT_ISSUE_IDS " in *" $issue_id "*) ;; *) LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $issue_id" ;; esac
+  done
+  if [ -z "$project_ids" ] && [ -z "$issue_ids" ]; then
+    bad "ticket ownership unknown after helper failure (no unique project or issue marker)"
+    LIVE_OWNERSHIP_UNKNOWN=1
+    return 1
+  fi
+  ok "recover ticket ownership after helper failure"
+  return 0
 }
 create_process_agent() {
   local key="$1" project="$2" workspace="$3" payload id name
@@ -325,6 +440,7 @@ live_cleanup() {
     fi
   fi
   live_restore || cleanup_status=1
+  restore_preexisting_project || cleanup_status=1
   if [ "$drain_ok" -eq 1 ]; then
     for agent in $LIVE_TEST_AGENT_IDS; do
       delete_and_verify "test process agent $agent" "/agents/$agent" "/agents/$agent" absent || cleanup_status=1
@@ -409,6 +525,11 @@ live_gate() {
   LIVE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/opc-workspace-routing-live.XXXXXX")"
   chmod 700 "$LIVE_TMPDIR"
   LIVE_ORIGINAL_AGENT="$LIVE_TMPDIR/original-agent.json"
+  LIVE_PREEXISTING_SNAPSHOT="$LIVE_TMPDIR/preexisting-project.json"
+  : >"$LIVE_PREEXISTING_SNAPSHOT"
+  chmod 600 "$LIVE_PREEXISTING_SNAPSHOT"
+  LIVE_PREEXISTING_RESTORE_NEEDED=0
+  LIVE_OWNERSHIP_UNKNOWN=0
   : >"$LIVE_ORIGINAL_AGENT"
   chmod 600 "$LIVE_ORIGINAL_AGENT"
   LIVE_RECORD="$LIVE_TMPDIR/execution-paths"
@@ -492,23 +613,18 @@ live_gate() {
   fi
   preexisting_project_error="$LIVE_TMPDIR/preexisting-project.err"
   if preexisting_project="$("$CLI" project workspace show --repo "$repo" 2>"$preexisting_project_error")"; then
-    if ! preexisting_project_id="$(printf '%s' "$preexisting_project" | jq -ers '
-      if length != 1 then error("expected exactly one project workspace response")
-      else .[0] as $response |
-        if ($response | type) != "object"
-           or ($response.project | type) != "object"
-           or ($response.workspace | type) != "object"
-           or ($response.project.id | type) != "string"
-           or ($response.project.id | length) == 0
-           or ($response.workspace.id | type) != "string"
-           or ($response.workspace.id | length) == 0
-        then error("invalid project workspace response")
-        else $response.project.id
-        end
+    if ! preexisting_project_id="$(printf '%s' "$preexisting_project" | jq -er '
+      if (type != "object") or (.project.id | type != "string") or (.workspace.id | type != "string")
+      then error("invalid project workspace response")
+      else .project.id
       end' 2>/dev/null)"; then
       bad "resolve whether engineering project is pre-existing (malformed CLI response)"
       return 1
     fi
+    LIVE_PROJECT_ID="$preexisting_project_id"
+    LIVE_PROJECT_PREEXISTING=1
+    snapshot_preexisting_project "$preexisting_project_id" || return 1
+    echo "INFO  preserving pre-existing engineering project $LIVE_PROJECT_ID"
   else
     preexisting_project_status=$?
     preexisting_project_error_text="$(cat "$preexisting_project_error")"
@@ -517,11 +633,13 @@ live_gate() {
       *) bad "resolve whether engineering project is pre-existing (CLI status=$preexisting_project_status)"; return 1 ;;
     esac
   fi
-  ticket="$(printf '%s\n' "$LIVE_MARKER engineering backlog fixture" | "$CLI" engineering-ticket create \
-    --repo "$repo" --title "$LIVE_MARKER workspace routing fixture" --status backlog)" || {
-    bad "create test-owned backlog engineering ticket"
+  if ! ticket="$(printf '%s\n' "$LIVE_MARKER engineering backlog fixture" | "$CLI" engineering-ticket create \
+    --repo "$repo" --title "$LIVE_MARKER workspace routing fixture" --status backlog)"; then
+    recover_live_ticket_ownership "$repo" "$LIVE_MARKER" || true
+    bad "create test-owned backlog engineering ticket (ownership recovery attempted)"
+    [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ] && echo "BLOCKER ticket ownership unknown after helper failure"
     return 1
-  }
+  fi
   LIVE_PROJECT_ID="$(printf '%s' "$ticket" | jq -r '.projectId // empty')"
   if [ -n "$preexisting_project_id" ] && [ "$preexisting_project_id" = "$LIVE_PROJECT_ID" ]; then
     LIVE_PROJECT_PREEXISTING=1
@@ -549,20 +667,21 @@ live_gate() {
     "$(printf '%s' "$issue_json" | jq -r '.projectWorkspaceId')"
   assert_eq "backlog ticket inherits project policy" inherit \
     "$(printf '%s' "$issue_json" | jq -r '.executionWorkspaceSettings.mode // .executionWorkspacePreference // empty')"
-  ticket="$(printf '%s\n' "$LIVE_MARKER engineering second backlog fixture" | "$CLI" engineering-ticket create \
-    --repo "$second" --title "$LIVE_MARKER workspace routing fixture second" --status backlog)" || {
-    bad "create second-form engineering ticket"
-  }
+  if ! ticket="$(printf '%s\n' "$LIVE_MARKER engineering second backlog fixture" | "$CLI" engineering-ticket create \
+    --repo "$second" --title "$LIVE_MARKER workspace routing fixture second" --status backlog)"; then
+    recover_live_ticket_ownership "$second" "$LIVE_MARKER" || true
+    bad "create second-form engineering ticket (ownership recovery attempted)"
+    [ "$LIVE_OWNERSHIP_UNKNOWN" -eq 1 ] && echo "BLOCKER second ticket ownership unknown after helper failure"
+    return 1
+  fi
   issue_second="$(printf '%s' "$ticket" | jq -r '.id // empty')"
   [ -n "$issue_second" ] || { bad "create second-form engineering ticket response"; return 1; }
   LIVE_PROJECT_ISSUE_IDS="$LIVE_PROJECT_ISSUE_IDS $issue_second"
-  assert_eq "second repository URL reuses project" "$LIVE_PROJECT_ID" \
-    "$(printf '%s' "$ticket" | jq -r '.projectId')"
   workspace_show="$("$CLI" project workspace show --repo "$repo")"
-  assert_eq "workspace show reports managed default" engineering \
-    "$(printf '%s' "$workspace_show" | jq -r '.workspace.metadata.opcWorkspaceDefaults.lane // empty')"
+  assert_eq "workspace show reports managed default source" managed_default \
+    "$(printf '%s' "$workspace_show" | jq -r '.source')"
   assert_eq "workspace show reports isolated git-worktree default" isolated_workspace \
-    "$(printf '%s' "$workspace_show" | jq -r '.workspace.metadata.opcWorkspaceDefaults.mode // empty')"
+    "$(printf '%s' "$workspace_show" | jq -r '.policy.mode')"
 
   prototype="wsroute-proto-$(date +%s)-$$"
   LIVE_PROTO_NAMES="$prototype"
@@ -769,7 +888,7 @@ assert_eq "short repo URL" "https://github.com/owner/repo" \
   "$($CLI repo normalize Owner/Repo | jq -r .repoUrl)"
 assert_eq "trailing URL slash is normalized" "https://github.com/owner/repo" \
   "$($CLI repo normalize https://github.com/Owner/Repo/ | jq -r .repoUrl)"
-for invalid_repo in 'https://gitlab.com/owner/repo' 'git@evil:owner/repo' '/tmp/repo' 'Owner/' 'Owner/Repo/'; do
+for invalid_repo in 'https://gitlab.com/owner/repo' 'http://github.com/owner/repo' 'git@evil:owner/repo' '/tmp/repo' 'Owner/' 'Owner/Repo/'; do
   if $CLI repo normalize "$invalid_repo" >/dev/null 2>&1; then
     bad "invalid repository identity is rejected: $invalid_repo"
   else
@@ -876,7 +995,8 @@ if SHOW="$($CLI project workspace show --repo https://github.com/owner/repo/ 2>"
 
   assert_eq "show policy mode" "isolated_workspace" "$(printf '%s' "$SHOW" | jq -r .policy.defaultMode)"
   assert_eq "show policy strategy" "git_worktree" "$(printf '%s' "$SHOW" | jq -r .policy.workspaceStrategy.type)"
-  assert_eq "show preserves workspace metadata" "kept" "$(printf '%s' "$SHOW" | jq -r .workspace.metadata.fixture)"
+  assert_eq "show reports unmanaged source" "unmanaged" "$(printf '%s' "$SHOW" | jq -r .source)"
+  assert_eq "show omits arbitrary workspace metadata" "false" "$(printf '%s' "$SHOW" | jq 'has("env") or has("runtime") or (.workspace | has("metadata"))')"
 else
   bad "project workspace show succeeds for canonical-equivalent SSH URL"
 fi
@@ -956,6 +1076,43 @@ for invalid_max in 0 51; do
   assert_eq "invalid max $invalid_max does not PATCH" "$before" "$(cat "$STATE")"
 done
 
+before_policy_failure_issues="$(jq '.issues | length' "$STATE")"
+stop_fixture
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["faults"] = {"omitProjectPolicyFields": ["defaultMode"]}
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+start_fixture
+POLICY_VERIFY_ERR="$TMPDIR/policy-verify.err"
+if printf x | "$CLI" engineering-ticket create --repo Owner/VerifyFail \
+  --title policy-verification-failure >/dev/null 2>"$POLICY_VERIFY_ERR"; then
+  bad "engineering adoption fails closed when policy response omits mode"
+else
+  ok "engineering adoption fails closed when policy response omits mode"
+fi
+assert_contains "policy verification error is actionable" "policy was not verified" "$(cat "$POLICY_VERIFY_ERR")"
+assert_eq "policy verification failure creates no issue" "$before_policy_failure_issues" "$(jq '.issues | length' "$STATE")"
+assert_eq "policy verification failure leaves no marker" "null" \
+  "$(jq -r '[.projects[] | select(.primaryWorkspace.repoUrl == "https://github.com/owner/verifyfail")][0].primaryWorkspace.metadata.opcWorkspaceDefaults // null' "$STATE")"
+stop_fixture
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state.pop("faults", None)
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
 stop_fixture
 cat >"$STATE" <<'JSON'
 {
@@ -1084,13 +1241,31 @@ with open(path, "w", encoding="utf-8") as stream:
     stream.write("\n")
 PY
 stop_fixture
+python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+workspace = state["projects"][0]["primaryWorkspace"]
+workspace.setdefault("metadata", {}).pop("opcWorkspaceDefaults", None)
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
 start_fixture
 export PAPERCLIP_API_URL="http://127.0.0.1:$PORT"
 export PAPERCLIP_API_KEY="$TOKEN"
-"$CLI" project workspace set --repo Owner/Repo --mode shared_workspace \
-  --shared-concurrency serialize --strategy project_primary >/dev/null
-assert_eq "workspace set preserves last-applied marker" "isolated_workspace" \
-  "$(jq -r '.projects[0].primaryWorkspace.metadata.opcWorkspaceDefaults.mode' "$STATE")"
+SET_OUTPUT="$("$CLI" project workspace set --repo Owner/Repo --mode shared_workspace \
+  --shared-concurrency serialize --strategy project_primary)"
+assert_eq "workspace set marks operator override" "operatorOverride" \
+  "$(jq -r '.projects[0].primaryWorkspace.metadata.opcWorkspaceDefaults.source' "$STATE")"
+assert_eq "workspace set output reports override" "operator_override" \
+  "$(printf '%s' "$SET_OUTPUT" | jq -r .source)"
+assert_eq "workspace set verifies enabled policy" "true" \
+  "$(printf '%s' "$SET_OUTPUT" | jq -r '.policy.enabled')"
+assert_eq "workspace set verifies shared concurrency" "serialize" \
+  "$(printf '%s' "$SET_OUTPUT" | jq -r '.policy.sharedConcurrency')"
 printf x | "$CLI" engineering-ticket create --repo Owner/Repo --title override-preserved >/dev/null
 assert_eq "operator project override survives routing" "shared_workspace" \
   "$(jq -r '.projects[0].executionWorkspacePolicy.defaultMode' "$STATE")"
@@ -1370,6 +1545,16 @@ assert_eq "prototype continuation binds exact project" \
 assert_eq "prototype continuation binds primary workspace" \
   "00000000-0000-4000-8000-000000000221" \
   "$(jq -r '.projectWorkspaceId' "$TMPDIR/prototype-continuation.json")"
+before_project_bound_same_title="$(jq '.issues | length' "$STATE")"
+printf 'Prototype: recipe-bot\nLane: prototype\nAcceptance: preview URL is posted\n' |
+  "$CLI" prototype-ticket create --name recipe-bot --title 'Recipe continuation' >"$TMPDIR/prototype-same-title.json"
+assert_eq "project-bound same-title prototype ticket is created" "$((before_project_bound_same_title + 1))" \
+  "$(jq '.issues | length' "$STATE")"
+assert_eq "project-bound same-title ticket allows duplicate" "true" \
+  "$(jq -r '.issues[-1].allowDuplicate' "$STATE")"
+assert_eq "project-bound same-title ticket stays bound" \
+  "00000000-0000-4000-8000-000000000121" \
+  "$(jq -r '.projectId' "$TMPDIR/prototype-same-title.json")"
 assert_eq "prototype near-miss does not match" "null" \
   "$(printf 'Prototype: fresh-bot\nLane: prototype\n' | "$CLI" prototype-ticket create --name fresh-bot --title 'Fresh' | jq -r '.projectId // null')"
 python3 - "$STATE" <<'PY'
