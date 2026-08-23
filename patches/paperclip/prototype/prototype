@@ -138,9 +138,8 @@ reconcile_workspace_policy() {
     _live_workspace="$(printf '%s' "$_project" | jq -r '.executionWorkspacePolicy.defaultProjectWorkspaceId // empty')"
     if [ "$_marker_type" = object ] &&
        [ "$_marker_lane" = prototype ] &&
-       [ "$_marker_source" = operatorOverride ] &&
-       [ -z "$_marker_shared" ]; then
-        note "prototype: operator override marker preserved without shared-concurrency migration"
+       [ "$_marker_source" = operatorOverride ]; then
+        note "prototype: operator override marker and live policy preserved"
         return 0
     fi
 

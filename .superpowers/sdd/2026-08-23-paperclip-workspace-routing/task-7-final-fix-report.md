@@ -82,3 +82,11 @@ Final checks after these corrections: fixture **133 pass, 0 fail**; audit **39 p
 ## Final regression correction
 
 Restored `fail_before="$FAIL"` at the beginning of `live_gate`, before any live mutations or cleanup traps. The live gate's normal-exit delta accounting is therefore preserved alongside the ownership-state initialization.
+
+## Final whole-branch corrections
+
+- Prototype reconciliation now honors `source: operatorOverride` for every managed-marker shape, preserving live policy and marker on resume; only reset reintroduces managed shared/serialize/project-primary defaults. Legacy markers without the override source still receive safe missing-shared augmentation.
+- Prototype ticket creation internally verifies full API responses but emits only `{id,identifier,title,projectId,projectWorkspaceId,status}` for both active dedupe returns and newly-created tickets.
+- Engineering reconciliation rejects object markers that are wrong-lane, partial, unsupported-mode/strategy, or have an invalid source instead of inheriting arbitrary policy. Workspace source reporting classifies incomplete/wrong-lane non-operator markers as unmanaged.
+
+Final checks: fixture **133 pass, 0 fail**; audit **39 pass, 0 fail**; shell/Python syntax, `scripts/prepare.sh`, and `git diff --check` all passed.
