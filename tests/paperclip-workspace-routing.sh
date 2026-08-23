@@ -305,12 +305,10 @@ create_process_agent() {
   local key="$1" project="$2" workspace="$3" payload id name
   name="workspace-routing-process-$key-$$"
   payload="$(jq -nc --arg n "$name" \
-    --arg cmd "sh $adapter_script" --arg record "$LIVE_RECORD" --arg release "$LIVE_RELEASE" \
+    --arg cmd "$adapter_script" --arg record "$LIVE_RECORD" --arg release "$LIVE_RELEASE" \
     --arg key "$key" --arg project "$project" --arg workspace "$workspace" \
     '{name:$n,role:"general",adapterType:"process",
-      adapterConfig:{command:$cmd,timeoutSec:120,
-        env:{OPC_RECORD:$record,OPC_RELEASE:$release,OPC_ISSUE_KEY:$key,
-             OPC_PROJECT_ID:$project,OPC_WORKSPACE_ID:$workspace}},
+      adapterConfig:{command:$cmd,args:[$key,$project,$workspace,$record,$release],timeoutSec:120},
       runtimeConfig:{heartbeat:{maxConcurrentRuns:3}},
       metadata:{opcWorkspaceRoutingTest:true}}')"
   live_mutation POST "/companies/$LIVE_COMPANY_ID/agents" "$payload" || return 1
@@ -788,8 +786,13 @@ live_gate() {
   docker compose exec -T paperclip sh -c "rm -f '$LIVE_RECORD' '$LIVE_RELEASE' '$adapter_script'"
   cat <<'AGENT_SCRIPT' | docker compose exec -T paperclip sh -c "cat > '$adapter_script' && chmod 755 '$adapter_script'"
 #!/bin/sh
-printf '%s\t%s\t%s\t%s\n' "${OPC_ISSUE_KEY:?}" "${OPC_PROJECT_ID:?}" "${OPC_WORKSPACE_ID:?}" "$(pwd)" >> "${OPC_RECORD:?}"
-while [ ! -e "${OPC_RELEASE:?}" ]; do sleep 0.2; done
+issue_key="${1:?missing issue key}"
+project_id="${2:?missing project id}"
+workspace_id="${3:?missing workspace id}"
+record="${4:?missing record path}"
+release="${5:?missing release path}"
+printf '%s\t%s\t%s\t%s\n' "$issue_key" "$project_id" "$workspace_id" "$(pwd)" >> "$record"
+while [ ! -e "$release" ]; do sleep 0.2; done
 AGENT_SCRIPT
   create_process_agent engineering-a "$LIVE_PROJECT_ID" "$workspace_id" || { bad "create test-owned process adapter agent A"; return 1; }
   test_agent_a="$LIVE_CREATED_AGENT_ID"
