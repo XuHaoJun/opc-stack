@@ -36,7 +36,7 @@ service_state() { # <service> → healthy|running|exited|…
 }
 service_exitcode() { local cid; cid="$(cid_of "$1")"; docker inspect --format '{{.State.ExitCode}}' "$cid" 2>/dev/null; }
 
-MAIN="buzz-db buzz-redis buzz-minio buzz frontdoor hermes paperclip tencentdb-core tencentdb-hub tencentdb-proxy"
+MAIN="buzz-db buzz-redis buzz-minio buzz frontdoor hermes hermes-dashboard paperclip tencentdb-core tencentdb-hub tencentdb-proxy"
 ONESHOT="buzz-minio-init buzz-keys buzz-bootstrap tencentdb-bootstrap"
 
 echo "── wait for services (up to 5 min) ──"

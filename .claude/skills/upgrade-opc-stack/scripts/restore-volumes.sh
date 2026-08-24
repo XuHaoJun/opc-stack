@@ -7,7 +7,7 @@
 # place, then prints the rebuild/resume commands. Containers MUST be stopped
 # while their data volumes are replaced.
 set -euo pipefail
-REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
 cd "$REPO"
 
 PROJ="${1:-}"
@@ -15,12 +15,19 @@ BKDIR="${2:-}"
 usage() { echo "usage: restore-volumes.sh <buzz|hermes|paperclip|tencentdb> <backup-dir>"; exit 1; }
 [ -n "$PROJ" ] && [ -n "$BKDIR" ] || usage
 [ -f .env ] || { echo "FAIL  no .env — run scripts/setup.sh first"; exit 1; }
-set -a; . ./.env; set +a
+. scripts/load-env.sh
+opc_load_env .env
 PNAME="${COMPOSE_PROJECT_NAME:-opc}"
+[ -d "$BKDIR" ] || { echo "FAIL backup directory does not exist: $BKDIR"; exit 1; }
+# Canonicalize before checksum and Docker bind-mount operations; callers use
+# relative paths such as backups/hermes-... .
+BKDIR="$(cd "$BKDIR" && pwd)"
 
 declare -A STOP_SERVICES=(
   [buzz]="buzz-db buzz-redis buzz-minio buzz-minio-init buzz-keys buzz buzz-bootstrap frontdoor"
-  [hermes]="hermes"
+  # Hermes restores replace the shared profile/frontdoor homes as well as the
+  # gateway data volume, so every writer must be stopped first.
+  [hermes]="hermes hermes-dashboard frontdoor"
   [paperclip]="paperclip"
   [tencentdb]="tencentdb-core tencentdb-bootstrap tencentdb-hub tencentdb-proxy"
 )
@@ -38,6 +45,10 @@ META="$BKDIR/meta.txt"
 
 VOLS="$(grep -E '^volumes=' "$META" | cut -d= -f2-)"
 [ -n "$VOLS" ] || { echo "FAIL  meta.txt has no volumes= line"; exit 1; }
+if [ "$PROJ" = hermes ] && [ "$VOLS" != "hermes-data hermes-profiles frontdoor-hermes" ]; then
+  echo "FAIL Hermes backup must contain hermes-data hermes-profiles frontdoor-hermes; refusing partial rollback" >&2
+  exit 1
+fi
 
 echo "── stop ${PROJ} services ──"
 docker compose stop ${STOP_SERVICES[$PROJ]}

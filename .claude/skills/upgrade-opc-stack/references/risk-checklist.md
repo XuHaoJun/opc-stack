@@ -8,13 +8,15 @@ Source of truth for `upgrade-opc-stack` skill checks. Keep in sync when
 | Component | Stateful (back up) | Regenerable (never back up) |
 |---|---|---|
 | buzz | `buzz-pgdata` `buzz-redisdata` `buzz-miniodata` `buzz-git` `frontdoor-hermes` `opc-keys` | `buzz-nix` `buzz-omp` `frontdoor-nix` `frontdoor-omp` |
-| hermes | `hermes-data` | `hermes-nix` `hermes-omp` |
+| hermes | `hermes-data` `hermes-profiles` `frontdoor-hermes` | `hermes-nix` `hermes-omp` |
 | paperclip | `paperclip-data` | `paperclip-nix` |
 | tencentdb | `tencentdb-core-data` `tencentdb-hub-data` `tencentdb-proxy-data` | — |
 
 Rationale: `*-nix` stores are caches (seeded at boot, self-heal, wipable via
-`docker volume rm`); `*-omp` is omp client state. `opc-keys` is relay
-identity — irreplaceable, tiny, cheap insurance on every buzz upgrade.
+`docker volume rm`); `*-omp` is omp client state. Hermes includes
+`frontdoor-hermes` because the Hermes upgrade also updates the Buzz frontdoor's
+baked Hermes ACP runtime. `opc-keys` is relay identity — irreplaceable, tiny,
+cheap insurance on every buzz upgrade.
 
 Services that must be STOPPED for a consistent backup (volume owners +
 dependents; `docker compose stop` also stops dependencies):
@@ -22,7 +24,7 @@ dependents; `docker compose stop` also stops dependencies):
 | Component | Services |
 |---|---|
 | buzz | `buzz-db buzz-redis buzz-minio buzz-minio-init buzz-keys buzz buzz-bootstrap frontdoor` |
-| hermes | `hermes` |
+| hermes | `hermes hermes-dashboard frontdoor` |
 | paperclip | `paperclip` |
 | tencentdb | `tencentdb-core tencentdb-bootstrap tencentdb-hub tencentdb-proxy` |
 
@@ -69,10 +71,14 @@ memorized — this table is the starting hint list.
   migrations run automatically on boot; check new migrations in the diff.
   After a fresh-volume rebuild the community is NEW → re-run add-member
   (`buzz-bootstrap` one-shot handles it on first boot).
-- **hermes** — `tests/scientist.sh` reaches INTO hermes internals and
-  will break on an upgrade that moves them, with a red gate that looks like a
-  scientist-lane regression rather than an upgrade artifact. Three couplings,
-  all in that one script: it imports the PRIVATE functions
+- **hermes** — `scripts/upgrade.sh hermes <tag>` aligns the Hermes tag in
+  `patches/buzz/Dockerfile`, rebuilds `frontdoor` plus `hermes`, and recreates
+  `frontdoor`, `hermes`, and `hermes-dashboard` together. Its backup must
+  include `hermes-data`, `hermes-profiles`, and `frontdoor-hermes`.
+  `tests/scientist.sh` reaches INTO hermes internals and will break on an
+  upgrade that moves them, with a red gate that looks like a scientist-lane
+  regression rather than an upgrade artifact. Three couplings, all in that one
+  script: it imports the PRIVATE functions
   `hermes_cli.container_boot._read_container_argv` (lines 252-296 at
   `v2026.8.16`) and `_is_dashboard_container` (353-371; the helper they share,
   `_strip_container_argv_prefix`, is 298-342), and it invokes them through the
@@ -107,14 +113,12 @@ memorized — this table is the starting hint list.
 
 ## 5. Cross-component couplings
 
-- **buzz frontdoor bakes a hermes version.** Upgrading hermes does NOT
-  update the frontdoor's baked agent; the frontdoor keeps the old one until
-  `patches/buzz/Dockerfile`'s `git clone --branch` is edited and buzz rebuilt.
-  Decide per upgrade whether that mismatch matters (frontdoor runs `hermes
-  acp` for relay conversations).
+- `scripts/upgrade.sh hermes <tag>` aligns the Hermes tag baked into the Buzz
+  frontdoor and rebuilds it by default. Upgrading Hermes therefore touches
+  `frontdoor-hermes` as well as the gateway/dashboard volumes.
 - Paperclip agents route models through the hermes gateway
-  (`apiBaseUrl: http://hermes:8642`); hermes upgrades must keep the API
-  server contract (`/v1`, OpenAI-compatible) or paperclip agents break.
+  (`apiBaseUrl: http://hermes:8642`); hermes upgrades must keep the API server
+  contract (`/v1`, OpenAI-compatible) or paperclip agents break.
 - LLM key is shared through the single canonical `OPENAI_API_KEY` contract. Hermes
   custom-provider runtime also consumes `OPENAI_BASE_URL`; shared
   gateway/dashboard/Paperclip/TencentDB models use `OPENAI_MODEL`, while the
@@ -131,15 +135,13 @@ frontdoor→relay link) + `docker compose logs --since 10m <svc>` scanned for
 | Component | Data-level smoke |
 |---|---|
 | buzz | relay `/_readiness`; `frontdoor` channels list; old chat history visible; git web GUI loads; media in minio intact |
-| hermes | dashboard 200/401; API `/docs`; profiles listed; model/provider config intact (config.yaml regenerated — verify kanban still off); run one agent session |
+| hermes | dashboard 200/401; API `/docs`; profiles listed; frontdoor ACP path; model/provider config intact (config.yaml regenerated — verify kanban still off); run one agent session |
 | paperclip | `/api/health`; login; agents list (hermes-gateway adapter intact); tasks readable |
 | tencentdb | core `/health`; panel login with `TENCENTDB_ADMIN_USER_KEY`; existing memories/skills/wiki visible; knowledge `/docs`; proxy `/`; one L0 write + recall via proxy; session re-bind if binding format changed |
 
 ## 7. Rollback
-
-Restore = checkout old tag → replace volume contents from backup → rebuild.
-Concrete: `scripts/upgrade.sh <proj> <old-tag>` (reuses the engine), then
-`restore-volumes.sh <proj> <backup-dir>`, then `docker compose up -d
-<services>`, then re-verify. The backup tar is a same-format data-dir
-snapshot — restoring it before booting the old version rolls back any
-one-way migration the new version ran.
+Restore = checkout old tag and matching frontdoor pin → replace all Hermes
+related volume contents from backup → rebuild `frontdoor` and `hermes` →
+recreate `frontdoor hermes hermes-dashboard` → re-verify. The backup tar is a
+same-format data-dir snapshot — restoring it before booting the old version
+rolls back any one-way migration the new version ran.

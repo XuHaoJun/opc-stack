@@ -17,9 +17,12 @@ description: >
 
 `scripts/upgrade.sh <proj> <tag>` is the engine: fetch → verify tag →
 checkout → re-apply patches → rebuild → redeploy. It performs NO risk
-analysis, NO backup, NO verification gate, NO rollback. This skill is the
-safety layer around it. The flow is a fixed recipe with two approval gates —
-follow it in order, never skip a step to "be quick".
+analysis, NO backup, NO verification gate, NO rollback. For Hermes, the
+engine also aligns the Hermes tag baked into the Buzz frontdoor, rebuilds
+`frontdoor` plus `hermes`, and recreates `frontdoor`, `hermes`, and
+`hermes-dashboard` together. This skill is the safety layer around it. The
+flow is a fixed recipe with two approval gates — follow it in order, never
+skip a step to "be quick".
 
 Data is precious and migrations are often one-way: the backup is
 unconditional, not risk-gated. Skip it only if the user explicitly overrides
@@ -54,21 +57,35 @@ is the bug the map fixes.
    assessment, stop here.
 4. **Backup** — run the bundled script:
    `bash .claude/skills/upgrade-opc-stack/scripts/backup-volumes.sh <proj> "backups/<proj>-<old>-<new>-$(date +%Y%m%dT%H%M%S)" <old> <new>`
-   This stops the component's services, tars its stateful volumes, writes
-   `meta.txt` + `manifest.sha256`. The component stays stopped — the upgrade
-   below restarts it.
-5. **Upgrade** — `scripts/upgrade.sh <proj> <tag>` (unchanged engine).
+   This stops the component's services, tars each stateful volume into
+   `<backup-dir>`, writes `meta.txt` + `manifest.sha256`, and leaves the
+   component STOPPED. For Hermes this includes `hermes-data`,
+   `hermes-profiles`, and `frontdoor-hermes`, and stops `hermes`,
+   `hermes-dashboard`, and `frontdoor`.
+5. **Upgrade** — `scripts/upgrade.sh <proj> <tag>` (the Hermes path also
+   aligns the frontdoor's baked Hermes tag; do not edit `upstream/` directly).
 6. **Verify** — `tests/connectivity.sh` + component smoke checks +
-   logs scan (see references/risk-checklist.md §6).
+   logs scan (see references/risk-checklist.md §6). Hermes verification must
+   cover the gateway, dashboard, frontdoor ACP path, profile list, config
+   migration, and one agent run.
 7. **GATE B — on verification failure:** present the failure to the user and
-   OFFER rollback; do NOT auto-rollback. On approval: restore = checkout old
-   tag (record the gitlink), restore volumes from the backup, rebuild, re-verify:
+   OFFER rollback; do NOT auto-rollback. For Hermes, restore the old Hermes
+   tag and matching `patches/buzz/Dockerfile` frontdoor pin, restore all three
+   Hermes-related volumes while services are stopped, rebuild `frontdoor`
+   and `hermes`, then recreate `frontdoor hermes hermes-dashboard` and
+   re-verify:
    ```bash
-   git -C upstream/<proj> checkout <old> && git add upstream/<proj>
-   bash .claude/skills/upgrade-opc-stack/scripts/restore-volumes.sh <proj> backups/<backup-dir>
-   scripts/prepare.sh && docker compose up -d --build <services>
+   git -C upstream/hermes checkout <old>
+   sed -i -E 's|(git clone --depth 1 --branch )v[0-9.]+|\1<old>|' patches/buzz/Dockerfile
+   git add upstream/hermes patches/buzz/Dockerfile
+   scripts/prepare.sh
+   bash .claude/skills/upgrade-opc-stack/scripts/restore-volumes.sh hermes backups/<backup-dir>
+   docker compose build frontdoor hermes
+   docker compose up -d --force-recreate frontdoor hermes hermes-dashboard
    tests/connectivity.sh
    ```
+   For other components, restore = checkout old tag (record the gitlink),
+   restore volumes from the backup, rebuild, re-verify.
 8. **Finish** — report outcome, backup location, and the upgrade record
    (submodule pointer commit). Keep the backup dir until the new version has
    run clean for a while; prune old ones deliberately.
@@ -125,8 +142,8 @@ schemes, volume map, patch dependency surfaces, pitfalls) is in
   stopped volumes; `backup-volumes.sh` handles this, don't hand-roll tars
   against live containers.
 - Restoring volumes over a running stack — restore only after stopping.
-- Forgetting the frontdoor bakes its own hermes — a hermes upgrade does not
-  change what `frontdoor` runs.
+- Forgetting the frontdoor bakes its own Hermes — `scripts/upgrade.sh hermes`
+  now aligns that pin and rebuilds the frontdoor by default.
 - Confusing `patches/` keys (`tencentdb-agent-memory`, `.../MemoryProxy`)
   with upgrade.sh component keys (`tencentdb`) when checking patch paths.
 - Editing `upstream/` directly — all customization goes through `patches/`.

@@ -230,7 +230,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv python3-pip git \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/hermes-venv \
-    && git clone --depth 1 --branch v2026.8.13 \
+    && git clone --depth 1 --branch v2026.8.19 \
         https://github.com/NousResearch/hermes-agent.git /opt/hermes-src \
     && /opt/hermes-venv/bin/pip install --no-cache-dir -e "/opt/hermes-src[acp]" \
     && rm -rf /root/.cache/pip
