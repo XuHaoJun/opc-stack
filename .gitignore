@@ -20,3 +20,6 @@ __pycache__/
 
 # Node deps (tests/acp-smoke-test.mjs runs inside the paperclip container, not here)
 node_modules/
+
+# Superpowers SDD working files (local only)
+.superpowers/
