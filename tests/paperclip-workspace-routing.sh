@@ -373,7 +373,7 @@ live_restore() {
   ok "restore exact original engineer runtimeConfig and metadata"
 }
 cancel_test_issues_for_cleanup() {
-  local issue issue_status cleanup_ok=1
+  local issue issue_status cleanup_ok=1 cancel_settled
   for issue in $LIVE_PROJECT_ISSUE_IDS; do
     if ! live_mutation GET "/issues/$issue"; then
       case "$LIVE_RESPONSE_STATUS" in
@@ -393,11 +393,27 @@ cancel_test_issues_for_cleanup() {
           cleanup_ok=0
           continue
         fi
-        if live_mutation GET "/issues/$issue" &&
-          [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // empty')" = cancelled ]; then
+        # Poll instead of reading once, and re-issue the cancel each round.
+        # The test's own agent runs are still draining at teardown, and one of
+        # them can move the issue back off `cancelled` (observed: OPC-113 ended
+        # `blocked` moments after a successful cancel). A single read races that
+        # and reports a cancel failure that is really a timing artifact — the
+        # same PATCH succeeds seconds later. This is a settle-wait, not a retry
+        # of a broken call: it stops as soon as the status holds.
+        cancel_settled=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          if live_mutation GET "/issues/$issue" &&
+            [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // empty')" = cancelled ]; then
+            cancel_settled=1
+            break
+          fi
+          sleep 2
+          live_mutation PATCH "/issues/$issue" '{"status":"cancelled"}' || true
+        done
+        if [ "$cancel_settled" -eq 1 ]; then
           ok "cancel test issue $issue before workspace cleanup"
         else
-          bad "verify test issue $issue cancelled before workspace cleanup"
+          bad "verify test issue $issue cancelled before workspace cleanup (still $(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // "unknown"') after 10 attempts)"
           cleanup_ok=0
         fi
         ;;
@@ -423,7 +439,23 @@ delete_test_issue_comments() {
       cleanup_status=0
       continue
     fi
-    comment_ids="$(printf '%s' "$comments" | jq -r '.[].id')"
+    # Paperclip injects its own comments onto these issues while the test runs
+    # — the disposition watchdog files an `authorType: "system"` notice
+    # ("Paperclip needs a disposition before this issue can continue") on any
+    # issue whose run finished without one. Those have NO author_agent_id and
+    # NO author_user_id, so no agent key can own them and the loop below cannot
+    # delete them by design. Counting them as cleanup failures blocked teardown
+    # and left test prototypes and projects behind on the live stack.
+    #
+    # They are Paperclip's rows, not the test's, and they go away with the issue.
+    # Skip them; still delete (and still assert on) every agent-authored comment.
+    system_comment_count="$(printf '%s' "$comments" | \
+      jq -r '[.[] | select(.authorType == "system")] | length')"
+    if [ "${system_comment_count:-0}" != 0 ]; then
+      ok "test issue $issue: $system_comment_count Paperclip system comment(s) left to the issue"
+    fi
+    comment_ids="$(printf '%s' "$comments" | \
+      jq -r '.[] | select(.authorType != "system") | .id')"
     while IFS= read -r comment_id; do
       [ -n "$comment_id" ] || continue
       comment_deleted=0
@@ -1121,7 +1153,36 @@ TMPDIR="$(mktemp -d)"
 STATE="$TMPDIR/state.json"
 LOG="$TMPDIR/fixture.log"
 TOKEN=fixture-key
-PORT="${PAPERCLIP_FIXTURE_PORT:-$((39000 + ($$ % 1000)))}"
+# Pick a port nothing is already listening on.
+#
+# This used to be `39000 + ($$ % 1000)` with no check, and a collision did not
+# fail cleanly: the fixture never came up, every later assertion talked to
+# WHATEVER owned the port, and the run produced 88 cascading "want=X got="
+# failures pointing at a stranger's 404s. Observed with a foreign listener on
+# 127.0.0.1:39249. Probe first, and let PAPERCLIP_FIXTURE_PORT force a specific
+# port when a caller needs one.
+port_is_free() {
+  ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+pick_free_port() {
+  local base="$((39000 + ($$ % 1000)))" candidate i
+  for i in $(seq 0 199); do
+    candidate="$(( 39000 + ((base - 39000 + i) % 1000) ))"
+    if port_is_free "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+if [ -n "${PAPERCLIP_FIXTURE_PORT:-}" ]; then
+  PORT="$PAPERCLIP_FIXTURE_PORT"
+else
+  PORT="$(pick_free_port)" || {
+    echo "FAIL  no free loopback port in 39000-39999 for the fixture" >&2
+    exit 1
+  }
+fi
 FIXTURE_PID=""
 stop_fixture() {
   if [ -n "$FIXTURE_PID" ]; then
@@ -1142,8 +1203,18 @@ start_fixture() {
     fi
     sleep 0.05
 done
-  bad "fixture starts on caller-supplied loopback port"
-  return 1
+  # Fatal, not a recorded failure. Callers invoke start_fixture bare and ignore
+  # its return, so continuing means running the whole offline suite against
+  # something that is not the fixture — which is how one port collision turned
+  # into 88 meaningless failures. If the local stub will not start, the
+  # environment is broken and there is nothing to salvage by carrying on.
+  bad "fixture starts on loopback port $PORT"
+  echo "── fixture log ──" >&2
+  sed 's/^/    /' "$LOG" >&2
+  if ! port_is_free "$PORT"; then
+    echo "    (port $PORT is held by another process — the fixture never bound it)" >&2
+  fi
+  exit 1
 }
 cat >"$STATE" <<'JSON'
 {
