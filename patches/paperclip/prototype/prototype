@@ -781,8 +781,27 @@ cmd_destroy() {
         if [ -n "$ws" ]; then
             printf '{}' | api POST "/projects/$project/workspaces/$ws/runtime-services/stop" >/dev/null 2>&1 || true
         fi
-        api DELETE "/projects/$project" >/dev/null 2>&1 \
-            || note "prototype: WARNING could not delete Paperclip project $project — remove it from the board"
+        # Delete, then archive if that is refused.
+        #
+        # Paperclip cannot delete a project that has ever had an issue, and it
+        # does not say so: `issues.project_id` has no ON DELETE CASCADE, the
+        # route calls svc.remove() without clearing issues first, and there is
+        # NO `DELETE /issues/:id` route at all — issues can only be cancelled.
+        # So DELETE returns a bare 500 for every prototype that did any work,
+        # which is all of them. This warning used to fire on every destroy and
+        # told the operator to "remove it from the board" — something the board
+        # cannot do either. Left unattended it accumulated 37 dead projects.
+        #
+        # Archiving takes it off the active board, which is the outcome the
+        # operator actually wanted, and the message now names the real reason.
+        if api DELETE "/projects/$project" >/dev/null 2>&1; then
+            :
+        elif printf '{"archivedAt":"%s"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                | api PATCH "/projects/$project" >/dev/null 2>&1; then
+            note "prototype: Paperclip project $project archived, not deleted (it has issues, and Paperclip has no API to delete an issue)"
+        else
+            note "prototype: WARNING could not delete or archive Paperclip project $project"
+        fi
     fi
     devenv release "$name" >/dev/null 2>&1 || note "prototype: WARNING devenv release failed for '$name'"
     rm -rf "$dir"

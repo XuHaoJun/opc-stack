@@ -145,12 +145,22 @@ variable in `.env` (`OPENAI_MODEL` for shared services, `BUZZ_AGENT_MODEL` for
 the frontdoor), or change the provider/model in the Hermes dashboard. Any
 OpenAI-compatible endpoint works for every project above.
 
-| Project | Repo | Tag |
-|---|---|---|
-| Buzz | block/buzz | desktop-v0.5.14 |
-| Hermes | NousResearch/hermes-agent | v2026.8.16 (= v0.20.2) |
-| Paperclip | paperclipai/paperclip | canary/v2026.722.1-canary.0 |
-| TencentDB-Agent-Memory | TencentCloud/TencentDB-Agent-Memory | v2.0.0 (branch feat/server_team) |
+| Project | Repo |
+|---|---|
+| Buzz | block/buzz |
+| Hermes | NousResearch/hermes-agent |
+| Paperclip | paperclipai/paperclip |
+| TencentDB-Agent-Memory | TencentCloud/TencentDB-Agent-Memory |
+
+The pinned tags are deliberately **not** written here. This table used to carry
+them and every entry but one had gone stale — it still claimed hermes
+`v2026.8.16` and a paperclip `canary/` tag long after both had moved. A pin is
+a machine-readable fact and restating it in prose only creates a second, wrong
+copy. Ask the machine:
+
+```bash
+scripts/outdated.sh    # current pin, newest stable tag, how far behind
+```
 
 ## Setup pages (after `docker compose up -d`)
 

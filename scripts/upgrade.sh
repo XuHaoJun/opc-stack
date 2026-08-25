@@ -3,9 +3,24 @@
 #   scripts/upgrade.sh <buzz|hermes|paperclip|tencentdb> <tag>
 #   e.g. scripts/upgrade.sh hermes v2026.9.1
 #
-# Flow: fetch tags → verify tag exists upstream → clean stale patches from the
-# submodule worktree → checkout the tag → record new submodule pointer →
-# re-apply patches → rebuild + redeploy that component's runtime services.
+# Flow: preflight → fetch tags → verify tag exists upstream → clean stale
+# patches from the submodule worktree → checkout the tag → record new submodule
+# pointer → re-apply patches → rebuild + redeploy that component's services →
+# assert the migrations actually advanced.
+#
+# Two things here are load-bearing and easy to "simplify" away:
+#
+#   * --force-recreate, for EVERY component. The bootstrap one-shots are what
+#     reconcile skills, agent adapterConfig and meta-registry rows, and compose
+#     does NOT re-run a one-shot whose container already exists and exited 0.
+#     Without the flag, listing a bootstrap service in SERVICES does nothing at
+#     all on an upgrade — which is exactly what buzz and tencentdb did.
+#
+#   * running tests/migrations.sh instead of printing a reminder. Every silent
+#     upgrade failure this stack has hit (config ladder eating system_prompt, a
+#     frozen schema overlay reverting upstream additions) leaves the stack
+#     HEALTHY. connectivity.sh is green in all of them. A printed reminder is
+#     not a gate.
 #
 # Hermes owns two images in this stack: the gateway/dashboard image and the
 # Buzz frontdoor image, which bakes a Hermes ACP checkout. Upgrading Hermes
@@ -25,10 +40,13 @@ if [ -z "$PROJ" ] || [ -z "$TAG" ]; then
   exit 1
 fi
 
+# Runtime services AND the bootstrap one-shots that reconcile durable state.
+# The one-shots belong here, not in a second table: --force-recreate below is
+# what makes them re-run, and it applies uniformly.
 declare -A SERVICES=(
   [buzz]="buzz-keys buzz buzz-bootstrap frontdoor"
   [hermes]="frontdoor hermes hermes-dashboard"
-  [paperclip]="paperclip"
+  [paperclip]="paperclip paperclip-bootstrap"
   [tencentdb]="tencentdb-core tencentdb-bootstrap tencentdb-hub tencentdb-proxy"
 )
 # Dashboard uses the Hermes image but has no build section of its own.
@@ -50,6 +68,36 @@ declare -A SUBMODULE=(
   [tencentdb]=tencentdb-agent-memory
 )
 UP="upstream/${SUBMODULE[$PROJ]}"
+
+# ── preflight ────────────────────────────────────────────────────────────
+# Read-only. Runs before anything is fetched, checked out, built or recreated,
+# so a blocked or contested upgrade costs nothing. OPC_UPGRADE_ACK_FINDINGS=1
+# is how the operator (or the upgrade skill, after its approval gate) records
+# that the findings were read and accepted.
+if [ "${OPC_UPGRADE_SKIP_PREFLIGHT:-}" = 1 ]; then
+  echo "── preflight SKIPPED (OPC_UPGRADE_SKIP_PREFLIGHT=1) ──"
+else
+  set +e
+  scripts/upgrade-preflight.sh "$PROJ" "$TAG"
+  pf_rc=$?
+  set -e
+  case "$pf_rc" in
+    0) ;;
+    1)
+      if [ "${OPC_UPGRADE_ACK_FINDINGS:-}" != 1 ]; then
+        echo
+        echo "preflight found things that need a decision. Nothing has been touched."
+        echo "Re-run with OPC_UPGRADE_ACK_FINDINGS=1 once they are reviewed and accepted."
+        exit 1
+      fi
+      echo "── preflight findings acknowledged (OPC_UPGRADE_ACK_FINDINGS=1) ──"
+      ;;
+    *)
+      echo "preflight could not report (exit $pf_rc) — refusing to upgrade blind." >&2
+      exit "$pf_rc"
+      ;;
+  esac
+fi
 
 echo "── fetch + verify tag ──"
 git -C "$UP" fetch origin --tags --prune
@@ -86,11 +134,16 @@ scripts/prepare.sh
 BUILD_SERVICES_FOR_PROJ="${BUILD_SERVICES[$PROJ]:-${SERVICES[$PROJ]}}"
 echo "── rebuild + redeploy ${SERVICES[$PROJ]} ──"
 docker compose build $BUILD_SERVICES_FOR_PROJ
-if [[ "$PROJ" == hermes ]]; then
-  docker compose up -d --force-recreate ${SERVICES[$PROJ]}
-else
-  docker compose up -d ${SERVICES[$PROJ]}
+docker compose up -d --force-recreate ${SERVICES[$PROJ]}
+
+echo "── verify: migrations advanced ──"
+if ! tests/migrations.sh "$PROJ"; then
+  echo
+  echo "MIGRATION GATE FAILED for $PROJ → $TAG."
+  echo "The stack may look healthy — that is the failure mode, not evidence"
+  echo "against it. Restore the volume backup before deciding anything else."
+  exit 1
 fi
 
 echo "── done: $PROJ → $TAG ──"
-echo "verify: tests/connectivity.sh"
+echo "next: tests/connectivity.sh (and the component's own live gate)"

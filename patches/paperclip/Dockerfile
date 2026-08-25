@@ -1,5 +1,10 @@
-# OPC stack image for Paperclip — adapted from the upstream Dockerfile
-# (paperclipai/paperclip @ tag v2026.817.0).
+# OPC stack image for Paperclip — adapted from the upstream Dockerfile.
+# The tag it was last reconciled against is NOT written here; that would be a
+# second copy of a fact `scripts/outdated.sh` already derives, and this comment
+# would go stale exactly like the ones it replaced. What keeps this file honest
+# is `scripts/upgrade-preflight.sh`, which reports "adapted-from source CHANGED"
+# whenever upstream edits its Dockerfile — that is how the
+# `packages/tailscale-https-broker` workspace manifest below was caught.
 # Changes vs upstream:
 #   1. Single-user Nix layer: OS tools installed via `nix profile install`
 #      persist on the /nix volume across compose down/up and recreates.
@@ -60,6 +65,7 @@ COPY packages/google-sheets-mcp-server/package.json packages/google-sheets-mcp-s
 COPY packages/kv-demo-mcp-server/package.json packages/kv-demo-mcp-server/
 COPY packages/mcp-server/package.json packages/mcp-server/
 COPY packages/skills-catalog/package.json packages/skills-catalog/
+COPY packages/tailscale-https-broker/package.json packages/tailscale-https-broker/
 COPY packages/teams-catalog/package.json packages/teams-catalog/
 COPY packages/adapters/claude-local/package.json packages/adapters/claude-local/
 COPY packages/adapters/codex-local/package.json packages/adapters/codex-local/

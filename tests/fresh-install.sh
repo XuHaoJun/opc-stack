@@ -173,7 +173,7 @@ fi
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh"
+GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"

@@ -77,6 +77,52 @@ check_identical "paperclip CLI (buzz/hermes)" \
   patches/buzz/opc-paperclip \
   patches/hermes/opc-paperclip
 
+# ── hermes config schema version ────────────────────────────────────────
+# Both hermes entrypoints seed a config.yaml stamped with OPC_CONFIG_VERSION.
+# Hermes migrates that file IN PLACE on every container boot (its s6
+# cont-init hook runs the same ladder `hermes update` runs), so a stamp that
+# has fallen behind upstream's default means every clean install silently runs
+# unreviewed migrations over our own template. That is not hypothetical: the
+# ladder once removed agent.system_prompt from the front door's config, and the
+# stack stayed green for 27 hours before a human noticed the agent had stopped
+# filing tickets.
+#
+# The fix is not to track upstream automatically — it is to make the bump a
+# decision somebody made. Read the steps named below, confirm they are no-ops
+# (or handle them), then edit the constant in BOTH entrypoints.
+check_config_version() {
+  local defaults=upstream/hermes/hermes_cli/config_defaults.py
+  if [ ! -f "$defaults" ]; then
+    echo "SKIP  hermes _config_version (submodule not checked out)"
+    return
+  fi
+  local want have_h have_f
+  want="$(sed -n 's/.*"_config_version": *\([0-9]\+\).*/\1/p' "$defaults" | head -1)"
+  have_h="$(sed -n 's/^OPC_CONFIG_VERSION=\([0-9]\+\).*/\1/p' patches/hermes/hermes-entrypoint.sh | head -1)"
+  have_f="$(sed -n 's/^OPC_CONFIG_VERSION=\([0-9]\+\).*/\1/p' patches/buzz/frontdoor-entrypoint.sh | head -1)"
+  if [ -z "$want" ]; then
+    echo "FAIL  hermes _config_version: cannot read the default out of $defaults"
+    exit 1
+  fi
+  if [ "$have_h" != "$have_f" ]; then
+    echo "FAIL  hermes _config_version: the two entrypoints disagree (hermes=$have_h frontdoor=$have_f)"
+    exit 1
+  fi
+  if [ "$have_h" != "$want" ]; then
+    echo "FAIL  hermes _config_version drift: seeded $have_h, upstream default $want"
+    echo "      Read these ladder steps before bumping — each one REWRITES the config"
+    echo "      file we seed, and a step that touches a key we own is invisible at runtime:"
+    sed -n "s/^def \(_migrate_to_[0-9]\+\).*/\1/p" upstream/hermes/hermes_cli/config_migrations.py \
+      | awk -v a="$have_h" '{ n=$0; sub(/_migrate_to_/,"",n); if (n+0 > a+0) print "        " $0 }'
+    echo "      Then set OPC_CONFIG_VERSION=$want in BOTH:"
+    echo "        patches/hermes/hermes-entrypoint.sh"
+    echo "        patches/buzz/frontdoor-entrypoint.sh"
+    exit 1
+  fi
+  echo "SAME  hermes _config_version ($have_h, matches upstream default)"
+}
+check_config_version
+
 apply_patch buzz
 apply_patch hermes
 apply_patch paperclip

@@ -1,0 +1,33 @@
+--- a/src/metadata/router/v3-meta-schemas.ts
++++ b/src/metadata/router/v3-meta-schemas.ts
+@@ -3,6 +3,12 @@
+  *
+  * 对应设计文档 §7.1。每个 schema 校验对应路由的请求体；
+  * 路由 handler 用 `schema.safeParse(body)` 校验后再调用 MetadataService。
++ *
++ * OPC overlay: `team/create` / `agent/create` 接受显式 `team_id` / `agent_id`
++ * （镜像 `user/create` 已有的 `user_id` passthrough）。service/store 层本来就
++ * 支持确定性 id（`input.team_id ?? generateId(...)`），API schema 是唯一关卡。
++ * OPC bootstrap 靠它登记 data plane 实际写入的租户 id（team=opc /
++ * agent=agt-hermes-front-door），让 Memory Hub 面板能渲染既有记忆数据。
+  */
+ import { z } from "zod";
+ import { paginationInputSchema } from "./pagination.js";
+@@ -76,6 +82,8 @@ export const userKeyUpdateSchema = z.object({
+ 
+ // ── Team ──
+ export const teamCreateSchema = z.object({
++  // OPC overlay: optional explicit team_id (mirrors userCreateSchema.user_id).
++  team_id: z.string().min(1).optional(),
+   name: nonEmpty,
+   owner_user_id: nonEmpty,
+   description: z.string().optional(),
+@@ -111,6 +119,8 @@ export const teamMemberGetSchema = z.object({ team_id: nonEmpty, user_id: nonEmp
+ // ── Agent ──
+ export const agentCreateSchema = z.object({
+   team_id: nonEmpty,
++  // OPC overlay: optional explicit agent_id (mirrors userCreateSchema.user_id).
++  agent_id: z.string().min(1).optional(),
+   owner_user_id: nonEmpty,
+   name: nonEmpty,
+   description: z.string().optional(),

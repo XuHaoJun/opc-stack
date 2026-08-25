@@ -373,7 +373,7 @@ live_restore() {
   ok "restore exact original engineer runtimeConfig and metadata"
 }
 cancel_test_issues_for_cleanup() {
-  local issue issue_status cleanup_ok=1
+  local issue issue_status cleanup_ok=1 cancel_settled
   for issue in $LIVE_PROJECT_ISSUE_IDS; do
     if ! live_mutation GET "/issues/$issue"; then
       case "$LIVE_RESPONSE_STATUS" in
@@ -393,11 +393,27 @@ cancel_test_issues_for_cleanup() {
           cleanup_ok=0
           continue
         fi
-        if live_mutation GET "/issues/$issue" &&
-          [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // empty')" = cancelled ]; then
+        # Poll instead of reading once, and re-issue the cancel each round.
+        # The test's own agent runs are still draining at teardown, and one of
+        # them can move the issue back off `cancelled` (observed: OPC-113 ended
+        # `blocked` moments after a successful cancel). A single read races that
+        # and reports a cancel failure that is really a timing artifact — the
+        # same PATCH succeeds seconds later. This is a settle-wait, not a retry
+        # of a broken call: it stops as soon as the status holds.
+        cancel_settled=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          if live_mutation GET "/issues/$issue" &&
+            [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // empty')" = cancelled ]; then
+            cancel_settled=1
+            break
+          fi
+          sleep 2
+          live_mutation PATCH "/issues/$issue" '{"status":"cancelled"}' || true
+        done
+        if [ "$cancel_settled" -eq 1 ]; then
           ok "cancel test issue $issue before workspace cleanup"
         else
-          bad "verify test issue $issue cancelled before workspace cleanup"
+          bad "verify test issue $issue cancelled before workspace cleanup (still $(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.status // "unknown"') after 10 attempts)"
           cleanup_ok=0
         fi
         ;;
@@ -407,12 +423,22 @@ cancel_test_issues_for_cleanup() {
 }
 delete_test_issue_comments() {
   local issue comments comment_ids comment_id cleanup_status=1 cleanup_agent \
-    cleanup_key cleanup_key_id key_name comment_deleted
+    cleanup_key cleanup_key_id key_name comment_deleted system_comment_count residual \
+    issue_rounds
   for issue in $LIVE_PROJECT_ISSUE_IDS; do
+    # Re-enumerate, do not enumerate once. The test's own agent runs are still
+    # draining during teardown and file NEW comments after a single listing has
+    # been taken — the loop then deletes what it saw, and the check afterwards
+    # finds a comment it never had a chance to delete. Waiting does not help
+    # (10s of polling did not); the list has to be taken again. Rounds are
+    # bounded so a genuinely undeletable comment still fails loudly.
+    issue_rounds=0
+    while :; do
+    issue_rounds=$((issue_rounds + 1))
     if ! live_mutation GET "/issues/$issue/comments"; then
       bad "list comments for test issue $issue (HTTP $LIVE_RESPONSE_STATUS)"
       cleanup_status=0
-      continue
+      break
     fi
     comments="$LIVE_RESPONSE_BODY"
     if ! printf '%s' "$comments" | jq -e '
@@ -421,9 +447,49 @@ delete_test_issue_comments() {
     ' >/dev/null 2>&1; then
       bad "list comments for test issue $issue (response is not a valid array)"
       cleanup_status=0
-      continue
+      break
     fi
-    comment_ids="$(printf '%s' "$comments" | jq -r '.[].id')"
+    # Paperclip injects its own comments onto these issues while the test runs
+    # — the disposition watchdog files an `authorType: "system"` notice
+    # ("Paperclip needs a disposition before this issue can continue") on any
+    # issue whose run finished without one. Those have NO author_agent_id and
+    # NO author_user_id, so no agent key can own them and the loop below cannot
+    # delete them by design. Counting them as cleanup failures blocked teardown
+    # and left test prototypes and projects behind on the live stack.
+    #
+    # They are Paperclip's rows, not the test's, and they go away with the issue.
+    # Skip them; still delete (and still assert on) every agent-authored comment.
+    system_comment_count="$(printf '%s' "$comments" | \
+      jq -r '[.[] | select(.authorType == "system")] | length')"
+    if [ "${system_comment_count:-0}" != 0 ] && [ "$issue_rounds" = 1 ]; then
+      ok "test issue $issue: $system_comment_count Paperclip system comment(s) left to the issue"
+    fi
+    # `.deletedAt == null` is not decoration. Paperclip's comment DELETE is a
+    # TOMBSTONE, not a removal (`svc.tombstoneComment`), so the row keeps being
+    # returned by the list endpoint with deletedAt set — and deleting it again
+    # returns 200, because the handler early-returns on an already-tombstoned
+    # comment. Without this filter the loop "successfully deleted" the same
+    # comment id once per round, four rounds running, and the count never
+    # dropped.
+    comment_ids="$(printf '%s' "$comments" | \
+      jq -r '.[] | select(.authorType != "system" and .deletedAt == null) | .id')"
+    # Decide from THIS round's listing, before deleting anything. Computing it
+    # after the delete loop reads a clobbered $LIVE_RESPONSE_BODY — the loop
+    # issues its own key-create, comment-delete and key-revoke calls, so the
+    # variable holds the last of those, not a comment array. That produced a
+    # residual of -1 (the not-an-array sentinel) and a failure that blamed the
+    # comments instead of the check.
+    residual="$(printf '%s' "$comments" | \
+      jq -r '[.[] | select(.authorType != "system" and .deletedAt == null)] | length')"
+    if [ "$residual" = 0 ]; then
+      ok "verify test issue comments removed $issue"
+      break
+    fi
+    if [ "$issue_rounds" -ge 5 ]; then
+      bad "verify test issue comments removed $issue ($residual live agent-authored comment(s) survived $((issue_rounds - 1)) delete rounds)"
+      cleanup_status=0
+      break
+    fi
     while IFS= read -r comment_id; do
       [ -n "$comment_id" ] || continue
       comment_deleted=0
@@ -458,13 +524,8 @@ delete_test_issue_comments() {
     done <<EOF
 $comment_ids
 EOF
-    if live_mutation GET "/issues/$issue/comments" &&
-      [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r 'if type == "array" then length else -1 end')" = 0 ]; then
-      ok "verify test issue comments removed $issue"
-    else
-      bad "verify test issue comments removed $issue"
-      cleanup_status=0
-    fi
+    sleep 2
+    done
   done
   [ "$cleanup_status" -eq 1 ]
 }
@@ -1121,7 +1182,36 @@ TMPDIR="$(mktemp -d)"
 STATE="$TMPDIR/state.json"
 LOG="$TMPDIR/fixture.log"
 TOKEN=fixture-key
-PORT="${PAPERCLIP_FIXTURE_PORT:-$((39000 + ($$ % 1000)))}"
+# Pick a port nothing is already listening on.
+#
+# This used to be `39000 + ($$ % 1000)` with no check, and a collision did not
+# fail cleanly: the fixture never came up, every later assertion talked to
+# WHATEVER owned the port, and the run produced 88 cascading "want=X got="
+# failures pointing at a stranger's 404s. Observed with a foreign listener on
+# 127.0.0.1:39249. Probe first, and let PAPERCLIP_FIXTURE_PORT force a specific
+# port when a caller needs one.
+port_is_free() {
+  ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+pick_free_port() {
+  local base="$((39000 + ($$ % 1000)))" candidate i
+  for i in $(seq 0 199); do
+    candidate="$(( 39000 + ((base - 39000 + i) % 1000) ))"
+    if port_is_free "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+if [ -n "${PAPERCLIP_FIXTURE_PORT:-}" ]; then
+  PORT="$PAPERCLIP_FIXTURE_PORT"
+else
+  PORT="$(pick_free_port)" || {
+    echo "FAIL  no free loopback port in 39000-39999 for the fixture" >&2
+    exit 1
+  }
+fi
 FIXTURE_PID=""
 stop_fixture() {
   if [ -n "$FIXTURE_PID" ]; then
@@ -1142,8 +1232,18 @@ start_fixture() {
     fi
     sleep 0.05
 done
-  bad "fixture starts on caller-supplied loopback port"
-  return 1
+  # Fatal, not a recorded failure. Callers invoke start_fixture bare and ignore
+  # its return, so continuing means running the whole offline suite against
+  # something that is not the fixture — which is how one port collision turned
+  # into 88 meaningless failures. If the local stub will not start, the
+  # environment is broken and there is nothing to salvage by carrying on.
+  bad "fixture starts on loopback port $PORT"
+  echo "── fixture log ──" >&2
+  sed 's/^/    /' "$LOG" >&2
+  if ! port_is_free "$PORT"; then
+    echo "    (port $PORT is held by another process — the fixture never bound it)" >&2
+  fi
+  exit 1
 }
 cat >"$STATE" <<'JSON'
 {

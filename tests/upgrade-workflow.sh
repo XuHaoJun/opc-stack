@@ -15,8 +15,23 @@ assert_called() {
 
 fixture="$(mktemp -d)"
 trap 'rm -rf "$fixture" "${backup_fixture:-}"' EXIT
-mkdir -p "$fixture/bin" "$fixture/scripts" "$fixture/upstream/hermes" "$fixture/patches/buzz"
+mkdir -p "$fixture/bin" "$fixture/scripts" "$fixture/tests" \
+    "$fixture/upstream/hermes" "$fixture/upstream/paperclip" \
+    "$fixture/upstream/buzz" "$fixture/upstream/tencentdb-agent-memory" "$fixture/patches/buzz"
 cp scripts/upgrade.sh "$fixture/scripts/upgrade.sh"
+# upgrade.sh now calls these two. Stubs, exit code driven by env, so the test
+# can drive every branch without a stack.
+cat > "$fixture/scripts/upgrade-preflight.sh" <<'SH'
+#!/bin/sh
+printf 'preflight %s\n' "$*" >> "$FAKE_LOG"
+exit "${FAKE_PREFLIGHT_RC:-0}"
+SH
+cat > "$fixture/tests/migrations.sh" <<'SH'
+#!/bin/sh
+printf 'migration-gate %s\n' "$*" >> "$FAKE_LOG"
+exit "${FAKE_GATE_RC:-0}"
+SH
+chmod +x "$fixture/scripts/upgrade-preflight.sh" "$fixture/tests/migrations.sh"
 cat > "$fixture/scripts/prepare.sh" <<'SH'
 #!/bin/sh
 printf '%s\n' 'prepare' >> "$FAKE_LOG"
@@ -52,6 +67,65 @@ FAKE_LOG="$fixture/calls" PATH="$fixture/bin:$PATH" \
 assert_called "build" "docker compose build frontdoor hermes" "$fixture/calls"
 assert_called "deploy" "docker compose up -d --force-recreate frontdoor hermes hermes-dashboard" "$fixture/calls"
 assert_called "prepare" "prepare" "$fixture/calls"
+assert_called "preflight ran" "preflight hermes v2026.8.19" "$fixture/calls"
+assert_called "migration gate ran" "migration-gate hermes" "$fixture/calls"
+# Preflight must be read-only-and-first: nothing may be fetched or checked out
+# before it has had its say, or a blocked upgrade has already cost something.
+head -1 "$fixture/calls" | grep -q '^preflight ' || \
+    fail "preflight was not the first thing upgrade.sh did"
+
+# ── preflight findings gate ──────────────────────────────────────────────
+: > "$fixture/gate-calls"
+if FAKE_LOG="$fixture/gate-calls" FAKE_PREFLIGHT_RC=1 PATH="$fixture/bin:$PATH" \
+    "$fixture/scripts/upgrade.sh" hermes v2026.8.19 >"$fixture/gate-output" 2>&1; then
+    fail "unacknowledged preflight findings did not stop the upgrade"
+fi
+grep -qF ' checkout ' "$fixture/gate-calls" && \
+    fail "unacknowledged preflight findings still mutated the submodule"
+: > "$fixture/ack-calls"
+FAKE_LOG="$fixture/ack-calls" FAKE_PREFLIGHT_RC=1 OPC_UPGRADE_ACK_FINDINGS=1 \
+    PATH="$fixture/bin:$PATH" "$fixture/scripts/upgrade.sh" hermes v2026.8.19 \
+    >"$fixture/ack-output" 2>&1 || \
+    fail "acknowledged preflight findings should proceed: $(cat "$fixture/ack-output")"
+assert_called "ack proceeds to build" "docker compose build frontdoor hermes" "$fixture/ack-calls"
+: > "$fixture/blocked-calls"
+if FAKE_LOG="$fixture/blocked-calls" FAKE_PREFLIGHT_RC=2 OPC_UPGRADE_ACK_FINDINGS=1 \
+    PATH="$fixture/bin:$PATH" "$fixture/scripts/upgrade.sh" hermes v2026.8.19 \
+    >"$fixture/blocked-output" 2>&1; then
+    fail "a preflight that could not report (exit 2) must never be acknowledgeable"
+fi
+
+# ── a failing migration gate must fail the upgrade ───────────────────────
+: > "$fixture/badgate-calls"
+if FAKE_LOG="$fixture/badgate-calls" FAKE_GATE_RC=1 PATH="$fixture/bin:$PATH" \
+    "$fixture/scripts/upgrade.sh" hermes v2026.8.19 >"$fixture/badgate-output" 2>&1; then
+    fail "a failing migration gate did not fail the upgrade"
+fi
+grep -qi 'MIGRATION GATE FAILED' "$fixture/badgate-output" || \
+    fail "a failing migration gate did not say so"
+
+# ── every component force-recreates, and paperclip recreates its bootstrap ──
+# Compose does not re-run a one-shot whose container exists and exited 0, so a
+# bootstrap service listed WITHOUT --force-recreate reconciles nothing. This
+# used to be true for buzz, paperclip and tencentdb all at once.
+for comp in buzz paperclip tencentdb; do
+    : > "$fixture/$comp-calls"
+    FAKE_LOG="$fixture/$comp-calls" PATH="$fixture/bin:$PATH" \
+        "$fixture/scripts/upgrade.sh" "$comp" v1.2.3 >"$fixture/$comp-output" 2>&1 || \
+        fail "$comp upgrade exited non-zero: $(cat "$fixture/$comp-output")"
+    grep -q "docker compose up -d --force-recreate" "$fixture/$comp-calls" || \
+        fail "$comp did not force-recreate — its bootstrap one-shot would not re-run"
+    assert_called "$comp migration gate" "migration-gate $comp" "$fixture/$comp-calls"
+done
+assert_called "paperclip bootstrap recreated" \
+    "docker compose up -d --force-recreate paperclip paperclip-bootstrap" \
+    "$fixture/paperclip-calls"
+assert_called "buzz bootstrap recreated" \
+    "docker compose up -d --force-recreate buzz-keys buzz buzz-bootstrap frontdoor" \
+    "$fixture/buzz-calls"
+assert_called "tencentdb bootstrap recreated" \
+    "docker compose up -d --force-recreate tencentdb-core tencentdb-bootstrap tencentdb-hub tencentdb-proxy" \
+    "$fixture/tencentdb-calls"
 grep -qF -- '--branch v2026.8.19' "$fixture/patches/buzz/Dockerfile" || \
     fail "frontdoor Hermes pin was not aligned"
 sed -E -i 's|(git clone --depth 1 --branch )v[0-9.]+|\1v2026.8.13|' \
@@ -170,5 +244,8 @@ if FAKE_LOG="$backup_fixture/legacy-restore-calls" FAKE_BACKUP_DIR="$backup_fixt
 fi
 
 echo "PASS  aligned Hermes upgrade workflow"
+echo "PASS  preflight gate (first, blocking, acknowledgeable, unbypassable at rc=2)"
+echo "PASS  migration gate fails the upgrade"
+echo "PASS  every component force-recreates its bootstrap one-shot"
 echo "PASS  aligned Hermes backup workflow"
 echo "PASS  aligned Hermes restore workflow"

@@ -15,9 +15,11 @@ description: >
 
 ## Overview
 
-`scripts/upgrade.sh <proj> <tag>` is the engine: fetch → verify tag →
-checkout → re-apply patches → rebuild → redeploy. It performs NO risk
-analysis, NO backup, NO verification gate, NO rollback. For Hermes, the
+`scripts/upgrade.sh <proj> <tag>` is the engine: preflight → fetch → verify
+tag → checkout → re-apply patches → rebuild → redeploy (with
+`--force-recreate`, so the bootstrap one-shots actually re-run) → run
+`tests/migrations.sh`. It performs NO backup and NO rollback, and its risk
+analysis is the preflight report rather than a judgement. For Hermes, the
 engine also aligns the Hermes tag baked into the Buzz frontdoor, rebuilds
 `frontdoor` plus `hermes`, and recreates `frontdoor`, `hermes`, and
 `hermes-dashboard` together. This skill is the safety layer around it. The
@@ -50,8 +52,17 @@ is the bug the map fixes.
 1. **Sanity** — `.env` exists; `docker compose ps` reachable (if docker is
    unavailable, substitute compose-file inspection and note it); submodule at
    a known tag (`git -C upstream/<proj> describe --tags --always`).
-2. **Risk assessment** (read-only; see checklist below) → produce the risk
-   report (template below).
+2. **Risk assessment** — run the probes, do not perform them from memory:
+   ```bash
+   scripts/upgrade-preflight.sh <proj> <tag>
+   ```
+   Read-only; touches no ref, container or volume. Exit `0` = nothing needs a
+   decision · `1` = findings to review · `2` = cannot report (stop). Fold its
+   output into the risk report (template below), and read
+   `references/risk-checklist.md` for what each finding means. Add judgement the
+   script cannot have — but never substitute reading for running it: the one
+   check that would have caught the tencentdb overlay clobber existed only as a
+   line in that checklist, and a line in a document is not a check.
 3. **GATE A — approval.** Present the report; do NOT back up or touch the
    stack until the user approves the upgrade path. If they only asked for an
    assessment, stop here.
@@ -64,10 +75,22 @@ is the bug the map fixes.
    `hermes-dashboard`, and `frontdoor`.
 5. **Upgrade** — `scripts/upgrade.sh <proj> <tag>` (the Hermes path also
    aligns the frontdoor's baked Hermes tag; do not edit `upstream/` directly).
-6. **Verify** — `tests/connectivity.sh` + component smoke checks +
-   logs scan (see references/risk-checklist.md §6). Hermes verification must
-   cover the gateway, dashboard, frontdoor ACP path, profile list, config
-   migration, and one agent run.
+   It re-runs preflight itself and refuses to proceed while findings are
+   outstanding; once GATE A approved them, pass that decision through:
+   ```bash
+   OPC_UPGRADE_ACK_FINDINGS=1 scripts/upgrade.sh <proj> <tag>
+   ```
+   The script recreates the component's bootstrap one-shots with
+   `--force-recreate` (compose will not re-run a one-shot that already exited
+   0, so without this the skill/agent/meta-registry reconcile silently does not
+   happen), and it runs the migration gate before reporting success.
+6. **Verify** — `tests/migrations.sh <proj>` already ran inside `upgrade.sh`
+   and would have failed it; then `tests/connectivity.sh` + component smoke
+   checks + logs scan (see references/risk-checklist.md §6). Hermes
+   verification must cover the gateway, dashboard, frontdoor ACP path, profile
+   list, config migration, and one agent run.
+   Health is necessary and not sufficient: every silent upgrade failure this
+   stack has hit left `connectivity.sh` green.
 7. **GATE B — on verification failure:** present the failure to the user and
    OFFER rollback; do NOT auto-rollback. For Hermes, restore the old Hermes
    tag and matching `patches/buzz/Dockerfile` frontdoor pin, restore all three
@@ -138,6 +161,12 @@ schemes, volume map, patch dependency surfaces, pitfalls) is in
 ## Common mistakes
 
 - Skipping the report or the approval gate — the point of the skill.
+- Writing the risk report from reading instead of from
+  `scripts/upgrade-preflight.sh`. Its findings are the ones that get missed.
+- Treating a green `connectivity.sh` as verification. It is green in every
+  silent-failure scenario; `tests/migrations.sh` is the gate that is not.
+- Dropping `--force-recreate` "because the image did not change". That flag is
+  the only thing that re-runs the bootstrap one-shots.
 - Backing up while containers are running — postgres/sqlite tars must be of
   stopped volumes; `backup-volumes.sh` handles this, don't hand-roll tars
   against live containers.
