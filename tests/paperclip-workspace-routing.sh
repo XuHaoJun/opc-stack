@@ -464,8 +464,15 @@ delete_test_issue_comments() {
     if [ "${system_comment_count:-0}" != 0 ] && [ "$issue_rounds" = 1 ]; then
       ok "test issue $issue: $system_comment_count Paperclip system comment(s) left to the issue"
     fi
+    # `.deletedAt == null` is not decoration. Paperclip's comment DELETE is a
+    # TOMBSTONE, not a removal (`svc.tombstoneComment`), so the row keeps being
+    # returned by the list endpoint with deletedAt set — and deleting it again
+    # returns 200, because the handler early-returns on an already-tombstoned
+    # comment. Without this filter the loop "successfully deleted" the same
+    # comment id once per round, four rounds running, and the count never
+    # dropped.
     comment_ids="$(printf '%s' "$comments" | \
-      jq -r '.[] | select(.authorType != "system") | .id')"
+      jq -r '.[] | select(.authorType != "system" and .deletedAt == null) | .id')"
     # Decide from THIS round's listing, before deleting anything. Computing it
     # after the delete loop reads a clobbered $LIVE_RESPONSE_BODY — the loop
     # issues its own key-create, comment-delete and key-revoke calls, so the
@@ -473,13 +480,13 @@ delete_test_issue_comments() {
     # residual of -1 (the not-an-array sentinel) and a failure that blamed the
     # comments instead of the check.
     residual="$(printf '%s' "$comments" | \
-      jq -r '[.[] | select(.authorType != "system")] | length')"
+      jq -r '[.[] | select(.authorType != "system" and .deletedAt == null)] | length')"
     if [ "$residual" = 0 ]; then
       ok "verify test issue comments removed $issue"
       break
     fi
     if [ "$issue_rounds" -ge 5 ]; then
-      bad "verify test issue comments removed $issue ($residual agent-authored comment(s) survived $((issue_rounds - 1)) delete rounds)"
+      bad "verify test issue comments removed $issue ($residual live agent-authored comment(s) survived $((issue_rounds - 1)) delete rounds)"
       cleanup_status=0
       break
     fi
