@@ -182,9 +182,21 @@ buzz)
   ;;
 
 paperclip)
+  # Count .sql only. The directory also holds drizzle's meta/ snapshots, so an
+  # unfiltered count reads high (18 "added" for 11 actual migrations) and the
+  # number is used for judgement.
   added="$(git -C "$UP" diff --name-status "$OLD..$TAG" -- packages/db/src/migrations/ 2>/dev/null | \
-    awk '$1 == "A"' | wc -l | tr -d ' ')"
+    awk '$1 == "A" && $2 ~ /\.sql$/' | wc -l | tr -d ' ')"
   note "migrations added: $added (applied automatically on boot — the container is non-TTY)"
+  # A modified .sql that has already been applied cannot be re-applied: drizzle
+  # keys the journal by hash, so the change reaches no existing database and the
+  # schema silently diverges between a fresh install and this one.
+  pcedited="$(git -C "$UP" diff --name-status "$OLD..$TAG" -- packages/db/src/migrations/ 2>/dev/null | \
+    awk '$1 != "A" && $2 ~ /\.sql$/ {print $2}')"
+  if [ -n "$pcedited" ]; then
+    finding "existing migration .sql files were MODIFIED — already-applied databases will never see the change:"
+    printf '%s\n' "$pcedited" | sed 's/^/      /'
+  fi
   drops="$(git -C "$UP" diff "$OLD..$TAG" -- packages/db/src/migrations/ 2>/dev/null | \
     grep -ciE '^\+.*(DROP TABLE|DROP COLUMN)' || true)"
   if [ "${drops:-0}" != 0 ]; then
