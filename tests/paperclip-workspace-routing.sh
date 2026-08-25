@@ -423,7 +423,7 @@ cancel_test_issues_for_cleanup() {
 }
 delete_test_issue_comments() {
   local issue comments comment_ids comment_id cleanup_status=1 cleanup_agent \
-    cleanup_key cleanup_key_id key_name comment_deleted
+    cleanup_key cleanup_key_id key_name comment_deleted system_comment_count residual
   for issue in $LIVE_PROJECT_ISSUE_IDS; do
     if ! live_mutation GET "/issues/$issue/comments"; then
       bad "list comments for test issue $issue (HTTP $LIVE_RESPONSE_STATUS)"
@@ -490,11 +490,32 @@ delete_test_issue_comments() {
     done <<EOF
 $comment_ids
 EOF
-    if live_mutation GET "/issues/$issue/comments" &&
-      [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r 'if type == "array" then length else -1 end')" = 0 ]; then
+    # Counts AGENT-authored comments, not all of them. The loop above
+    # deliberately leaves Paperclip's own `authorType: "system"` notices — they
+    # have no owning agent, so no agent key can delete them — and asserting an
+    # empty list here would fail for rows the test never created and cannot
+    # remove. They go away with the issue.
+    #
+    # Polled, because the list endpoint lags its own DELETE. The discriminator
+    # was exact: issues where nothing was deleted passed on the first read,
+    # while every issue that had just had a comment deleted failed here — and
+    # the same GET returned 0 moments later. A single read measures replication
+    # timing, not cleanup.
+    residual=-1
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if live_mutation GET "/issues/$issue/comments"; then
+        residual="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '
+          if type == "array"
+          then [.[] | select(.authorType != "system")] | length
+          else -1 end')"
+        [ "$residual" = 0 ] && break
+      fi
+      sleep 1
+    done
+    if [ "$residual" = 0 ]; then
       ok "verify test issue comments removed $issue"
     else
-      bad "verify test issue comments removed $issue"
+      bad "verify test issue comments removed $issue ($residual agent-authored comment(s) still listed after 10s; last HTTP $LIVE_RESPONSE_STATUS)"
       cleanup_status=0
     fi
   done
