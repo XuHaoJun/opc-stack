@@ -11,6 +11,14 @@
 #      the exact tenancy ids the hermes memory_tencentdb plugin writes under
 #      (team=opc / agent=agt-hermes-front-door), so the Memory Hub panel can
 #      render the data plane.
+#      Applied as a 3-hunk PATCH, never as a whole-file copy. A frozen copy
+#      of this file silently reverted upstream's own additions on every tag
+#      bump: at v2.0.1 it would have removed `userCreateWithKeySchema` (the
+#      route map still binds it, and `bind()` derefs lazily, so the gateway
+#      boots, /health is green, and only `/v3/meta/user/create-with-key`
+#      500s when called) and dropped `fixedAssetListWithDetail.asset_types`
+#      (zod strips unknown keys, so the filter just stops filtering). A
+#      patch fails the BUILD instead.
 #   2. opc-tencentdb-provision.sh — idempotent meta-plane bootstrap (team +
 #      agent + admin membership) used by the tencentdb-bootstrap one-shot.
 # ──────────────────────────────────────────────────────────────────────
@@ -34,6 +42,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         python3 \
         make \
         g++ \
+        patch \
         ca-certificates
 
 WORKDIR /build
@@ -99,10 +108,20 @@ RUN --mount=type=cache,id=npm-cache,target=/root/.npm \
 # 注意: .dockerignore 已排除 node_modules/.git/__tests__/docs 等
 COPY . .
 
-# OPC overlay: patched v3 meta schemas (explicit team_id/agent_id on
-# team/create + agent/create). Runtime executes TS directly via tsx, so
-# overlaying the source file is sufficient — no build step needed.
-COPY opc/src/metadata/router/v3-meta-schemas.ts src/metadata/router/v3-meta-schemas.ts
+# OPC overlay: explicit team_id/agent_id on team/create + agent/create.
+# Runtime executes TS directly via tsx, so patching the source is enough —
+# no build step needed.
+#
+# --fuzz=0 is the point of this layer: it refuses to guess. If an upstream tag
+# edits the context around either schema, the build stops here with
+# "Hunk #N FAILED" instead of producing an image that boots green and answers
+# one route with a 500. Regenerate the patch against the new tag, re-review
+# the two added lines, and rebuild.
+COPY opc/patches/v3-meta-schemas.patch /tmp/v3-meta-schemas.patch
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/v3-meta-schemas.patch \
+    && rm -f /tmp/v3-meta-schemas.patch \
+    && grep -q 'OPC overlay: optional explicit team_id' src/metadata/router/v3-meta-schemas.ts \
+    && grep -q 'OPC overlay: optional explicit agent_id' src/metadata/router/v3-meta-schemas.ts
 
 # 保留原始 package.json（COPY . 会覆盖 patch 后的版本，所以无需 git checkout）
 # 注: .git 已被 .dockerignore 排除，原来的 git checkout 命令实际上总是失败的

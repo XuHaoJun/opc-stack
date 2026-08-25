@@ -222,8 +222,13 @@ ENTRYPOINT ["/usr/local/bin/buzz-entrypoint.sh"]
 CMD ["/usr/local/bin/buzz-relay"]
 
 # ─── Stage 7: Buzz front door (buzz-acp + Hermes ACP) ───────────────────────
-# Hermes Agent CLI installed from the upstream release tag (v2026.8.13 = 0.20.1;
-# PyPI still lags at 0.19.0).
+# Hermes Agent CLI installed from the upstream release tag on the git clone
+# below — that line is the single source of truth, and scripts/upgrade.sh
+# rewrites it. Do NOT repeat the version in this comment: the sed only touches
+# the clone line, so a version written here is guaranteed to drift (it sat at
+# v2026.8.13 while the clone had moved to v2026.8.19).
+# Installed from git rather than PyPI because the published hermes-agent
+# package lags the release tags.
 FROM opc-relay AS opc-frontdoor
 
 RUN apt-get update \

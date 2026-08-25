@@ -5,6 +5,27 @@
 # only durable work plane) and model = OpenCode Go, then execs buzz-acp.
 set -eu
 
+# ── config schema version ────────────────────────────────────────────────
+# Two constants, deliberately NOT one. Conflating them is how the seeded value
+# silently fell four schema versions behind upstream.
+#
+# OPC_CONFIG_VERSION is what we stamp on a config.yaml WE are writing now. It
+# must equal upstream's DEFAULT_CONFIG["_config_version"], because the template
+# below is maintained against the current schema. scripts/prepare.sh refuses to
+# build when the two disagree, and the message names the ladder steps to read
+# before bumping it — the review is the point: hermes's migrations rewrite this
+# file in place, and one of them once removed agent.system_prompt from the
+# front door's config while everything stayed green for 27 hours.
+#
+# OPC_CONFIG_VERSION_LEGACY is a FROZEN historical constant: the upstream
+# default on 2026-08-17, when stamping was introduced. It is only ever applied
+# to a pre-existing config.yaml that carries no version at all, so that such a
+# file rejoins the ladder at the rung it was actually written for. Bumping it
+# would assert that an old file is current and skip every migration it still
+# needs. Do not touch it.
+OPC_CONFIG_VERSION=38
+OPC_CONFIG_VERSION_LEGACY=34
+
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
@@ -181,7 +202,7 @@ OPC_FRONTDOOR_PROMPT="You are a conversational chat assistant in the Buzz worksp
 if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<YAML
-_config_version: 34
+_config_version: ${OPC_CONFIG_VERSION}
 agent:
   disabled_toolsets:
     - kanban
@@ -248,8 +269,8 @@ PYEOF
     # Pre-s12 configs (no _config_version) trip hermes's "predates version
     # 12" migration refusal on every boot; stamp the current version once.
     if ! grep -q "^_config_version:" "$HH/config.yaml"; then
-        sed -i "1i _config_version: 34" "$HH/config.yaml"
-        echo "[frontdoor] stamped _config_version: 34 onto existing $HH/config.yaml"
+        sed -i "1i _config_version: $OPC_CONFIG_VERSION_LEGACY" "$HH/config.yaml"
+        echo "[frontdoor] stamped _config_version: $OPC_CONFIG_VERSION_LEGACY onto existing $HH/config.yaml"
     fi
 fi
 

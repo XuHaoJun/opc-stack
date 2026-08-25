@@ -30,12 +30,16 @@ dependents; `docker compose stop` also stops dependencies):
 
 ## 2. Tag schemes & delta classification
 
-| Component | Scheme | Example (current) | Classification |
-|---|---|---|---|
-| buzz | `desktop-vX.Y.Z` | `desktop-v0.5.14` | strip `desktop-v` → semver |
-| hermes | `vYYYY.M.D` (date) | `v2026.8.16` (= v0.20.2) | date-based; check embedded version (`pyproject.toml` at tag) |
-| paperclip | `canary/vYYYY.MDD.N-canary.K` or stable `v…` | `canary/v2026.722.1-canary.0` | canary = pre-release |
-| tencentdb | `vX.Y.Z[-beta.N]` | `v2.0.0` | semver + prerelease |
+| Component | Scheme | Classification |
+|---|---|---|
+| buzz | `desktop-vX.Y.Z` | strip `desktop-v` → semver |
+| hermes | `vYYYY.M.D` (date) | date-based; check embedded version (`pyproject.toml` at tag) |
+| paperclip | `vYYYY.MDD.N` stable, `canary/…-canary.K` prerelease | canary = pre-release |
+| tencentdb | `vX.Y.Z[-beta.N]` | semver + prerelease |
+
+Current pins are NOT listed here. Every version this table used to carry went
+stale. `scripts/outdated.sh` derives them (and `scripts/upgrade-preflight.sh`
+reports the specific old→new delta).
 
 Rules: patch bump → LOW risk. Minor bump → MEDIUM. Major bump, unparseable
 scheme, date-based with unknown embedded version, or prerelease target
@@ -103,11 +107,35 @@ memorized — this table is the starting hint list.
   the paperclip container).
 - **tencentdb** — upstream `MemoryKnowledge/Dockerfile` is broken; hub uses
   `deploy/panel-knowledge-combined` (verify still present at new tag).
-  Core sqlite migrates online, one-way (ADD COLUMN / FTS rebuild) — backup
-  is mandatory. Proxy session-binding key format has changed between
-  versions before (spaceId:userId:agentSource:sessionId → spaceId:sessionId);
-  old bindings orphaned → clients re-run sessionInit once. `TDAI_*` env
-  interface has been byte-identical across 2.0.x so far — verify, don't assume.
+  Core sqlite migrates online and one-way (`ALTER TABLE ADD COLUMN`, and an FTS5
+  DROP+rebuild because FTS5 cannot add columns) — backup is mandatory. Three
+  corrections to what this file used to claim, all measured 2026-08-25:
+  * **There is no version stamp anywhere.** `PRAGMA user_version` is 0 on
+    `vectors.db`, `metadata.db` and `knowledge.db`; "which schema is this"
+    is decided by probing for columns. A wrong-version boot is undetectable,
+    which is why the volume backup is the only real guard.
+  * **`metadata.db` migrates LAZILY**, on the first `/v3/meta/*` request
+    (`server.ts:413` → `factory.ts:255` → `sqlite-adapter.ts:96-106`), not at
+    boot. Nothing has migrated until something calls it; our
+    `tencentdb-bootstrap` one-shot is what triggers it.
+  * **Migration failure is a silent degraded no-op**, not a crash
+    (`sqlite.ts:518-527` sets `degraded = true`; `store-pool.ts:216-218` only
+    warns). The symptom is "memories stop being written and the panel empties",
+    never a container that fails to start.
+  The proxy session-binding key format change
+  (`spaceId:userId:agentSource:sessionId` → `spaceId:sessionId`) is **ahead of
+  us, not behind us** — it lands in `v2.0.1`, with no dual-read and no backfill.
+  Orphaned bindings live under the `nottl/` prefix, which the sweeper never
+  scans (`storage/factory.ts:296-311`), so they are permanent litter. Clients
+  re-run `sessionInit` once. `scripts/upgrade-preflight.sh tencentdb <tag>`
+  diffs `binding-repo.ts` + `key-utils.ts` and reports this.
+  * The `v3-meta-schemas.ts` OPC overlay is applied as a **patch**, not a file
+    copy, precisely so an upstream edit stops the build. A frozen copy would
+    revert upstream's own additions silently — at `v2.0.1` it would have
+    removed `userCreateWithKeySchema` while the router still bound it (lazy
+    deref → one route 500s, 53 others fine) and dropped
+    `fixedAssetListWithDetail.asset_types` (zod strips unknown keys, so the
+    filter merely stops filtering).
 - **nix (all)** — `/nix` volumes seeded at boot + self-heal; add tools with
   `nix profile add` (deprecated `install` clobbers the profile).
 
@@ -128,8 +156,15 @@ memorized — this table is the starting hint list.
 
 ## 6. Post-upgrade verification (per component)
 
-All: `tests/connectivity.sh` (container health + HTTP probes +
-frontdoor→relay link) + `docker compose logs --since 10m <svc>` scanned for
+`scripts/upgrade.sh` runs **`tests/migrations.sh <proj>`** itself and fails the
+upgrade if it does not pass — that gate is the one that asks whether the
+migration actually happened, rather than whether the container is up. Every
+silent upgrade failure this stack has hit left `connectivity.sh` green, so
+health is necessary but proves nothing on its own.
+
+All: `tests/migrations.sh <proj>` (run automatically) + `tests/connectivity.sh`
+(container health + HTTP probes + frontdoor→relay link) +
+`docker compose logs --since 10m <svc>` scanned for
 `error|panic|fatal|migration`.
 
 | Component | Data-level smoke |
@@ -140,6 +175,19 @@ frontdoor→relay link) + `docker compose logs --since 10m <svc>` scanned for
 | tencentdb | core `/health`; panel login with `TENCENTDB_ADMIN_USER_KEY`; existing memories/skills/wiki visible; knowledge `/docs`; proxy `/`; one L0 write + recall via proxy; session re-bind if binding format changed |
 
 ## 7. Rollback
+
+**The three components fail differently on a downgrade, and only one of them
+tells you.** This is why the volume backup is unconditional rather than
+risk-gated:
+
+| Component | What happens if you just put the old image back |
+|---|---|
+| buzz | **Hard fail, loudly.** sqlx's `Migrator` runs with `ignore_missing = false` and validates applied migrations at startup; a row it does not recognise is `VersionMissing` and the relay exits → crash loop. You cannot boot the old version against a migrated DB. Restore `buzz-pgdata` first. |
+| paperclip | **Silent.** Drizzle ships no down migrations and computes pending as `available − applied`, so a downgrade reports `upToDate` and the old server runs against the newer schema. If the range contained a destructive migration (e.g. `0196_drop_cloud_upstream_tables.sql`), the old code queries tables that no longer exist. Restore `paperclip-data` (or one of the hourly dumps under `instances/default/data/backups`). |
+| tencentdb | **Undetectable.** No version stamp exists (§4), so nothing compares anything. The old binary opens the newer DB and behaves as if it were fine. Restore all three volumes. |
+| hermes | config.yaml has already been migrated in place by the boot hook; the old code reads a newer `_config_version`. Restore `hermes-data`, `hermes-profiles` and `frontdoor-hermes` together. |
+
+
 Restore = checkout old tag and matching frontdoor pin → replace all Hermes
 related volume contents from backup → rebuild `frontdoor` and `hermes` →
 recreate `frontdoor hermes hermes-dashboard` → re-verify. The backup tar is a
