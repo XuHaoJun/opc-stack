@@ -423,12 +423,22 @@ cancel_test_issues_for_cleanup() {
 }
 delete_test_issue_comments() {
   local issue comments comment_ids comment_id cleanup_status=1 cleanup_agent \
-    cleanup_key cleanup_key_id key_name comment_deleted system_comment_count residual
+    cleanup_key cleanup_key_id key_name comment_deleted system_comment_count residual \
+    issue_rounds
   for issue in $LIVE_PROJECT_ISSUE_IDS; do
+    # Re-enumerate, do not enumerate once. The test's own agent runs are still
+    # draining during teardown and file NEW comments after a single listing has
+    # been taken — the loop then deletes what it saw, and the check afterwards
+    # finds a comment it never had a chance to delete. Waiting does not help
+    # (10s of polling did not); the list has to be taken again. Rounds are
+    # bounded so a genuinely undeletable comment still fails loudly.
+    issue_rounds=0
+    while :; do
+    issue_rounds=$((issue_rounds + 1))
     if ! live_mutation GET "/issues/$issue/comments"; then
       bad "list comments for test issue $issue (HTTP $LIVE_RESPONSE_STATUS)"
       cleanup_status=0
-      continue
+      break
     fi
     comments="$LIVE_RESPONSE_BODY"
     if ! printf '%s' "$comments" | jq -e '
@@ -437,7 +447,7 @@ delete_test_issue_comments() {
     ' >/dev/null 2>&1; then
       bad "list comments for test issue $issue (response is not a valid array)"
       cleanup_status=0
-      continue
+      break
     fi
     # Paperclip injects its own comments onto these issues while the test runs
     # — the disposition watchdog files an `authorType: "system"` notice
@@ -451,11 +461,28 @@ delete_test_issue_comments() {
     # Skip them; still delete (and still assert on) every agent-authored comment.
     system_comment_count="$(printf '%s' "$comments" | \
       jq -r '[.[] | select(.authorType == "system")] | length')"
-    if [ "${system_comment_count:-0}" != 0 ]; then
+    if [ "${system_comment_count:-0}" != 0 ] && [ "$issue_rounds" = 1 ]; then
       ok "test issue $issue: $system_comment_count Paperclip system comment(s) left to the issue"
     fi
     comment_ids="$(printf '%s' "$comments" | \
       jq -r '.[] | select(.authorType != "system") | .id')"
+    # Decide from THIS round's listing, before deleting anything. Computing it
+    # after the delete loop reads a clobbered $LIVE_RESPONSE_BODY — the loop
+    # issues its own key-create, comment-delete and key-revoke calls, so the
+    # variable holds the last of those, not a comment array. That produced a
+    # residual of -1 (the not-an-array sentinel) and a failure that blamed the
+    # comments instead of the check.
+    residual="$(printf '%s' "$comments" | \
+      jq -r '[.[] | select(.authorType != "system")] | length')"
+    if [ "$residual" = 0 ]; then
+      ok "verify test issue comments removed $issue"
+      break
+    fi
+    if [ "$issue_rounds" -ge 5 ]; then
+      bad "verify test issue comments removed $issue ($residual agent-authored comment(s) survived $((issue_rounds - 1)) delete rounds)"
+      cleanup_status=0
+      break
+    fi
     while IFS= read -r comment_id; do
       [ -n "$comment_id" ] || continue
       comment_deleted=0
@@ -490,34 +517,8 @@ delete_test_issue_comments() {
     done <<EOF
 $comment_ids
 EOF
-    # Counts AGENT-authored comments, not all of them. The loop above
-    # deliberately leaves Paperclip's own `authorType: "system"` notices — they
-    # have no owning agent, so no agent key can delete them — and asserting an
-    # empty list here would fail for rows the test never created and cannot
-    # remove. They go away with the issue.
-    #
-    # Polled, because the list endpoint lags its own DELETE. The discriminator
-    # was exact: issues where nothing was deleted passed on the first read,
-    # while every issue that had just had a comment deleted failed here — and
-    # the same GET returned 0 moments later. A single read measures replication
-    # timing, not cleanup.
-    residual=-1
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      if live_mutation GET "/issues/$issue/comments"; then
-        residual="$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '
-          if type == "array"
-          then [.[] | select(.authorType != "system")] | length
-          else -1 end')"
-        [ "$residual" = 0 ] && break
-      fi
-      sleep 1
+    sleep 2
     done
-    if [ "$residual" = 0 ]; then
-      ok "verify test issue comments removed $issue"
-    else
-      bad "verify test issue comments removed $issue ($residual agent-authored comment(s) still listed after 10s; last HTTP $LIVE_RESPONSE_STATUS)"
-      cleanup_status=0
-    fi
   done
   [ "$cleanup_status" -eq 1 ]
 }
