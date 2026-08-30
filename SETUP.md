@@ -353,7 +353,7 @@ Each boot self-heals: if the profile ever loses the preinstalled tools, the
 entrypoint re-adds them automatically.
 
 `omp` (Oh My Pi) — the Paperclip executor agent runtime — is mise-managed:
-the entrypoint installs the prebuilt `github:can1357/oh-my-pi@17.4.0` into each
+the entrypoint installs the prebuilt `github:can1357/oh-my-pi@18.0.11` into each
 `*-mise` volume on first boot (and re-adds it if missing). The nix derivation
 can't build in image environments (bun EPERM), so omp is not part of the nix
 seed. It runs as the `Fullstack Engineer` agent via the claude_local adapter
@@ -366,7 +366,7 @@ containers (each has its own `*-mise` volume):
 
 ```bash
 for c in buzz frontdoor hermes paperclip; do
-  docker compose exec -u root "$c" mise use -g github:can1357/oh-my-pi@17.4.0
+  docker compose exec -u root "$c" mise use -g github:can1357/oh-my-pi@18.0.11
 done
 for c in buzz frontdoor hermes paperclip; do
   echo -n "$c: "; docker compose exec -T "$c" omp --version
