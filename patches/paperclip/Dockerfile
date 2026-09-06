@@ -38,7 +38,7 @@ FROM ${NIX_SEED_IMAGE} AS nix-seed
 # RustFS provisioning client. This exact build is covered by tests/devenv-s3.sh.
 FROM minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 AS minio-client
 
-FROM node:lts-trixie-slim AS base
+FROM node:24-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
@@ -64,6 +64,7 @@ COPY packages/adapter-utils/package.json packages/adapter-utils/
 COPY packages/google-sheets-mcp-server/package.json packages/google-sheets-mcp-server/
 COPY packages/kv-demo-mcp-server/package.json packages/kv-demo-mcp-server/
 COPY packages/mcp-server/package.json packages/mcp-server/
+COPY packages/paperclip-runner/package.json packages/paperclip-runner/
 COPY packages/skills-catalog/package.json packages/skills-catalog/
 COPY packages/tailscale-https-broker/package.json packages/tailscale-https-broker/
 COPY packages/teams-catalog/package.json packages/teams-catalog/
@@ -73,6 +74,7 @@ COPY packages/adapters/cursor-cloud/package.json packages/adapters/cursor-cloud/
 COPY packages/adapters/cursor-local/package.json packages/adapters/cursor-local/
 COPY packages/adapters/gemini-local/package.json packages/adapters/gemini-local/
 COPY packages/adapters/grok-local/package.json packages/adapters/grok-local/
+COPY packages/adapters/kimi-local/package.json packages/adapters/kimi-local/
 COPY packages/adapters/hermes/package.json packages/adapters/hermes/
 COPY packages/adapters/hermes-gateway/package.json packages/adapters/hermes-gateway/
 COPY packages/adapters/openclaw-gateway/package.json packages/adapters/openclaw-gateway/
@@ -90,6 +92,9 @@ RUN pnpm install --frozen-lockfile
 
 FROM base AS build
 WORKDIR /app
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends cargo rustc \
+  && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app /app
 # opc/ (OPC overlay, synced from patches/) is copied explicitly in the
 # production stage; excluding it keeps entrypoint/script edits from
@@ -97,7 +102,12 @@ COPY --from=deps /app /app
 COPY --exclude=opc . .
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
+# The server build vendors the Paperclip runner, whose release build includes
+# a locked Rust binary.
+ARG PAPERCLIP_BUILD_COMMIT=""
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN pnpm --filter @paperclipai/server build
+RUN rm -rf packages/paperclip-runner/runner/target
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 
 FROM base AS production
@@ -118,7 +128,7 @@ WORKDIR /app
 # ordered the other way this layer (four CLI toolchains + apt, the most
 # expensive one in the file) could never hit the cache.
 RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
-  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
+  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq podman-remote \
   && rm -rf /var/lib/apt/lists/* \
