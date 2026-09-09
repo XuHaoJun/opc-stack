@@ -352,6 +352,66 @@ docker compose exec -u root paperclip nix profile add nixpkgs#<tool>
 Each boot self-heals: if the profile ever loses the preinstalled tools, the
 entrypoint re-adds them automatically.
 
+### Checking and upgrading the Nix seed
+
+Use the separate Nix report rather than `scripts/outdated.sh`:
+
+```bash
+scripts/nix-outdated.sh       # inspect the live nix-daemon and root profile
+scripts/nix-outdated.sh --skip-runtime  # source pins only; no Docker access
+```
+
+The report is read-only. It checks the Nix installer version, the pinned
+nixpkgs revision against `NIXPKGS_CHANNEL` (default `nixos-unstable`), that the
+Dockerfile and daemon declarations agree, and—unless skipped—that the live
+root system profile uses the declared seed revision. It intentionally does
+not inspect or change the agent-owned profile behind `nix-add`.
+
+In live mode the table also has one row per declared Nix seed attribute
+(`ripgrep`, `jq`, `fd`, `htop`, `bat`, `just`, `mise`, `gh`, `procps`,
+`iproute2`, `lsof`, `postgresql`, and `valkey`). `current` is evaluated from
+the revision recorded by the live root profile; `latest` is evaluated from
+the candidate channel revision. A `newer` package row means that the channel
+would change that package, while `-` means its version is unchanged. The
+separate `nix` and `live-nix` rows remain the Nix executable check; `omp` is
+not a Nix seed package and is reported by the mise-managed runtime procedure
+below. Package evaluation failures are reported as `?` and exit `2`, never as
+a clean result. `--skip-runtime` prints package rows as `skipped`.
+
+Exit status is `0` for a current, aligned report, `1` when a newer input or
+runtime/seed drift needs action, and `2` when the report is incomplete or the
+two seed declarations disagree. The default check requires the stack to be up;
+use `--skip-runtime` before startup.
+
+The intended upgrade order is runtime first, seed second:
+
+1. Run `scripts/nix-outdated.sh` and choose a nixpkgs revision from its
+   report.
+2. Replace `<tested-revision>` in the printed root-profile migration block,
+   then run that block as root in `nix-daemon`. It removes and re-adds only the
+   declared seed tools; packages installed through `nix-add` are untouched.
+3. Run the normal stack verification, especially `tests/connectivity.sh` and
+   the tool/runtime smoke checks relevant to the change.
+4. After the runtime is known good, copy the tested nixpkgs revision into both
+   `patches/nix-seed/Dockerfile` and
+   `patches/nix-seed/opc-nix-daemon.sh`, then rebuild the seed and service
+   images.
+
+Rebuilding does not rewrite an existing `opc-nix` volume, which is why the
+live profile upgrade comes first. The daemon's boot repair is
+install-if-missing, not version reconciliation. If the re-add fails, restore
+the previous profile generation before retrying:
+
+```bash
+docker compose exec -u root nix-daemon \
+  /nix/var/nix/profiles/default/bin/nix profile rollback \
+  --profile /nix/var/nix/profiles/per-user/root/profile
+```
+
+Changing the Nix executable version itself is separate from changing the
+nixpkgs packages: it is installed into the seed image and copied into the
+volume, so review the `nix` and `live-nix` rows independently.
+
 `omp` (Oh My Pi) — the Paperclip executor agent runtime — is mise-managed:
 the entrypoint installs the prebuilt `github:can1357/oh-my-pi@18.0.11` into each
 `*-mise` volume on first boot (and re-adds it if missing). The nix derivation

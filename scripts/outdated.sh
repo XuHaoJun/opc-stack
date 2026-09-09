@@ -44,8 +44,9 @@
 # `fetch --depth 1 --no-tags refs/tags/<tag>` pulls that one commit's objects;
 # if even that fails the date degrades to `?` and the rest of the row stands.
 #
-# Scope is upstream/ only. The stack's other pins (nix, nixpkgs, RustFS,
-# rabbitmq, mc, omp) live in Dockerfiles with no tag namespace to sort.
+# Scope is upstream/ only. The stack's other pins (Nix, nixpkgs, RustFS,
+# rabbitmq, mc, omp) have no Git tag namespace; Nix/image/runtime pins are
+# checked by the separate scripts/nix-outdated.sh report.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

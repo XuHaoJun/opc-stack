@@ -32,6 +32,14 @@ cnt() { # cnt <call-log> <needle> — number of lines containing needle
     grep -cF -- "$2" "$1" || true
 }
 
+clear_registration_markers() {
+    rm -f /tmp/reg-agent-meta /tmp/reg-agent-dir \
+        /tmp/reg-all-agent /tmp/reg-my-agent
+}
+
+clear_registration_markers
+
+
 make_fake_bin() { # make_fake_bin <dir> <case> — fake curl/buzz/jq/sleep
     dir="$1"; case="$2"
     cat > "$dir/curl" <<'FAKE_EOF'
@@ -121,6 +129,8 @@ n_relay="$(cnt "$dir/calls" "$RELAY_PREFIX")"
 n_buzz="$(cnt "$dir/calls" "buzz ")"
 if [ "$n_relay" = "$n_buzz" ]; then pass "happy: every buzz call carries relay+key prefix ($n_relay)"; else fail "happy: $n_relay of $n_buzz buzz calls carry relay+key prefix"; fi
 rm -rf "$dir"
+clear_registration_markers
+
 
 # ── retry: kind 10100 fails once, kind 0 succeeds; next loop only 10100 ──────
 dir="$(mktemp -d)"
@@ -139,6 +149,7 @@ if [ "$(cnt "$dir/calls" "$POLICY_CMD")" = 2 ]; then pass "retry: kind 10100 ret
 if [ -f "$dir/policy-ok" ]; then pass "retry: kind 10100 eventually succeeded"; else fail "retry: kind 10100 never succeeded"; fi
 if grep -q "kind 10100 agent directory profile published" "$dir/out"; then pass "retry: success logged after retry"; else fail "retry: missing success log: $(grep 'kind 10100' "$dir/out" || true)"; fi
 rm -rf "$dir"
+clear_registration_markers
 
 echo
 echo "result: ${PASS} pass, ${FAIL} fail"
