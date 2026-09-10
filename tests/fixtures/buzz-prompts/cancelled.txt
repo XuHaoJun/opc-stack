@@ -1,0 +1,13 @@
+<context>
+Channel: #ops (#abc123)
+</context>
+%%BLOCK%%
+<buzz-event-cancelled type="cancelled">
+Event ID: evt-1
+Channel: #ops (#abc123)
+Kind: 1
+From: noah (npub: npub1abc, hex: aabbcc)
+Time: 2026-09-10T00:00:00Z
+Content: 我偏好 pnpm
+Tags: []
+</buzz-event-cancelled>

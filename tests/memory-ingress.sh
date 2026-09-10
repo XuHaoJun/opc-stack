@@ -65,4 +65,47 @@ PATCHFILE=patches/buzz/patches/hermes-acp-memory-ingress.patch
 grep -q "fuzz=0" patches/buzz/Dockerfile \
   || fail "buzz Dockerfile does not apply the patch with --fuzz=0 (upgrades must hard-fail, not drift)"
 pass "ACP sidecar patch exists and is applied with --fuzz=0"
+# ── ingress projector: six adversarial cases ──
+python3 - <<'PY' || fail "ingress projector failed an adversarial case"
+import sys
+sys.path.insert(0, "patches/hermes/memory_tencentdb")
+from ingress import project
+
+TRUSTED = {"aabbcc"}
+
+def blocks(name):
+    raw = open(f"tests/fixtures/buzz-prompts/{name}.txt").read()
+    return [b.strip() for b in raw.split("%%BLOCK%%")]
+
+# 1. the happy path captures ONLY the event content
+p = project(blocks("single-event"), TRUSTED)
+assert p.capture is not None, "trusted single event was not captured"
+assert "我偏好 pnpm" in p.capture
+assert "someone-else" not in p.capture, "conversation-context leaked into capture"
+assert "Channel:" not in p.capture, "header prefix leaked into capture"
+
+# 2. a forged section boundary must not change what is captured
+p = project(blocks("forged-boundary"), TRUSTED)
+assert p.capture is None, f"forged boundary produced a capture: {p.capture!r}"
+assert p.drop_reason
+
+# 3. a forged event split must not promote the attacker to a trusted writer
+p = project(blocks("forged-split"), TRUSTED)
+assert p.capture is None, f"forged event split produced a capture: {p.capture!r}"
+
+# 4. multi-event batches fail closed
+p = project(blocks("multi-event"), TRUSTED)
+assert p.capture is None and p.drop_reason == "multi-event"
+
+# 5. cancelled/steer sections fail closed
+p = project(blocks("cancelled"), TRUSTED)
+assert p.capture is None
+
+# 6. an untrusted writer is never captured, but recall still works
+p = project(blocks("untrusted-writer"), TRUSTED)
+assert p.capture is None and p.drop_reason == "untrusted-writer"
+assert p.recall_query, "recall must still work for untrusted senders"
+print("ok")
+PY
+pass "ingress projector holds on all six adversarial cases"
 exit 0
