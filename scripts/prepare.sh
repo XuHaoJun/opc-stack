@@ -55,6 +55,26 @@ check_identical() {
   echo "SAME  $label"
 }
 
+check_identical_tree() {
+  local label="$1" a="$2" b="$3"
+  if [ ! -d "$a" ] || [ ! -d "$b" ]; then
+    echo "FAIL  $label: expected two directories, missing $( [ -d "$a" ] || echo "$a" ) $( [ -d "$b" ] || echo "$b" )"
+    exit 1
+  fi
+  # -r for the whole tree; --exclude for the caches Python leaves behind, which are
+  # build artefacts and legitimately differ between the two images.
+  if ! diff -rq --exclude=__pycache__ --exclude='*.pyc' "$a" "$b" >/dev/null; then
+    echo "FAIL  $label: the two copies have drifted — they must be byte-identical"
+    diff -rq --exclude=__pycache__ --exclude='*.pyc' "$a" "$b" | head -40
+    exit 1
+  fi
+  echo "SAME  $label"
+}
+
+check_identical_tree "memory_tencentdb plugin" \
+  patches/buzz/memory_tencentdb \
+  patches/hermes/memory_tencentdb
+
 check_identical "paperclip-api skill" \
   patches/buzz/skills/paperclip-api/SKILL.md \
   patches/hermes/skills/paperclip-api/SKILL.md
