@@ -1577,6 +1577,32 @@ image 已預期 `TDAI_GATEWAY_CONFIG=/data/config/tdai-gateway.yaml`
 hermes multiplex 的 provider key 隔離、1.3 的三次讀錯、以及 1.7 (推論正確地建立在
 一個從未被檢查的前提上)。
 
+#### 7.9 量測結果 (2026-09-10)
+
+Phase 0 雙 scope L1 抽取實驗（Task 2 首跑 + 重跑），gate 決策依據。完整證據見 `.superpowers/sdd/2026-09-10-frontdoor-memory-hardening/task-2-rerun-report.md`（首跑 inconclusive 經過見同目錄 `task-2-report.md`）。
+
+- 測試 scope：首跑 `agt-memtest-a`（control）/ `agt-memtest-b`（prompt 綁定 `mp-be2f7b12-…`）—— provider outage（core log 14× `LLM extraction failed`，兩 scope checkpoint 皆 `extracted=0`），判 inconclusive；重跑 `agt-memtest-c`（control，不綁 prompt）/ `agt-memtest-d`（L1 prompt `mp-a34367a4-4056-4d16-a102-6a543517d936` 綁定，`set apply → affected:1`），同一份 transcript 各 replay 10 turns，settle >180 s 後取 report。以下數字皆為重跑量測值（enumeration / checkpoint 合計，非 report 腳本 raw `preference` 查詢數——該查詢是 semantic vector search，有 score threshold，健康 L1 也會回 0，見 rerun concern 1）。
+- Provider 健康：core log `LLM extraction failed` 零行（`grep -c` = 0）；兩 session checkpoint 皆 `extracted=1` 後 `extracted=6`（合計 L1 7 筆），L2 incremental query 各 `returned 7 record(s)`。
+
+| # | 量測 | agt-memtest-c (control) | agt-memtest-d (prompt 綁定) |
+|---|---|---|---|
+| 1 | L1 item count（full enumeration，limit 20） | **7** | **7** |
+| 2 | by-type persona/instruction/episodic | **2/3/2** | **3/2/2**（同一 7 件事；Paperclip 條在 D 被標 persona、C 被標 instruction——classifier wobble，內容一致） |
+| 3 | persona 非空？ | **是**（1848 chars） | **是**（1973 chars） |
+| 4 | persona §3（交互與認知協議）substantive？ | **是**（3.1 + 3.2，4 bullets） | **是**（3.1 + 3.2，6 bullets） |
+
+- Persona 判斷：**D NOT materially worse than C**。Prompt 治理的層級（L1 recall）完全一致（7/7 相同事實，episodic 全覆蓋）；D persona 正文漏提 valkey/devenv 一事，但該 episode 在 D 的 L1 episodic 有完整記錄，且 D persona 更長、§3 更豐富——屬下游 LLM synthesis variance（L2 scene 切分亦不同：C 合併 1 block、D 拆 2），非 prompt 造成的 omission。
+- Caveat：n=1 per condition，D-vs-C persona 敘事差異無法歸因；且 fixture 幾乎全是 user speech（僅 `ok` / `?` / `/status` 類 AI-adjacent 行），本次只 bound 住 prompt 的 collateral omission damage（≈零），未 exercise 其 intended filtering（壓住 AI-conclusion 記憶）——後續若要更強主張，需換含 AI-conclusion-like user turn 的 fixture 重測。
+- Orphaned 狀態：`mp-be2f7b12-…`（首跑）與 `mp-a34367a4-…`（重跑）兩個 prompt 留在 prompt store、已 unbound；L0/L1 store rows（`chat_memory-opc-agt-memtest-*` / sessions `exp-agt-memtest-*`）無 delete path，殘留。
+
+**Gate 決策：PROCEED to Phase 2。** 規則原文：「B's L1 count within ~30% of A, and B's persona still has substantive content → PROCEED to Phase 2.」——實測 7 vs 7 identical（差異 0%，遠在 30% 內），且兩邊 §3 皆 substantive，條件滿足。Phase 1 不受 gate 影響，照常出貨。
+
+**Deferred 目標值（Tasks 6/7 消費）：本次數據不支持改動，維持今日行為：**
+- `MEMORY_TENCENTDB_RECALL_LIMIT` = **5**（keep today's；實驗量的是抽取相等性，未量 recall limit sizing）。
+- `MEMORY_TENCENTDB_RECALL_WINDOW_DAYS` = **0**（off；keep today's——單一使用者池子沒有要擠掉的舊記憶，見既有系統處理；實驗亦未量 staleness）。
+- `MEMORY_TENCENTDB_SNAPSHOT_TTL_SECONDS` = **3600**（keep today's；實驗未量 TTL/新鮮度驗收，見 7.9 第 4 條，留待 Task 6 量）。
+
+
 ### 7.10 明確的非目標
 
 | 非目標 | 為什麼 |
