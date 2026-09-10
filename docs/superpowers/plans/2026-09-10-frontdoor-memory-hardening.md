@@ -12,7 +12,7 @@
 
 ---
 
-## DECISION REQUIRED BEFORE PHASE 2
+## 已決：scientist lane 用 `full`（2026-09-10 確認）
 
 Round-2 brainstorming decided "scientist 套同一套" (same policy for the scientist
 profile). That decision predates the mechanism now specified, and the mechanism
@@ -29,16 +29,65 @@ So the ACP sidecar patch is needed in **one image only** (buzz), and if the proj
 fails closed in the gateway lane it will **silently delete the scientist's memory
 capture entirely**.
 
-**Assumption this plan proceeds on:** `MEMORY_TENCENTDB_CAPTURE_MODE` defaults to
-`projected` on the buzz/frontdoor container and `full` on the hermes gateway
-container, because the gateway lane has a single trusted prompt composer. This
-**narrows** the round-2 decision rather than reversing it: the scientist still gets
-identical provenance framing, identical recall changes, and identical detectors — only
-the ingress projection differs, because there is nothing there to project.
+**決定**：`MEMORY_TENCENTDB_CAPTURE_MODE` 在 buzz/frontdoor 容器是 `projected`,
+在 hermes gateway 容器是 `full`。理由是 gateway lane 只有一個受信任的 prompt 組裝者
+(paperclip dispatch), 而且**這台 stack 只有一個使用者** (2026-09-10 確認), 所以那條 lane
+根本沒有 multi-principal 風險。
 
-**If that is wrong**, the alternative is to leave the scientist on `full` explicitly
-with a recorded reason, or to build a second projector for gateway-shaped prompts
-(not specified, not scoped here). Confirm before Task 10.
+這是**收窄**而非推翻第二輪的「scientist 套同一套」: 專家仍然拿到完全相同的 provenance
+框定、相同的召回改動、相同的偵測器 —— 只有 ingress projection 不同, 因為那裡沒有東西
+可以投影。
+
+---
+
+## 既有系統的處理 (2026-09-10 決定)
+
+**幾乎全部靠 `docker compose up -d --build` 就生效, 不需要 migration script**
+(AGENTS.md 部署假設: 既有那台手動調整就好, 不為一台機器維護升級路徑):
+
+| 改動 | 怎麼生效 | 憑什麼 |
+|---|---|---|
+| plugin (Task 5,6,7,10,11,12) | rebuild + recreate | 兩個 entrypoint 每次開機無條件 `rm -rf` + `cp -r`, 註解原話「on every boot — image updates propagate into existing volumes」(`patches/buzz/frontdoor-entrypoint.sh:187-197`、`patches/hermes/hermes-entrypoint.sh:102-112`, 專家 profile 另在 `:588-590`) |
+| SOUL.md 規則 (Task 4) | rebuild + recreate | 同上機制, 每次開機從 image 覆蓋進 home |
+| hermes ACP patch (Task 9) | rebuild | build 時就烤進 image |
+| snapshot TTL 狀態 (Task 6) | 重啟 | per-process 記憶體, 重啟即歸零 |
+| ingress log 目錄 (Task 12) | 首次寫入 | 用到才建 |
+| `tdai-gateway.yaml` (Task 8) | recreate | 新 volume 是空的, seeder 是 write-if-absent |
+| `MEMORY_TRUSTED_WRITERS` | recreate | 預設取既有的 `BUZZ_ACP_AGENT_OWNER`, **無需手動編輯 `.env`** |
+
+**唯一不會自動處理的是既有的記憶池, 而決定是: grandfather, 什麼都不做。**
+
+理由: 這台 stack **只有一個使用者** (2026-09-10 確認)。`BUZZ_ACP_RESPOND_TO: anyone`
+是一個**未被實現**的曝險 —— 沒有第三方寫入過, 所以池子裡全是 operator 自己的話, 加上
+agent 對那些話下的結論。新的框定會誠實地把它們標成 `untrusted-reference`, 而
+grandfather 的代價只是一些 agent 自己寫的雜訊。
+
+**但要清楚知道 grandfather 的兩個後果**, 因為它們違反直覺:
+
+1. **「新 thread 用新方法」只對寫入端成立。** 閘是逐 turn 的, 所以重啟後每一筆 capture
+   都走新規則。但**召回不分 thread 也不分 session**: L1 搜尋刻意把 `session_id` 排除在
+   過濾條件外 (`v2-router.ts:1200-1208`), 而 L1/L2/L3 沒有 session 維度 (spec 1.2)。
+   所以全新的 thread 每一輪照樣被注入最多 5 筆舊制度的記憶 —— **舊內容會跟著進入每一個
+   新 thread, 不會留在舊 thread 裡。**
+2. **L3 persona 會自我延續。** `persona-generator.ts:95-104` 把現有 `persona.md` 讀回去
+   當下一輪生成的**輸入**, 所以舊制度的結論會一直被帶下去。時間窗碰不到這塊
+   (persona 不受時間過濾)。
+
+**明確排除的兩個做法**:
+
+- **時間窗當軟性重置** —— 曾考慮用 `MEMORY_TENCENTDB_RECALL_WINDOW_DAYS` 設成比池子年齡短,
+  把舊記憶擠出自動召回路徑。**不做**: 單一使用者的池子裡沒有需要擠掉的東西, 而它會連帶
+  丟掉真正有用的舊偏好。Task 7 的旋鈕**保留**但預設 `0` (關閉) —— 它是對 staleness 的
+  誠實答案, 不是重置機制。
+- **換新的 `agent_id` 硬重置** —— 只有在池子真的含第三方寫入時才值得它的成本
+  (要改 `opc-tencentdb-provision.sh` 多一個 id, 且丟掉全部累積的偏好)。
+
+**寫入政策不具追溯性**: 它只管未來的寫入, 既不偵測也不移除池子裡已經有的東西。今天這不
+構成問題 (見上), 但**如果哪天有第二個人開始用 Buzz, 這條就要重新評估** —— 那也正是
+spec 開頭那條 single-trust-domain 硬假設的破裂條件。
+
+**要在 `SETUP.md` 留一段可整段貼的指令**, 內容是: rebuild 哪些 service、
+`MEMORY_TRUSTED_WRITERS` 的預設從哪來、以及「既有記憶池刻意不動」這個決定與上面兩個後果。
 
 ---
 
@@ -861,6 +910,11 @@ In `__init__.py`'s `__init__`:
         # paths miss); the open gap is weak-but-nonzero hits. Bounding count and age is
         # what we can do honestly. See spec 7.6.
         self._recall_limit = int(os.environ.get("MEMORY_TENCENTDB_RECALL_LIMIT") or 5)
+        # Default 0 = off. This is a staleness knob, NOT a migration/reset
+        # mechanism — using it to push the pre-hardening pool out of automatic
+        # recall was considered and rejected (see 既有系統的處理): with a single
+        # operator there is nothing in that pool worth pushing out, and a window
+        # would discard genuinely useful old preferences along with it.
         self._recall_window_days = int(
             os.environ.get("MEMORY_TENCENTDB_RECALL_WINDOW_DAYS") or 0
         )
@@ -999,8 +1053,8 @@ git commit -m "feat: seed tdai-gateway.yaml idempotently so the promotion cadenc
 
 # PHASE 2 — Gated on Task 3
 
-Do not start until Task 3 recorded PROCEED, and until the DECISION REQUIRED block at
-the top of this plan is answered.
+Do not start until Task 3 recorded PROCEED. (The scientist-lane question that used to
+gate this is settled — see 「已決：scientist lane 用 `full`」at the top.)
 
 ### Task 9: The hermes ACP sidecar patch
 
@@ -1494,12 +1548,24 @@ start consuming it, since raw tool output would then reach L0.
 
 - [ ] **Step 4: Set the env in compose**
 
-frontdoor service: `MEMORY_TENCENTDB_CAPTURE_MODE: projected` and
-`MEMORY_TRUSTED_WRITERS: ${MEMORY_TRUSTED_WRITERS:-}`.
-hermes service: `MEMORY_TENCENTDB_CAPTURE_MODE: full` with a comment pointing at the
-DECISION REQUIRED block. Add `MEMORY_TRUSTED_WRITERS=` to `.env.example` with a comment
-that it holds **hex** pubkeys and that an empty value means no passive capture on the
-frontdoor lane.
+frontdoor service:
+
+```yaml
+      MEMORY_TENCENTDB_CAPTURE_MODE: projected
+      # Whose events may mutate shared memory. Defaults to the agent's owner —
+      # BUZZ_ACP_AGENT_OWNER is already the human owner's 64-char hex pubkey
+      # (see the comment at docker-compose.yml:334-338), which is exactly the
+      # immutable form this allowlist needs. Defaulting to it rather than to
+      # empty matters: an empty allowlist silently stops all passive capture,
+      # which is the fail-silent class this whole spec objects to.
+      MEMORY_TRUSTED_WRITERS: ${MEMORY_TRUSTED_WRITERS:-${BUZZ_ACP_AGENT_OWNER}}
+```
+
+hermes service: `MEMORY_TENCENTDB_CAPTURE_MODE: full`, with a comment pointing at the
+「已決：scientist lane 用 `full`」section.
+
+Add `MEMORY_TRUSTED_WRITERS=` to `.env.example` documenting that it holds
+comma-separated **hex** pubkeys and falls back to `BUZZ_ACP_AGENT_OWNER`.
 
 - [ ] **Step 5: Verify**
 
@@ -1798,5 +1864,6 @@ task by design, asserted by Task 13's structural section. 7.5 → Task 4. 7.6 �
 no task — it belongs in `tests/migrations.sh` alongside the other upstream-config
 assertions rather than in a memory gate. Add it there or accept the gap knowingly.
 
-**Known gap.** The DECISION REQUIRED block at the top is unresolved. Task 11 Step 4
-encodes the assumption in compose with a comment pointing back at it.
+**No open decisions.** The scientist-lane capture mode and the treatment of the
+existing memory pool were both settled on 2026-09-10 and are recorded at the top of
+this plan; Task 11 Step 4 encodes the first in compose with a comment pointing back.
