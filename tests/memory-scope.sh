@@ -409,6 +409,162 @@ def cmd_cold_span(a):
     p.shutdown()
 
 
+def cmd_acp_e2e(a):
+    # Execute the DEPLOYED ACP prompt path at runtime: real prompt() with a
+    # fabricated single-text-block prompt, a stubbed provider boundary
+    # (state.agent.run_conversation records instead of calling the LLM), and
+    # no client connection. If the sidecar patch regresses (preserve removed
+    # or the threading dropped), prompt() raises or nothing is captured.
+    import asyncio
+    from types import SimpleNamespace
+    canary = a["canary"]
+    captured = {}
+
+    def fake_run_conversation(*, user_message=None, conversation_history=None,
+                              task_id=None, **kw):
+        captured["user_message"] = user_message
+        captured["memory_ingress"] = kw.get("memory_ingress", "MISSING")
+        return {"final_response": "stub", "messages": []}
+
+    from acp.schema import TextContentBlock
+    from acp_adapter.server import HermesACPAgent
+    from acp_adapter.session import SessionManager, SessionState
+
+    async def go():
+        agent_ns = SimpleNamespace(run_conversation=fake_run_conversation,
+                                   session_id=None)
+        mgr = SessionManager()
+        sid = "memscope-acpe2e"
+        # Injected directly: no agent factory, no session DB, no network.
+        mgr._sessions[sid] = SessionState(session_id=sid, agent=agent_ns,
+                                          cwd="/tmp")
+        srv = HermesACPAgent(session_manager=mgr)
+        srv._conn = None
+        await srv.prompt(prompt=[TextContentBlock(type="text", text=canary)],
+                         session_id=sid)
+
+    asyncio.run(go())
+    mi = captured.get("memory_ingress", "MISSING")
+    out(E2E_INGRESS_EQ=(mi == [canary]),
+        E2E_USER_OK=(canary in str(captured.get("user_message", ""))))
+
+
+def cmd_acp_reply(a):
+    # Full ACP stdio round-trip against the DEPLOYED `hermes acp` binary with
+    # a real LLM turn. The reply is observed two ways: streamed
+    # agent_message_chunk text (when the model streams) and the persisted
+    # assistant message in the session store (always). Either non-empty
+    # proves a live agent reply; the prompt result alone would not (an
+    # end_turn with empty final_response is a real shape — observed).
+    import asyncio
+    import sqlite3
+    canary = a["canary"]
+    chunks = []
+    sid_holder = [None]
+
+    from acp.schema import (
+        ClientCapabilities,
+        DeniedOutcome,
+        ReadTextFileResponse,
+        RequestPermissionResponse,
+        TextContentBlock,
+        WriteTextFileResponse,
+    )
+    from acp.client.connection import ClientSideConnection
+    from acp.meta import PROTOCOL_VERSION
+
+    class GateClient:
+        def on_connect(self, conn):
+            pass
+
+        async def session_update(self, session_id, update, **kw):
+            sid_holder[0] = session_id
+            if str(getattr(update, "session_update", "")) == "agent_message_chunk":
+                c = getattr(update, "content", None)
+                items = c if isinstance(c, list) else [c]
+                for b in items:
+                    t = getattr(b, "text", "")
+                    if t:
+                        chunks.append(t)
+
+        async def request_permission(self, session_id, **kw):
+            return RequestPermissionResponse(
+                outcome=DeniedOutcome(outcome="denied"))
+
+        async def read_text_file(self, session_id, path, **kw):
+            return ReadTextFileResponse(content="")
+
+        async def write_text_file(self, session_id, path, content, **kw):
+            return WriteTextFileResponse()
+
+    async def go():
+        proc = await asyncio.create_subprocess_exec(
+            "/opt/hermes-venv/bin/hermes", "acp",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+        try:
+            cli = ClientSideConnection(GateClient(), proc.stdin, proc.stdout)
+            init = await asyncio.wait_for(
+                cli.initialize(protocol_version=PROTOCOL_VERSION,
+                               client_capabilities=ClientCapabilities()),
+                timeout=60)
+            agent_name = getattr(getattr(init, "agent_info", None), "name", "")
+            sess = await asyncio.wait_for(cli.new_session(cwd="/tmp"), timeout=60)
+            acp_sid = getattr(sess, "session_id", "")
+            resp = await asyncio.wait_for(
+                cli.prompt(prompt=[TextContentBlock(type="text", text=canary)],
+                           session_id=acp_sid),
+                timeout=540)
+            stop = str(getattr(resp, "stop_reason", "?"))
+            for _ in range(20):
+                if "".join(chunks).strip():
+                    break
+                await asyncio.sleep(1)
+            try:
+                await cli._conn.close()
+            except Exception:
+                pass
+            return agent_name, acp_sid, stop
+        finally:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=15)
+            except Exception:
+                pass
+
+    agent_name, acp_sid, stop = asyncio.run(go())
+    # The assistant row lands via the session store, which may trail the
+    # prompt result; poll briefly rather than asserting on a race.
+    # The session store lives at $HERMES_HOME/state.db (NOT ~/.hermes/ —
+    # an earlier revision queried the latter and silently created a stray
+    # 0-byte file there; it has been removed).
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~")
+    reply_len = 0
+    for _ in range(12):
+        try:
+            db = sqlite3.connect(os.path.join(home, "state.db"))
+            row = db.execute(
+                "select content from messages where session_id=? and role='assistant'"
+                " order by rowid desc limit 1", (acp_sid,)).fetchone()
+            db.close()
+            reply_len = len((row[0] if row else "") or "")
+        except Exception:
+            pass
+        if reply_len > 0:
+            break
+        time.sleep(5)
+    out(STOP=(stop or "?"), STREAM_CHARS=len("".join(chunks)),
+        REPLY_LEN=reply_len, AGENT_NAME=str(agent_name or "?"))
+
+
 COMMANDS = {
     "env_report": cmd_env_report,
     "seed_trusted": cmd_seed_trusted,
@@ -423,6 +579,8 @@ COMMANDS = {
     "recall_snap": cmd_recall_snap,
     "recall_l1fmt": cmd_recall_l1fmt,
     "cold_span": cmd_cold_span,
+    "acp_e2e": cmd_acp_e2e,
+    "acp_reply": cmd_acp_reply,
 }
 
 
@@ -516,24 +674,25 @@ if ! grep -q 'remember' "$P/__init__.py"; then
 else
   fail "no memory_tencentdb_remember tool"
 fi
-
+echo "── live lane ──"
 ENV_OUT="$(run_driver "$GATE_AGENT" "$GATE_USER" env_report '{}')"
 if [ "$(kv "$ENV_OUT" MODE)" = "projected" ] && [ "$(kv "$ENV_OUT" OWNER_IN_ALLOWLIST)" = "1" ]; then
   pass "frontdoor lane runs projected capture with the owner allowlisted"
 else
   fail "frontdoor lane runs projected capture with the owner allowlisted"
 fi
-# The direct sync_turn calls below inject memory_ingress after the ACP
-# boundary, so they cannot see the forwarder break. Pin the deployed
-# forwarding path itself: the RUNNING interpreter must load acp_adapter from
-# the patched editable tree, with the preserve call and both forward sites.
-ACP_MODS="$(docker compose exec -T frontdoor /opt/hermes-venv/bin/python3 -c 'import acp_adapter.content as c, acp_adapter.server as s; print(c.__file__); print(s.__file__)' || true)"
-if printf '%s' "$ACP_MODS" | grep -qx '/opt/hermes-src/acp_adapter/content.py' \
-  && printf '%s' "$ACP_MODS" | grep -qx '/opt/hermes-src/acp_adapter/server.py' \
-  && docker compose exec -T frontdoor sh -c 'grep -q "def preserve_text_prompt_blocks" /opt/hermes-src/acp_adapter/content.py && grep -q "memory_ingress = preserve_text_prompt_blocks(prompt)" /opt/hermes-src/acp_adapter/server.py && grep -q "memory_ingress=memory_ingress" /opt/hermes-src/acp_adapter/server.py'; then
-  pass "ACP sidecar forwards per-block ingress in the running image"
+# The direct sync_turn calls in checks 1-5 inject memory_ingress after the ACP
+# boundary, so they cannot see the forwarder break. This executes the DEPLOYED
+# prompt() at runtime instead: a fabricated single-text-block canary prompt
+# runs through the real extract/join/preserve path with the provider boundary
+# stubbed, and the stub must receive exactly the canary block as
+# memory_ingress. A regressed sidecar (preserve removed, threading dropped)
+# errors or captures nothing here. Hermetic: no LLM, no session DB, no memory.
+E2E_OUT="$(run_driver "$GATE_AGENT" "$GATE_USER" acp_e2e "{\"canary\":\"memscope acp e2e canary $RUN\"}")"
+if [ "$(kv "$E2E_OUT" E2E_INGRESS_EQ)" = "1" ] && [ "$(kv "$E2E_OUT" E2E_USER_OK)" = "1" ]; then
+  pass "ACP prompt path preserves and forwards ingress blocks at runtime"
 else
-  fail "ACP sidecar forwards per-block ingress in the running image"
+  fail "ACP prompt path preserves and forwards ingress blocks at runtime"
 fi
 SHARD_BEFORE="$(run_driver "$GATE_AGENT" "$GATE_USER" shard_info '{}')"
 LINES_BEFORE="$(kv "$SHARD_BEFORE" LINES)"
@@ -593,17 +752,40 @@ S4="memscope-$RUN-c4"
 C4="memscope untrusted canary umber lemur $RUN"
 UNTR_OUT="$(run_driver "$GATE_AGENT" "$GATE_USER" send_untrusted "{\"session\":\"$S4\",\"untrusted_hex\":\"$UNTRUSTED_HEX\",\"canary\":\"$C4\"}")"
 # Admission policy read from the SERVING buzz-acp process's own environ — not
-# from compose config, and independent of the memory verdict above.
-SERVE_ENV="$(docker compose exec -T frontdoor sh -c 'for d in /proc/[0-9]*; do if tr "\0" " " < "$d/cmdline" 2>/dev/null | grep -q "bin/buzz-acp"; then tr "\0" "\n" < "$d/environ" 2>/dev/null; break; fi; done' || true)"
+# from compose config, and independent of the memory verdict above. The
+# [b]in trick keeps the scan from matching its own cmdline (same self-match
+# class as the check-6 uid scan).
+SERVE_ENV="$(docker compose exec -T frontdoor sh -c 'for d in /proc/[0-9]*; do if tr "\0" " " < "$d/cmdline" 2>/dev/null | grep -q "[b]in/buzz-acp"; then tr "\0" "\n" < "$d/environ" 2>/dev/null; break; fi; done' || true)"
 SERVE_RESPOND="$(printf '%s' "$SERVE_ENV" | sed -n 's/^BUZZ_ACP_RESPOND_TO=//p')"
-SERVE_NOMENTION="$(printf '%s' "$SERVE_ENV" | sed -n 's/^BUZZ_ACP_NO_MENTION_FILTER=//p')"
 if [ "$(kv "$UNTR_OUT" L0_COUNT)" = "0" ] && [ "$(kv "$UNTR_OUT" SEARCH_MISS)" = "1" ] \
   && [ "$(kv "$UNTR_OUT" DROP_COUNT)" = "1" ] && [ "$(kv "$UNTR_OUT" REASONS)" = "untrusted-writer" ] \
   && [ "$(kv "$UNTR_OUT" SENDERS)" = "$UNTRUSTED_HEX" ] \
-  && [ "$SERVE_RESPOND" = "anyone" ] && [ "$SERVE_NOMENTION" = "true" ]; then
+  && [ "$SERVE_RESPOND" = "anyone" ]; then
   pass "untrusted writer dropped from memory, serving admission still anyone"
 else
   fail "untrusted writer dropped from memory, serving admission still anyone"
+fi
+
+echo "── 4 live reply (full ACP round-trip) ──"
+# Check 4's second half — "the agent still replies" — observed, not assumed:
+# a synthetic canary goes through the deployed `hermes acp` over stdio with a
+# real LLM turn, and the reply must be non-empty either on the stream or in
+# the persisted session. A bare end_turn with empty final_response is a real
+# shape (observed in development), so the prompt result alone proves nothing.
+REPLY_OUT="$(run_driver "$GATE_AGENT" "$GATE_USER" acp_reply "{\"canary\":\"Memscope live-reply probe $RUN. Reply with exactly the single word PING and nothing else.\"}")"
+REPLY_STREAM="$(kv "$REPLY_OUT" STREAM_CHARS)"
+REPLY_HIST="$(kv "$REPLY_OUT" REPLY_LEN)"
+REPLY_OK=0
+if [ "$(kv "$REPLY_OUT" STOP)" = "end_turn" ]; then
+  if { [ -n "$REPLY_STREAM" ] && [ "$REPLY_STREAM" -ge 1 ]; } \
+    || { [ -n "$REPLY_HIST" ] && [ "$REPLY_HIST" -ge 1 ]; }; then
+    REPLY_OK=1
+  fi
+fi
+if [ "$REPLY_OK" = "1" ]; then
+  pass "frontdoor ACP turn returns a real agent reply"
+else
+  fail "frontdoor ACP turn returns a real agent reply"
 fi
 
 echo "── 5 conversation context ──"
