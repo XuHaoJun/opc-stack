@@ -405,6 +405,8 @@ class MemoryTencentdbProvider(MemoryProvider):
         self._agent_id = _DEFAULT_AGENT_ID
         self._gateway_available = False
         self._initialized = False
+        # Lazily constructed by _log_ingress_drop; None until the first drop.
+        self._ingress_log = None
 
         # Background sync threads.
         self._sync_lock = threading.Lock()
@@ -694,6 +696,22 @@ class MemoryTencentdbProvider(MemoryProvider):
             )
             t.start()
 
+        # Ingress-log retention: sweep expired shards once per boot from the same
+        # place the gateway supervisor starts. No clean hook exists inside
+        # supervisor.py — ensure_running() is the start path but it runs behind
+        # a background thread here — so initialize() is the closest boot path.
+        try:
+            from .ingress_log import IngressLog
+            _ingress_sweep = IngressLog(
+                os.environ.get("MEMORY_TENCENTDB_LOG_DIR")
+                or os.path.join(os.path.expanduser("~"), ".hermes", "logs",
+                                "memory_tencentdb"),
+                debug=(os.environ.get("MEMORY_TENCENTDB_INGRESS_DEBUG") == "1"),
+            ).sweep()
+            logger.info("ingress_log_sweep %s", _ingress_sweep)
+        except Exception:
+            logger.debug("ingress log sweep failed", exc_info=True)
+
         self._start_watchdog()
 
     def _snapshot_due(self, session_key: str) -> bool:
@@ -850,6 +868,23 @@ class MemoryTencentdbProvider(MemoryProvider):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """No-op — recall is done synchronously in prefetch()."""
         pass
+
+    def _log_ingress_drop(self, reason: str, session_id: str, content: str,
+                          *, sender: Optional[str] = None,
+                          event_id: Optional[str] = None) -> None:
+        try:
+            if self._ingress_log is None:
+                from .ingress_log import IngressLog
+                self._ingress_log = IngressLog(
+                    os.environ.get("MEMORY_TENCENTDB_LOG_DIR")
+                    or os.path.join(os.path.expanduser("~"), ".hermes", "logs",
+                                    "memory_tencentdb"),
+                    debug=(os.environ.get("MEMORY_TENCENTDB_INGRESS_DEBUG") == "1"),
+                )
+            self._ingress_log.record(reason, session_id, self._agent_id, content,
+                                     sender=sender, event_id=event_id)
+        except Exception:
+            logger.debug("ingress drop logging failed", exc_info=True)
 
     def sync_turn(self, user_content: str, assistant_content: str, *,
                   session_id: str = "", memory_ingress: Optional[List[str]] = None,

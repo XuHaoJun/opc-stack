@@ -116,4 +116,25 @@ grep -q "from .ingress import project\|from ingress import project" "$P" \
 grep -q "MEMORY_TRUSTED_WRITERS" "$P" || fail "no writer allowlist"
 grep -qi "display.name\|npub1" "$P" && fail "allowlist must key on immutable hex pubkeys, not names/npubs"
 pass "sync_turn projects, and the allowlist is hex-pubkey based"
+
+# ── the ingress log stores metadata by default and rotates by date shard ──
+python3 - <<'PY' || fail "ingress log does not behave as specified"
+import sys, os, json, tempfile
+sys.path.insert(0, "patches/hermes/memory_tencentdb")
+from ingress_log import IngressLog
+d = tempfile.mkdtemp()
+log = IngressLog(d)
+log.record("untrusted-writer", "sess-1", "agt-x", "SECRET CONTENT", sender="deadbeef")
+files = os.listdir(d)
+assert len(files) == 1 and files[0].startswith("memory-ingress-"), files
+assert files[0].endswith(".jsonl"), files
+row = json.loads(open(os.path.join(d, files[0])).read().strip())
+assert row["reason"] == "untrusted-writer"
+assert "content" not in row, "full content must not be stored by default"
+assert row["content_sha256"] and row["len"] == len("SECRET CONTENT")
+assert "SECRET" not in json.dumps(row) or len(row.get("preview","")) <= 64
+assert oct(os.stat(os.path.join(d, files[0])).st_mode)[-3:] == "600", "log must be 0600"
+print("ok")
+PY
+pass "ingress log is metadata-only, date-sharded and 0600"
 exit 0
