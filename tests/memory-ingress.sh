@@ -31,4 +31,20 @@ grep -q 'trust="untrusted-reference"' "$P" || fail "recall block has no trust at
 grep -q 'scope=' "$P" || fail "recall block has no scope attribute"
 grep -q "[\"']score[\"']" "$P" && fail "recall block still references score (it is an RRF rank, not a similarity)"
 pass "recall block carries scope + trust and no score"
+
+# ── system_prompt_block is STATIC (provider contract), and L2/L3 are not per-turn ──
+P=patches/hermes/memory_tencentdb/__init__.py
+python3 - "$P" <<'PY' || fail "system_prompt_block or the snapshot path is wrong"
+import ast, sys
+src = open(sys.argv[1]).read()
+tree = ast.parse(src)
+fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+spb = ast.dump(fns["system_prompt_block"])
+assert "core_read" not in spb and "scenario_ls" not in spb, \
+    "system_prompt_block must not fetch recall content (memory_provider.py:90-92: STATIC)"
+pf = ast.dump(fns["prefetch"])
+assert "_snapshot_due" in pf, "prefetch must gate L2/L3 behind the snapshot check"
+print("ok")
+PY
+pass "system_prompt_block static; L2/L3 gated behind the snapshot check"
 exit 0
