@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Phase 0 measurement driver for the memory hardening spec
 # (docs/superpowers/specs/2026-09-10-agent-memory-scoping-design.md, 7.0).
 #
@@ -6,20 +6,31 @@
 # single agent_id for both conditions: L0→L1→L2→L3 is stateful, so condition A's
 # output becomes condition B's starting state (memories_since_last_persona only
 # ever increases — MemoryCore/src/utils/checkpoint.ts:641-642).
-set -eu
+set -euo pipefail
 cd "$(dirname "$0")/.."
-. scripts/load-env.sh
+. "$(dirname "$0")/load-env.sh"; opc_load_env ./.env
 
-TEAM="${MEMORY_TENCENTDB_TEAM_ID:-opc}"
+TEAM="${TENCENTDB_TEAM_ID:-${MEMORY_TENCENTDB_TEAM_ID:-opc}}"
 CORE="http://127.0.0.1:8420"
+API_KEY="${TENCENTDB_GATEWAY_API_KEY:-}"
+USER_KEY="${TENCENTDB_ADMIN_USER_KEY:-}"
 
 api() {
   # $1 = path, $2 = json body
+  # Header set mirrors meta() in
+  # patches/tencentdb-agent-memory/MemoryCore/opc-tencentdb-provision.sh:
+  # the gateway requires x-tdai-service-id (canonical value 'default') and
+  # the admin x-tdai-user-key alongside the bearer token.
+  # stdin is detached: callers loop over the transcript on stdin while
+  # `docker compose exec` would otherwise steal it (only the first turn
+  # would land).
   docker compose exec -T tencentdb-core \
     curl -fsS -X POST "http://127.0.0.1:8420$1" \
       -H "Content-Type: application/json" \
-      -H "Authorization: Bearer ${TENCENTDB_GATEWAY_API_KEY:-}" \
-      -d "$2"
+      -H "x-tdai-service-id: default" \
+      -H "Authorization: Bearer ${API_KEY}" \
+      -H "x-tdai-user-key: ${USER_KEY}" \
+      -d "$2" < /dev/null
 }
 
 require_agt() {
@@ -31,13 +42,19 @@ require_agt() {
   esac
 }
 
+admin_user_id() {
+  api /v3/meta/auth/verify "{\"user_key\":\"${USER_KEY}\"}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["user"]["user_id"])'
+}
+
 cmd="${1:-}"; shift 2>/dev/null || true
 
 case "$cmd" in
   provision)
     agent="${1:?usage: provision <agent_id>}"
     require_agt "$agent"
-    api /v3/meta/agent/create "{\"team_id\":\"$TEAM\",\"agent_id\":\"$agent\",\"name\":\"$agent\"}"
+    owner="$(admin_user_id)"
+    api /v3/meta/agent/create "{\"team_id\":\"$TEAM\",\"agent_id\":\"$agent\",\"owner_user_id\":\"$owner\",\"name\":\"$agent\"}"
     echo "provisioned $agent"
     ;;
   replay)
