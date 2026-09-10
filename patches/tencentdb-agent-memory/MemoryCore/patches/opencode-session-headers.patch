@@ -1,0 +1,324 @@
+--- /dev/null
++++ b/src/utils/opencode-session.ts
+@@ -0,0 +1,29 @@
++import { randomUUID } from "node:crypto";
++
++const OPENCODE_HOST = "opencode.ai";
++
++function isOpenCodeEndpoint(baseUrl: string): boolean {
++  try {
++    return new URL(baseUrl).hostname === OPENCODE_HOST;
++  } catch {
++    return false;
++  }
++}
++
++function normalizeSessionId(sessionId?: string): string | undefined {
++  const value = sessionId?.trim();
++  return value || undefined;
++}
++
++export function buildOpenCodeHeaders(
++  baseUrl: string,
++  requestedSessionId?: string,
++  fallbackSessionId?: string,
++): Record<string, string> {
++  if (!isOpenCodeEndpoint(baseUrl)) return {};
++
++  const sessionId = normalizeSessionId(requestedSessionId)
++    ?? normalizeSessionId(fallbackSessionId)
++    ?? randomUUID();
++  return { "x-opencode-session": sessionId };
++}
+--- a/src/adapters/standalone/llm-runner.ts
++++ b/src/adapters/standalone/llm-runner.ts
+@@ -18,9 +18,11 @@
+ 
+ import fsPromises from "node:fs/promises";
+ import path from "node:path";
++import { randomUUID } from "node:crypto";
+ import { generateText, streamText, tool, stepCountIs, jsonSchema } from "ai";
+ import { createOpenAI } from "@ai-sdk/openai";
+ import { report } from "../../core/report/reporter.js";
++import { buildOpenCodeHeaders } from "../../utils/opencode-session.js";
+ import type {
+   LLMRunner,
+   LLMRunParams,
+@@ -258,6 +260,7 @@
+   private enableTools: boolean;
+   private stream: boolean;
+   private logger?: Logger;
++  private readonly fallbackSessionId = randomUUID();
+ 
+   /**
+    * Side-channel: 最近一次 run() 调用的 token usage。
+@@ -305,6 +308,11 @@
+       baseURL: this.config.baseUrl,
+       apiKey: this.config.apiKey,
+       compatibility: "compatible",
++      headers: buildOpenCodeHeaders(
++        this.config.baseUrl,
++        params.sessionId,
++        this.fallbackSessionId,
++      ),
+     });
+ 
+     // Select tools based on mode + storage
+--- a/src/offload/local-llm/llm-caller.ts
++++ b/src/offload/local-llm/llm-caller.ts
+@@ -7,6 +7,7 @@
+ import { generateText, streamText } from "ai";
+ import { createOpenAI } from "@ai-sdk/openai";
+ import type { PluginLogger } from "../types.js";
++import { buildOpenCodeHeaders } from "../../utils/opencode-session.js";
+ 
+ const TAG = "[context-offload] [local-llm]";
+ 
+@@ -34,6 +35,10 @@
+   label?: string;
+   /** Instance ID for telemetry metadata */
+   instanceId?: string;
++  /** Conversation ID for OpenCode Go session affinity. */
++  sessionId?: string;
++  /** Stable client-local fallback when no conversation ID is available. */
++  fallbackSessionId?: string;
+ }
+ 
+ /**
+@@ -59,6 +64,7 @@
+     baseURL: config.baseUrl,
+     apiKey: config.apiKey,
+     compatibility: "compatible",
++    headers: buildOpenCodeHeaders(config.baseUrl, opts.sessionId, opts.fallbackSessionId),
+   });
+ 
+   try {
+--- a/src/offload/local-llm/index.ts
++++ b/src/offload/local-llm/index.ts
+@@ -6,6 +6,7 @@
+  *
+  * Used when `offload.model` is configured and `offload.backendUrl` is not set.
+  */
++import { randomUUID } from "node:crypto";
+ import { callLlm, type LlmCallerConfig } from "./llm-caller.js";
+ import { L1_SYSTEM_PROMPT, buildL1UserPrompt, type L1ToolPair } from "./prompts/l1-prompt.js";
+ import { L15_SYSTEM_PROMPT, buildL15UserPrompt, type L15CurrentMmd, type L15MmdMeta } from "./prompts/l15-prompt.js";
+@@ -31,6 +32,7 @@
+ export class LocalLlmClient {
+   private config: LlmCallerConfig;
+   private logger?: PluginLogger;
++  private readonly fallbackSessionId = randomUUID();
+ 
+   constructor(cfg: LocalLlmClientConfig, logger?: PluginLogger) {
+     this.config = {
+@@ -62,6 +64,8 @@
+       systemPrompt: L1_SYSTEM_PROMPT,
+       userPrompt,
+       label: "L1",
++      sessionId: req.sessionId,
++      fallbackSessionId: this.fallbackSessionId,
+     }, this.logger);
+ 
+     const entries = parseL1Response(raw);
+@@ -100,6 +104,8 @@
+       systemPrompt: L15_SYSTEM_PROMPT,
+       userPrompt,
+       label: "L1.5",
++      sessionId: req.sessionId,
++      fallbackSessionId: this.fallbackSessionId,
+     }, this.logger);
+ 
+     const result = parseL15Response(raw);
+@@ -141,6 +147,8 @@
+       userPrompt,
+       label: "L2",
+       timeoutMs: 120_000, // L2 may take longer due to complex prompts
++      sessionId: req.sessionId,
++      fallbackSessionId: this.fallbackSessionId,
+     }, this.logger);
+ 
+     const result = parseL2Response(raw);
+--- a/src/offload/backend-client.ts
++++ b/src/offload/backend-client.ts
+@@ -25,6 +25,8 @@
+     timestamp: string;
+   }>;
+   pluginConfig?: Record<string, unknown>;
++  /** Local-only conversation ID; stripped before remote serialization. */
++  sessionId?: string;
+ }
+ 
+ export interface L1Response {
+@@ -48,6 +48,8 @@
+     updatedTime?: string | null;
+     nodeSummaries?: Array<{ nodeId: string; status: string; summary: string }>;
+   }>;
++  /** Local-only conversation ID; stripped before remote serialization. */
++  sessionId?: string;
+ }
+ 
+ export interface L15Response extends TaskJudgment {}
+@@ -65,6 +69,8 @@
+   taskLabel: string;
+   mmdPrefix: string;
+   mmdCharCount: number;
++  /** Local-only conversation ID; stripped before remote serialization. */
++  sessionId?: string;
+ }
+ 
+ export interface L2Response {
+@@ -137,7 +143,9 @@
+     const pairNames = req.toolPairs.map((p) => `${p.toolName}(${p.toolCallId})`).join(", ");
+     this.logger.debug?.(`[context-offload] L1 >>> summarize ${req.toolPairs.length} pairs: [${pairNames}]`);
+     const startMs = Date.now();
+-    const resp = await this.post<L1Response>("/offload/v1/l1/summarize", req, BackendClient.TIMEOUT_MS);
++    const remoteReq = { ...req };
++    delete remoteReq.sessionId;
++    const resp = await this.post<L1Response>("/offload/v1/l1/summarize", remoteReq, BackendClient.TIMEOUT_MS);
+     const durationMs = Date.now() - startMs;
+     const entryCount = resp.entries?.length ?? 0;
+     const scores = resp.entries?.map((e) => `${e.tool_call_id}:score=${e.score}`).join(", ") ?? "";
+@@ -165,7 +173,9 @@
+       `[context-offload] L1.5 >>> judge: currentMmd=${req.currentMmd?.filename ?? "null"}, availableMmds=${req.availableMmdMetas.length}, recentMessages=${req.recentMessages.length} chars`,
+     );
+     const startMs = Date.now();
+-    const resp = await this.post<L15Response>("/offload/v1/l15/judge", req, BackendClient.TIMEOUT_MS);
++    const remoteReq = { ...req };
++    delete remoteReq.sessionId;
++    const resp = await this.post<L15Response>("/offload/v1/l15/judge", remoteReq, BackendClient.TIMEOUT_MS);
+     const durationMs = Date.now() - startMs;
+     this.logger.debug?.(
+       `[context-offload] L1.5 <<< completed=${resp.taskCompleted}, continuation=${resp.isContinuation}, continuationFile=${resp.continuationMmdFile ?? "null"}, newLabel=${resp.newTaskLabel ?? "null"}, longTask=${resp.isLongTask}`,
+@@ -193,7 +203,9 @@
+       `[context-offload] L2 >>> generate: task=${req.taskLabel}, prefix=${req.mmdPrefix}, entries=${req.newEntries.length} [${entryIds}], existingMmd=${req.existingMmd ? `${req.mmdCharCount} chars` : "null (new)"}`,
+     );
+     const startMs = Date.now();
+-    const resp = await this.post<L2Response>("/offload/v1/l2/generate", req, BackendClient.TIMEOUT_MS);
++    const remoteReq = { ...req };
++    delete remoteReq.sessionId;
++    const resp = await this.post<L2Response>("/offload/v1/l2/generate", remoteReq, BackendClient.TIMEOUT_MS);
+     const durationMs = Date.now() - startMs;
+     const mappingCount = Object.keys(resp.nodeMapping ?? {}).length;
+     const mappingStr = Object.entries(resp.nodeMapping ?? {}).map(([k, v]) => `${k}->${v}`).join(", ");
+--- a/src/offload/index.ts
++++ b/src/offload/index.ts
+@@ -463,6 +463,7 @@
+         try {
+           const req: L1Request = {
+             recentMessages,
++            sessionId: stateManager.ctx.sessionId,
+             toolPairs: chunk.map((p) => ({
+               toolName: p.toolName,
+               toolCallId: p.toolCallId,
+@@ -573,7 +574,12 @@
+       const recentMessages = _buildL15RecentContext(stateManager);
+ 
+       stateManager.setMmdInjectionReady(false);
+-      const resp = await backendClient!.l15Judge({ recentMessages, currentMmd, availableMmdMetas: mmdMetas });
++      const resp = await backendClient!.l15Judge({
++        recentMessages,
++        currentMmd,
++        availableMmdMetas: mmdMetas,
++        sessionId: stateManager.ctx.sessionId,
++      });
+ 
+       // Normalize backend response (handles null fields from fallback)
+       const judgment = normalizeJudgment(resp as unknown as Record<string, unknown>);
+@@ -711,6 +717,7 @@
+ 
+           const req: L2Request = {
+             existingMmd,
++            sessionId: stateManager.ctx.sessionId,
+             newEntries: batch.map((e: any) => ({
+               tool_call_id: e.tool_call_id,
+               tool_call: e.tool_call,
+--- a/src/offload_server/offload-task-executor.ts
++++ b/src/offload_server/offload-task-executor.ts
+@@ -32,6 +32,7 @@
+     temperature: number;
+     max_tokens: number;
+     timeoutMs?: number;
++    sessionId?: string;
+   }): Promise<string>;
+ }
+ 
+@@ -143,6 +144,7 @@
+         temperature: this.config.l1Temperature,
+         max_tokens: this.config.l1MaxTokens,
+         timeoutMs: this.config.l1TimeoutMs,
++        sessionId,
+       });
+       l1RawResponse = response;
+       newEntries = parseL1Response(response);
+@@ -274,9 +274,10 @@
+   async executeOffloadL15(task: TaskPayload, _signal?: AbortSignal): Promise<void> {
+     const startMs = Date.now();
+-    const { sessionId, recentMessages, boundaryTimestamp } = task.data as {
+-      sessionId: string;
++    const { recentMessages, boundaryTimestamp } = task.data as {
+       recentMessages?: string;
+       boundaryTimestamp: string;
+     };
++    const sessionId = this.extractSessionId(task);
++    if (!sessionId) return;
+     const storage = await this.resolveStorageOrThrow(task.instanceId);
+     const basePath = buildOffloadBasePath(sessionId);
+@@ -326,6 +328,7 @@
+         temperature: this.config.l15Temperature,
+         max_tokens: this.config.l15MaxTokens,
+         timeoutMs: this.config.l15TimeoutMs,
++        sessionId,
+       });
+       rawResponse = response;
+       judgment = parseL15Response(response);
+@@ -566,6 +569,7 @@
+         temperature: this.config.l2Temperature,
+         max_tokens: this.config.l2MaxTokens,
+         timeoutMs: this.config.l2TimeoutMs,
++        sessionId,
+       });
+       rawL2Response = response;
+       result = parseL2Response(response);
+--- a/src/gateway/server.ts
++++ b/src/gateway/server.ts
+@@ -17,7 +17,7 @@
+ import http from "node:http";
+ import { join } from "node:path";
+ import { URL } from "node:url";
+-import { timingSafeEqual } from "node:crypto";
++import { randomUUID, timingSafeEqual } from "node:crypto";
+ import zlib from "node:zlib";
+ import dayjs from "dayjs";
+ import { TdaiCore } from "../core/tdai-core.js";
+@@ -26,6 +26,7 @@
+ import type { GatewayConfig } from "./config.js";
+ import { applyMetadataEnvFromGatewayConfig } from "./metadata-env.js";
+ import { initDataDirectories } from "../utils/pipeline-factory.js";
++import { buildOpenCodeHeaders } from "../utils/opencode-session.js";
+ import { SessionFilter } from "../utils/session-filter.js";
+ import { WorkerPermitPool } from "../services/worker-permit-pool.js";
+ import { createExtractorAdapter, SkillExtractor as SkillExtractorClass } from "../core/skill/skill-extractor.js";
+@@ -2967,6 +2968,7 @@
+       return null;
+     }
+     const logger = this.logger;
++    const fallbackSessionId = randomUUID();
+ 
+     return {
+       async chat(params: {
+@@ -2975,6 +2977,7 @@
+         temperature: number;
+         max_tokens: number;
+         timeoutMs?: number;
++        sessionId?: string;
+       }): Promise<string> {
+         const controller = new AbortController();
+         const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 30000);
+@@ -2984,6 +2987,7 @@
+             headers: {
+               "Content-Type": "application/json",
+               Authorization: `Bearer ${effective.apiKey}`,
++              ...buildOpenCodeHeaders(effective.baseUrl, params.sessionId, fallbackSessionId),
+             },
+             body: JSON.stringify({
+               model: effective.model || params.model,
