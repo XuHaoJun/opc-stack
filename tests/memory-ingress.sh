@@ -108,4 +108,12 @@ assert p.recall_query, "recall must still work for untrusted senders"
 print("ok")
 PY
 pass "ingress projector holds on all six adversarial cases"
+
+# ── sync_turn goes through the projector, and the allowlist is pubkey-based ──
+P=patches/hermes/memory_tencentdb/__init__.py
+grep -q "from .ingress import project\|from ingress import project" "$P" \
+  || fail "sync_turn does not use the ingress projector"
+grep -q "MEMORY_TRUSTED_WRITERS" "$P" || fail "no writer allowlist"
+grep -qi "display.name\|npub1" "$P" && fail "allowlist must key on immutable hex pubkeys, not names/npubs"
+pass "sync_turn projects, and the allowlist is hex-pubkey based"
 exit 0

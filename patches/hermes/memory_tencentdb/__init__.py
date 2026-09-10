@@ -387,6 +387,19 @@ class MemoryTencentdbProvider(MemoryProvider):
         self._recall_window_days = int(
             os.environ.get("MEMORY_TENCENTDB_RECALL_WINDOW_DAYS") or 0
         )
+        # `projected` on the Buzz/ACP lane, where Buzz composes multi-principal prompts.
+        # `full` on the gateway lane, where the prompt has a single trusted composer
+        # (paperclip dispatch) and there are no ACP prompt blocks to project — failing
+        # closed there would silently delete the expert profiles' memory entirely.
+        self._capture_mode = (
+            os.environ.get("MEMORY_TENCENTDB_CAPTURE_MODE") or "full"
+        ).strip().lower()
+        # Immutable hex pubkeys, comma-separated. Human-readable handles are attacker-chosen.
+        self._trusted_writers = {
+            w.strip().lower()
+            for w in (os.environ.get("MEMORY_TRUSTED_WRITERS") or "").split(",")
+            if w.strip()
+        }
         self._user_id = _DEFAULT_USER_ID
         self._team_id = _DEFAULT_TEAM_ID
         self._agent_id = _DEFAULT_AGENT_ID
@@ -838,13 +851,29 @@ class MemoryTencentdbProvider(MemoryProvider):
         """No-op — recall is done synchronously in prefetch()."""
         pass
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Send the turn to Gateway for capture (non-blocking).
-
-        v3: uses /v3/conversation/add with messages array.
-        """
+    def sync_turn(self, user_content: str, assistant_content: str, *,
+                  session_id: str = "", memory_ingress: Optional[List[str]] = None,
+                  **_ignored: Any) -> None:
         if not self._ensure_alive_for_request() or not self._client:
             return
+
+        if self._capture_mode == "projected":
+            from .ingress import project
+            if not memory_ingress:
+                # No block list reached us: either the ACP sidecar patch is absent or
+                # this is not the Buzz lane. Fail closed rather than fall back to the
+                # joined string — the joined string has no trustworthy boundary.
+                self._log_ingress_drop("no-ingress-blocks", session_id, user_content)
+                return
+            p = project(memory_ingress, self._trusted_writers)
+            if p.capture is None:
+                self._log_ingress_drop(p.drop_reason or "unknown", session_id,
+                                       user_content, sender=p.sender_pubkey,
+                                       event_id=p.event_id)
+                return
+            capture_text = p.capture
+        else:
+            capture_text = user_content
 
         effective_session = session_id or self._session_id
         client = self._client
@@ -853,11 +882,18 @@ class MemoryTencentdbProvider(MemoryProvider):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         user_ts = now.replace(microsecond=max(0, now.microsecond - 1000)).isoformat().replace("+00:00", "Z")
-        assistant_ts = now.isoformat().replace("+00:00", "Z")
-        messages = [
-            {"role": "user", "content": user_content, "timestamp": user_ts},
-            {"role": "assistant", "content": assistant_content, "timestamp": assistant_ts},
-        ]
+        if self._capture_mode == "projected":
+            # The assistant half is not sent in projected mode: only the
+            # allowlisted principal's projected text crosses the boundary.
+            messages = [
+                {"role": "user", "content": capture_text, "timestamp": user_ts},
+            ]
+        else:
+            assistant_ts = now.isoformat().replace("+00:00", "Z")
+            messages = [
+                {"role": "user", "content": capture_text, "timestamp": user_ts},
+                {"role": "assistant", "content": assistant_content, "timestamp": assistant_ts},
+            ]
 
         def _sync():
             try:

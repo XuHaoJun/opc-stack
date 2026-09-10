@@ -377,6 +377,14 @@ services:
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
       MEMORY_TENCENTDB_AGENT_ID: agt-hermes-front-door
+      MEMORY_TENCENTDB_CAPTURE_MODE: projected
+      # Whose events may mutate shared memory. Defaults to the agent's owner —
+      # BUZZ_ACP_AGENT_OWNER is already the human owner's 64-char hex pubkey
+      # (see the comment at docker-compose.yml:334-338), which is exactly the
+      # immutable form this allowlist needs. Defaulting to it rather than to
+      # empty matters: an empty allowlist silently stops all passive capture,
+      # which is the fail-silent class this whole spec objects to.
+      MEMORY_TRUSTED_WRITERS: ${MEMORY_TRUSTED_WRITERS:-${BUZZ_ACP_AGENT_OWNER}}
       # Paperclip work-plane integration (GitHub dev flow): REST base only —
       # the board API key is injected by the entrypoint from
       # /keys/paperclip-api.key (paperclip-bootstrap writes it); no .env var.
@@ -491,6 +499,11 @@ services:
       MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
+      # Gateway lane: single trusted composer (paperclip dispatch), no ACP prompt
+      # blocks to project — `projected` here would fail closed on every turn and
+      # silently delete the expert profiles' memory. See 「已決：scientist lane 用
+      # `full`」in docs/superpowers/plans/2026-09-10-frontdoor-memory-hardening.md.
+      MEMORY_TENCENTDB_CAPTURE_MODE: full
       # Paperclip work-plane integration (GitHub dev flow): REST base only —
       # board API key comes from /keys/paperclip-api.key via the entrypoint.
       PAPERCLIP_API_URL: http://paperclip:3100
