@@ -153,6 +153,11 @@ COPY --from=deps-builder /build /app
 
 # OPC overlay: meta-plane provisioning one-shot (tencentdb-bootstrap).
 COPY --chmod=0755 opc/opc-tencentdb-provision.sh /usr/local/bin/opc-tencentdb-provision.sh
+# OPC overlay: idempotent gateway-config seeder + entrypoint that runs it
+# before the gateway starts (a hand-placed yaml would not exist on a clean
+# install; the gateway runs on parser defaults without it).
+COPY --chmod=0755 opc/opc-tdai-config-seed.sh /usr/local/bin/opc-tdai-config-seed.sh
+COPY --chmod=0755 opc/opc-tdai-entrypoint.sh /usr/local/bin/opc-tdai-entrypoint.sh
 
 # Data directory (mountable as PVC in K8s)
 RUN mkdir -p /data/tdai-memory /data/config
@@ -176,8 +181,7 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD curl -fsS http://127.0.0.1:${TDAI_GATEWAY_PORT:-8420}/health || exit 1
 
 # Use tini as PID 1 so SIGTERM/SIGKILL propagate cleanly to Node and its
-# pipeline workers, and zombie processes are reaped.
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/opc-tdai-entrypoint.sh"]
 
 # Start the Gateway. tsx is a runtime dependency so we can run TypeScript directly.
 CMD ["node", "--import", "tsx", "src/gateway/server.ts"]

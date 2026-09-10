@@ -47,11 +47,16 @@ assert "_snapshot_due" in pf, "prefetch must gate L2/L3 behind the snapshot chec
 print("ok")
 PY
 pass "system_prompt_block static; L2/L3 gated behind the snapshot check"
-
 # ── L1 recall is bounded, and the limitation is documented ──
 grep -q "time_start" patches/hermes/memory_tencentdb/client.py \
   || fail "atomic_search cannot pass time_start, so the recall window is unbounded"
 grep -q "MEMORY_TENCENTDB_RECALL_LIMIT" patches/hermes/memory_tencentdb/__init__.py \
   || fail "recall limit is not configurable"
 pass "L1 recall is bounded by limit and time window"
+
+# ── the gateway config has an unattended, idempotent producer ──
+S=patches/tencentdb-agent-memory/MemoryCore/opc-tdai-config-seed.sh
+[ -f "$S" ] || fail "no seeder for /data/config/tdai-gateway.yaml (it would vanish on a clean install)"
+grep -q "memory:" "$S" || fail "seeder does not write a memory block"
+pass "gateway config has an idempotent seeder"
 exit 0

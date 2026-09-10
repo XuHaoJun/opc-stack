@@ -1148,6 +1148,7 @@ services:
       - "${TENCENTDB_CORE_PORT:-8420}:8420"
     volumes:
       - tencentdb-core-data:/data/tdai-memory
+      - tencentdb-core-config:/data/config
 
   # First-boot admin: POST /v3/internal/meta/user/init-admin (idempotent),
   # then meta-plane provisioning (team "opc" + agent "agt-hermes-front-door" —
@@ -1288,5 +1289,6 @@ volumes:
   frontdoor-omp:
   hermes-omp:
   tencentdb-core-data:
+  tencentdb-core-config:
   tencentdb-hub-data:
   tencentdb-proxy-data:
