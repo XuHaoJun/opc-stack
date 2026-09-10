@@ -24,4 +24,11 @@ grep -q "check_identical_tree" scripts/prepare.sh \
   || fail "scripts/prepare.sh has no tree drift guard for memory_tencentdb"
 pass "prepare.sh guards the memory_tencentdb tree"
 
+
+# ── recall block carries scope + trust, and never a score ──
+P=patches/hermes/memory_tencentdb/__init__.py
+grep -q 'trust="untrusted-reference"' "$P" || fail "recall block has no trust attribute"
+grep -q 'scope=' "$P" || fail "recall block has no scope attribute"
+grep -q "[\"']score[\"']" "$P" && fail "recall block still references score (it is an RRF rank, not a similarity)"
+pass "recall block carries scope + trust and no score"
 exit 0
