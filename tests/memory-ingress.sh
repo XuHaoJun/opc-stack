@@ -47,4 +47,11 @@ assert "_snapshot_due" in pf, "prefetch must gate L2/L3 behind the snapshot chec
 print("ok")
 PY
 pass "system_prompt_block static; L2/L3 gated behind the snapshot check"
+
+# ── L1 recall is bounded, and the limitation is documented ──
+grep -q "time_start" patches/hermes/memory_tencentdb/client.py \
+  || fail "atomic_search cannot pass time_start, so the recall window is unbounded"
+grep -q "MEMORY_TENCENTDB_RECALL_LIMIT" patches/hermes/memory_tencentdb/__init__.py \
+  || fail "recall limit is not configurable"
+pass "L1 recall is bounded by limit and time window"
 exit 0

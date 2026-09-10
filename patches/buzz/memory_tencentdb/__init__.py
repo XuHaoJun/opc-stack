@@ -369,6 +369,24 @@ class MemoryTencentdbProvider(MemoryProvider):
         self._snapshot_ttl_seconds = int(
             os.environ.get("MEMORY_TENCENTDB_SNAPSHOT_TTL_SECONDS") or 3600
         )
+        # L1 recall bounds. NOTE: this is NOT relevance gating and cannot be made into
+        # relevance gating on this API. /v3/atomic/search takes no threshold, and the
+        # `score` it returns changes meaning per request — under `hybrid` it is an RRF
+        # rank, under a single-source result it is that path's raw score
+        # (core/tools/memory-search.ts:260-286). A single client-side threshold would
+        # silently mean different things for different queries, which is worse than no
+        # gate. Zero-hit abstention already exists server-side (it returns [] when both
+        # paths miss); the open gap is weak-but-nonzero hits. Bounding count and age is
+        # what we can do honestly. See spec 7.6.
+        self._recall_limit = int(os.environ.get("MEMORY_TENCENTDB_RECALL_LIMIT") or 5)
+        # Default 0 = off. This is a staleness knob, NOT a migration/reset
+        # mechanism — using it to push the pre-hardening pool out of automatic
+        # recall was considered and rejected (see 既有系統的處理): with a single
+        # operator there is nothing in that pool worth pushing out, and a window
+        # would discard genuinely useful old preferences along with it.
+        self._recall_window_days = int(
+            os.environ.get("MEMORY_TENCENTDB_RECALL_WINDOW_DAYS") or 0
+        )
         self._user_id = _DEFAULT_USER_ID
         self._team_id = _DEFAULT_TEAM_ID
         self._agent_id = _DEFAULT_AGENT_ID
@@ -681,6 +699,13 @@ class MemoryTencentdbProvider(MemoryProvider):
     def _mark_snapshot_sent(self, session_key: str) -> None:
         self._snapshot_sent_at[session_key] = time.monotonic()
 
+    def _recall_time_start(self) -> str:
+        if self._recall_window_days <= 0:
+            return ""
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self._recall_window_days)
+        return cutoff.isoformat().replace("+00:00", "Z")
+
     def system_prompt_block(self) -> str:
         """STATIC policy text only — never recall content (provider contract).
 
@@ -727,10 +752,11 @@ class MemoryTencentdbProvider(MemoryProvider):
                     target=_fetch,
                     args=("l1", lambda: self._client.atomic_search(
                         query=query,
-                        limit=5,
+                        limit=self._recall_limit,
                         team_id=self._team_id,
                         agent_id=self._agent_id,
                         user_id=self._user_id,
+                        time_start=self._recall_time_start(),
                     )),
                     daemon=True,
                 ),
@@ -944,6 +970,7 @@ class MemoryTencentdbProvider(MemoryProvider):
                     team_id=self._team_id,
                     agent_id=self._agent_id,
                     user_id=self._user_id,
+                    time_start=self._recall_time_start(),
                 )
                 self._record_success()
                 # Unwrap v3 envelope for LLM consumption
