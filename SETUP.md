@@ -222,6 +222,13 @@ pubkey can then connect; no invites needed).
   Team/Agent loadouts in the kernel meta registry automatically — the panel
   (http://localhost:8125) renders them without manual setup. Confirm
   `memory-tencentdb Gateway already running` in hermes/frontdoor logs.
+- **Frontdoor memory hardening**: passive capture is gated on protocol structure (a single `<buzz-event>` block) and writer identity (`MEMORY_TRUSTED_WRITERS`, which defaults to `BUZZ_ACP_AGENT_OWNER` — no extra `.env` key needed); anything ambiguous is dropped into a metadata-only ingress log, and L2/L3 recall arrives as a per-session snapshot. The pre-hardening pool is deliberately **not** migrated — with a single operator it holds only the operator's own words — but know the two consequences: recall has no session dimension, so old rows keep entering every new thread, and the L3 persona re-seeds itself from the previous one. If a second human ever writes through Buzz, re-evaluate. Deploy it with:
+  ```bash
+  scripts/prepare.sh
+  docker compose build frontdoor hermes
+  docker compose up -d frontdoor hermes hermes-dashboard
+  sh tests/memory-scope.sh
+  ```
 - **TencentDB memory for other coding agents** (Codex/Claude/… — PRD phase K3,
   optional): point an agent's LLM base URL at the proxy
   `http://localhost:8096/<agent>/<spaceId>` with headers
