@@ -59,4 +59,10 @@ S=patches/tencentdb-agent-memory/MemoryCore/opc-tdai-config-seed.sh
 [ -f "$S" ] || fail "no seeder for /data/config/tdai-gateway.yaml (it would vanish on a clean install)"
 grep -q "memory:" "$S" || fail "seeder does not write a memory block"
 pass "gateway config has an idempotent seeder"
+# ── the sidecar patch exists and is applied by the buzz image ──
+PATCHFILE=patches/buzz/patches/hermes-acp-memory-ingress.patch
+[ -f "$PATCHFILE" ] || fail "no ACP sidecar patch — the memory ingress boundary would be lost at content.py:273"
+grep -q "fuzz=0" patches/buzz/Dockerfile \
+  || fail "buzz Dockerfile does not apply the patch with --fuzz=0 (upgrades must hard-fail, not drift)"
+pass "ACP sidecar patch exists and is applied with --fuzz=0"
 exit 0

@@ -231,12 +231,18 @@ CMD ["/usr/local/bin/buzz-relay"]
 # package lags the release tags.
 FROM opc-relay AS opc-frontdoor
 
+# Hermes ACP sidecar patch (memory ingress): applied with --fuzz=0 so an upstream
+# move of the hunk context stops the build instead of silently drifting.
+COPY opc/patches/hermes-acp-memory-ingress.patch /tmp/
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv python3-pip git \
+    && apt-get install -y --no-install-recommends python3 python3-venv python3-pip git patch \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/hermes-venv \
     && git clone --depth 1 --branch v2026.9.7 \
         https://github.com/NousResearch/hermes-agent.git /opt/hermes-src \
+    && (cd /opt/hermes-src && patch -p1 --fuzz=0 --no-backup-if-mismatch \
+        < /tmp/hermes-acp-memory-ingress.patch) \
     && /opt/hermes-venv/bin/pip install --no-cache-dir -e "/opt/hermes-src[acp]" \
     && rm -rf /root/.cache/pip
 
