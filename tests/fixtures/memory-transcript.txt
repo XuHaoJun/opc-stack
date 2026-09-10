@@ -1,0 +1,10 @@
+我偏好用 pnpm 而不是 npm，所有新專案都這樣
+記住：部署到 production 之前一定要先跑 tests/connectivity.sh
+今天把 hermes 升到 v2026.9.7 了，七條 gate 都綠
+ok
+?
+我不喜歡在 commit message 裡用 emoji
+OPC 的 work truth 是 Paperclip，Hermes 的 Kanban 永遠關閉
+昨天 devenv 的 valkey 槽位用完了，release 掉 scientist 之後就好了
+/status
+回答我的時候請直接講結論，不要先鋪陳
