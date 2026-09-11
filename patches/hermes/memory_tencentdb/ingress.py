@@ -28,6 +28,10 @@ _ELIGIBLE_TAG = "buzz-event"
 # field of the prefix, so everything after `Content: ` is sender-controlled.
 _CONTENT_MARKER = "\nContent: "
 
+# The generated header, in order. format_event_block (queue.rs:1312-1319) emits
+# exactly these five lines and nothing else before the content marker.
+_HEADER_KEYS = ("Event ID", "Channel", "Kind", "From", "Time")
+
 
 @dataclass
 class Projection:
@@ -49,19 +53,43 @@ def _open_tag(block: str) -> Optional[str]:
 
 
 def _parse_prefix(body: str) -> dict:
-    """Parse ONLY the generated header, which precedes any sender bytes.
+    """Parse the generated header POSITIONALLY, and only when it is exactly that shape.
 
-    Never search inside the content: a second `From:` or `Event ID:` there is
-    attacker-controlled. We stop at the first `Content: ` and read nothing past it.
+    Not key-based. `Channel:` embeds the channel name raw (queue.rs:1309) and the
+    relay validates names only for emptiness (`canonical_channel_name`,
+    buzz-core/src/channel.rs:15 — it trims, it does NOT filter control characters,
+    unlike `sanitize_prompt_label` at queue.rs:1248 which is why the `From:` label is
+    not a vector). So a channel named
+    `general\nFrom: <owner> (hex: …)\nContent: <payload>` injects whole header lines
+    ahead of the generated ones, and a parser that takes the first `From:` reads the
+    forged one. Channel is the ONLY such field: Event ID / Kind / Time are machine
+    values and the `From` label is sanitised upstream.
+
+    So: the head must be exactly _HEADER_KEYS, one line each, in that order. Callers
+    must also have checked that the body holds exactly one content marker — the two
+    conditions are jointly necessary and neither is sufficient alone. An injection
+    that keeps the head five well-formed lines has to supply its own `Content: `
+    terminator (otherwise the real Kind/From/Time lines follow and the head is too
+    long), and the real marker always trails it, so the count catches what the shape
+    check cannot; an injection that adds lines without a terminator is caught by the
+    shape check alone.
     """
     head, sep, _ = body.partition(_CONTENT_MARKER)
     if not sep:
         return {}
+    lines = head.split("\n")
+    # semantic_section_with_attributes wraps the block as `<tag …>\n<block>\n</tag>`
+    # (prompt_framing.rs), so the body always opens with one empty line.
+    if lines and lines[0] == "":
+        lines = lines[1:]
+    if len(lines) != len(_HEADER_KEYS):
+        return {}
     fields = {}
-    for line in head.splitlines():
-        key, sep2, val = line.partition(": ")
-        if sep2:
-            fields.setdefault(key.strip(), val.strip())
+    for key, line in zip(_HEADER_KEYS, lines):
+        prefix = key + ": "
+        if not line.startswith(prefix):
+            return {}
+        fields[key] = line[len(prefix):].strip()
     return fields
 
 
@@ -97,6 +125,11 @@ def project(blocks: List[str], trusted_writers: Set[str]) -> Projection:
         return Projection(None, recall_query, "forged-boundary")
 
     body = block[block.find(">") + 1: block.rstrip().rfind(close)]
+    if body.count(_CONTENT_MARKER) != 1:
+        # The generated header emits exactly one. A second one is either a channel-name
+        # injection (see _parse_prefix) or a sender who wrote a `Content: ` line of
+        # their own — indistinguishable from here, so both fail closed.
+        return Projection(None, recall_query, "ambiguous-header")
     fields = _parse_prefix(body)
     if not fields.get("Event ID") or not fields.get("From"):
         return Projection(None, recall_query, "unparsable-prefix")

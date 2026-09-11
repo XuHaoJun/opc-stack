@@ -443,18 +443,37 @@ event-within-batch 的切分。** 7.1 因此對 multi-event 一律 fail closed�
 `format_event_block` 的版面 (`queue.rs:1312-1359`):
 
 ```text
-Event ID: <generated>          ← 這幾行全部在攻擊者位元組之前
-Channel:  <generated>
+Event ID: <generated>          ← 位置在攻擊者位元組之前
+Channel:  <generated 外框, 但名字是 raw>  ← 唯一的注入點, 見下
 Kind:     <generated>
-From:     <generated, 含 npub 與 hex pubkey>
+From:     <generated, 含 npub 與 hex pubkey, label 已濾控制字元>
 Time:     <generated>
 Content: <<<RAW USER CONTENT>>>   ← 從這裡開始不可信
 Tags: <generated json>            ← 但這兩行在 raw content 之後,
 Parsed: <generated>               ← 所以攻擊者可以自己偽造它們
 ```
 
-- **`Content: ` 之前的 prefix 完全可信** —— 它由 Buzz 生成且位於任何攻擊者位元組之前。
-  **writer identity (pubkey) 因此可以安全取出**, 這是 7.1 writer policy 成立的基礎。
+- **勘誤 (2026-09-11, code review)**: 本節原本寫「`Content: ` 之前的 prefix 完全可信」。
+  **那是錯的**, 而 `ingress.py` 第一版的 key-based 解析 (`fields.setdefault`, 取第一個
+  `From:`) 就建立在這個錯誤前提上, 實測可被利用。`Channel:` 行嵌的是
+  `channel_info.name` **原樣** (`queue.rs:1309`), 而 relay 對 channel name 的唯一檢查是
+  `canonical_channel_name(v).trim().is_empty()` (`buzz-core/src/channel.rs:15` —— 只 trim
+  前後的 `#`/空白, **不濾控制字元**)。對照 `From:` 的 label 走
+  `sanitize_prompt_label` (`queue.rs:1248`, `filter(|c| !c.is_control())`) —— **有濾**,
+  所以 label 不是注入點。於是一個叫
+  `general\nFrom: <owner> (hex: …)\nContent: <payload>` 的 channel 會在生成的
+  `From:`/`Content:` **之前**插入自己那兩行, 讓攻擊者選的文字掛在可信 owner 名下寫進
+  durable memory。
+- **修正後的規則: prefix 要位置性驗證, 不是 key-based。** 兩個條件同時成立才解析:
+  (1) head (第一個 `\nContent: ` 之前) 恰好是 `Event ID / Channel / Kind / From / Time`
+  五行、順序固定、一行一個; (2) 整個 body 裡 `\nContent: ` 恰好出現一次。兩者缺一不可 ——
+  想讓 head 維持五行合法的注入, 必須自備 `Content: ` 終結符 (否則真正的 Kind/From/Time
+  會接在後面讓 head 超長), 而真正的那個 marker 永遠跟在它後面, 所以條件 (2) 抓得到
+  條件 (1) 抓不到的; 只加行而不自備終結符的注入則由條件 (1) 抓到。代價是**寄件者自己
+  寫了一行 `Content: ` 的合法訊息也會被丟掉** (reason `ambiguous-header`) —— 從解析器的
+  位置無法與注入區分, 一律 fail closed。
+- writer identity (pubkey) 在上述驗證通過後才可以安全取出, 這是 7.1 writer policy 成立
+  的基礎。回歸測試: `tests/memory-scope.sh` 的 `── 3b channel-name header injection ──`。
 - **但 `Content:` 不是 "remainder of block"**: `\nTags: …` (`:1330`) 與可選的
   `\nParsed: …` (`:1356`) 接在它後面。而因為 content 原樣, 攻擊者也能自己輸出
   `\nTags: […]` —— **所以 content 的結尾無法可靠判定。**
@@ -1211,8 +1230,10 @@ ACP text blocks
 
 #### 7.1.3 只解析生成的 prefix, 不在 content 裡搜東西
 
-`format_event_block` 的 `Content: ` **之前**全部是 Buzz 生成的, 且位於任何攻擊者位元組
-之前 (1.7 (e)), 所以可以安全取出:
+`format_event_block` 的 `Content: ` **之前**由 Buzz 生成, 但 **`Channel:` 行的名字是原樣的**
+(1.7 (e) 的勘誤), 所以 prefix 只有在**位置性驗證通過後**才可以取出 —— head 恰好是
+`Event ID / Channel / Kind / From / Time` 五行且順序固定, 且整個 body 只有一個
+`\nContent: `:
 
 ```text
 可信 ACP block 邊界
@@ -1226,6 +1247,8 @@ ACP text blocks
 **規則**:
 
 - **絕不**在 content 裡搜第二組 `From:` / `Event ID:` / XML tag —— 那些都可偽造。
+- **絕不**用 key-based 解析 header (取第一個 `From:`) —— `Channel:` 的注入就排在它前面
+  (1.7 (e) 勘誤)。要位置性驗證。
 - **絕不**嘗試偵測 content 的結尾。`\nTags:` 與 `\nParsed:` 雖然是生成的, 但它們在 raw
   content **之後**, 攻擊者可以自己輸出同樣的行 (1.7 (e))。取到 block 結尾為止,
   夾帶的生成 tail 當**雜訊**接受。任何「聰明的結尾偵測」都會變成攻擊者可操縱的旋鈕。
@@ -1238,6 +1261,7 @@ sender pubkey ∉ MEMORY_TRUSTED_WRITERS → reasoning_context 照常, 但永不
 ```
 
 allowlist 用**不可變的 pubkey**, 不用 display name (`From:` 行同時帶 npub 與 hex)。
+這條的前提是 `From:` 行**確實是生成的那一行** —— 見 7.1.3 的位置性驗證。
 預設值 = operator 自己 + 明確受信任的 sibling agent。
 完整理由與不變量見開頭「Writer 邊界」與 1.9。
 
