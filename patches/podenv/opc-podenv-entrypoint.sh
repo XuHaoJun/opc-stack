@@ -26,6 +26,24 @@ chown "$PODENV_UID:$PODENV_GID" "$PODENV_SOCK_DIR" "$PODENV_STORE" "$PODENV_RUNT
 # no traverse on this directory is refused before the socket mode matters.
 chmod 0700 "$PODENV_SOCK_DIR"
 
+# XDG_RUNTIME_DIR is per-SESSION state: it must not outlive the process that
+# owns it. On a host systemd-logind gives it that lifetime by making
+# /run/user/<uid> a tmpfs; a container gets nothing, so compose declares the
+# tmpfs (see the `tmpfs:` block on this service). Check it here rather than
+# trusting the compose file, because the failure it prevents does not look like
+# a missing mount: podman caches the boot ID under this directory, `docker
+# restart` preserves the overlay layer it would otherwise live in, and the next
+# host reboot leaves a cached boot ID that no restart can clear — podman then
+# refuses to start at all and this service crashloops until someone
+# force-recreates it.
+if ! awk -v d="$PODENV_RUNTIME_DIR" '$2 == d && $3 == "tmpfs" { f = 1 } END { exit !f }' /proc/mounts; then
+    echo "[podenv] WARNING $PODENV_RUNTIME_DIR is NOT a tmpfs — podman's runtime state will" >&2
+    echo "[podenv] WARNING   survive \`docker restart\` in this container's overlay layer, and the" >&2
+    echo "[podenv] WARNING   next host reboot will strand a stale boot ID that only" >&2
+    echo "[podenv] WARNING   \`docker compose up -d --force-recreate podenv\` can clear. Restore the" >&2
+    echo "[podenv] WARNING   \`tmpfs: [$PODENV_RUNTIME_DIR:...]\` declaration on the podenv service." >&2
+fi
+
 as_runtime_user() {
     setpriv --reuid "$PODENV_UID" --regid "$PODENV_GID" --clear-groups --inh-caps=-all \
         env HOME=/home/podman XDG_RUNTIME_DIR="$PODENV_RUNTIME_DIR" "$@"
@@ -74,8 +92,25 @@ if [ "$_st_ok" != 1 ]; then
     printf 'userns nesting failed: %s\n' "$_st_out" > "$PODENV_DIAG"
     echo "[podenv] WARNING userns nesting failed after $_st_max attempts — every lease will fail." >&2
     echo "[podenv] WARNING   $_st_out" >&2
-    echo "[podenv] WARNING   Check that this service still has security_opt: [seccomp=unconfined]," >&2
-    echo "[podenv] WARNING   and that the host allows unprivileged user namespaces." >&2
+    # The guidance has to follow the error. Measured: a stale cached boot ID
+    # fails this self-test identically to a permissions problem, and the old
+    # unconditional "check seccomp and userns" advice sent the reader looking at
+    # two things that were both fine.
+    case "$_st_out" in
+        *"boot ID"*)
+            echo "[podenv] WARNING   This is STALE RUNTIME STATE, not permissions: podman cached a boot" >&2
+            echo "[podenv] WARNING   ID under $PODENV_RUNTIME_DIR and the host has rebooted since." >&2
+            echo "[podenv] WARNING   That directory is supposed to be a tmpfs so the cache cannot" >&2
+            echo "[podenv] WARNING   outlive the container (see the tmpfs warning above, and the" >&2
+            echo "[podenv] WARNING   \`tmpfs:\` block on the podenv service). To recover now:" >&2
+            echo "[podenv] WARNING     docker compose up -d --force-recreate podenv" >&2
+            echo "[podenv] WARNING   \`docker restart\` will NOT clear it — it keeps the same layer." >&2
+            ;;
+        *)
+            echo "[podenv] WARNING   Check that this service still has security_opt: [seccomp=unconfined]," >&2
+            echo "[podenv] WARNING   and that the host allows unprivileged user namespaces." >&2
+            ;;
+    esac
 elif [ ! -c /dev/net/tun ]; then
     # UNREACHABLE through the supported path (final review F3, measured):
     # compose declares `devices: [/dev/net/tun]`, and when the HOST is

@@ -124,7 +124,35 @@ podenv_provision_alive() {
 # `podman machine init`" sends the reader to a macOS workflow that does not
 # exist in this stack, and a socket that exists but refuses the connection
 # looks identical to one that is not listening yet.
+# The socket is absent for about a second across a `docker compose restart
+# podenv` (measured 1.0s: podman unlinks the stale socket and rebinds only
+# after its runtime init, which now includes the new-boot refresh the tmpfs
+# runtime dir gives it). `docker compose restart` RETURNS INSIDE that window,
+# so a caller acting on the restart immediately — an agent picking a lease
+# back up, and tests/podenv.sh's own race section — used to be told "The
+# podenv compose service is not running. Start it: docker compose up -d
+# podenv" about a service that was running and three quarters of the way up.
+# Wrong advice about a transient state, which is the same failure mode as the
+# entrypoint's old "check seccomp and userns" for a stale boot ID.
+#
+# Bounded, and only for the one state that is genuinely transient: the socket
+# DIRECTORY missing means the volume was never mounted here, which waiting
+# cannot fix, so that still fails immediately below. 30 x 0.5s = 15s, ~15x the
+# measured window — long enough for a loaded host, short enough that a service
+# that really is down still answers the operator promptly.
+podenv_wait_for_socket() {
+    [ -d "$(dirname "$PODENV_SOCK")" ] || return 0
+    _wfs_i=0
+    while [ "$_wfs_i" -lt 30 ]; do
+        [ -S "$PODENV_SOCK" ] && return 0
+        _wfs_i=$((_wfs_i + 1))
+        sleep 0.5
+    done
+    return 0
+}
+
 podenv_require_runtime() {
+    podenv_wait_for_socket
     if podenv_runtime_reachable; then
         if [ -s "$PODENV_DIAG" ]; then
             # A recorded verdict is not the same as a current one (final
@@ -164,7 +192,7 @@ podenv_require_runtime() {
     # Not reachable — walk the same three checks again, in order, to name
     # which one actually failed instead of a single generic message.
     if [ ! -S "$PODENV_SOCK" ]; then
-        die "no podman socket at $PODENV_SOCK. The podenv compose service is not running (or its volume is not mounted here). Start it: docker compose up -d podenv" 4
+        die "no podman socket at $PODENV_SOCK after waiting 15s for it. The podenv compose service is not running (or its volume is not mounted here); a service that is merely still starting comes back well inside that wait. Start it: docker compose up -d podenv" 4
     fi
     # Check for the client BEFORE attempting to use it: a missing/broken
     # `podman` binary and a live socket refusing this uid produce the exact

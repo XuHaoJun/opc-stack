@@ -1132,6 +1132,32 @@ services:
     # entrypoint) warns when they drift, and tests/podenv.sh fails on it too.
     ports:
       - "127.0.0.1:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}"
+    # podman's rootless RUNTIME state (runroot + libpod tmp) lives here, and
+    # XDG_RUNTIME_DIR is defined as per-session state that is GONE when the
+    # session ends. On a real host systemd-logind supplies that lifetime by
+    # making /run/user/<uid> a tmpfs; a container gets nothing, so without this
+    # line the directory is an ordinary directory in the container's writable
+    # overlay layer — which `docker restart` PRESERVES.
+    #
+    # Measured consequence, reproducible in one command (corrupt
+    # /run/user/1000/libpod/tmp/alive, then `docker compose restart podenv`):
+    # podman refuses to start at all with "current system boot ID differs from
+    # cached boot ID; an unhandled reboot has occurred", the entrypoint's
+    # self-test fails all five attempts, and the service crashloops FOREVER —
+    # `docker restart` cannot clear it because it keeps the same layer. Only
+    # `--force-recreate` (a fresh layer) or deleting the directories by hand
+    # recovers it. In the field this fires on every host reboot.
+    #
+    # Making it a tmpfs removes the class rather than healing it: the cache
+    # cannot outlive the container, so the boot ID podman reads is always the
+    # one it cached this boot. It also means podman performs its normal
+    # new-boot refresh on every start instead of inheriting runtime state from
+    # a previous instance. No size cap: nothing in the runroot grows unbounded
+    # (measured 12K idle, 116K with two leases running), an arbitrary cap would
+    # surface as an ENOSPC nobody could read, and mem_limit already bounds the
+    # container as a whole.
+    tmpfs:
+      - /run/user/1000:mode=0700,uid=1000,gid=1000
     volumes:
       - opc-podenv-sock:/run/podenv
       - opc-podenv-store:/home/podman/.local/share/containers
