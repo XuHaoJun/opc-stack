@@ -2,6 +2,11 @@
 
 日期: 2026-09-10
 狀態: **調查完成, 設計已定** (第四輪 —— 經兩次設計 review 反證後改寫), 未實作
+> **部分被取代 (2026-09-11)**: §7.1 的**機制** (解析生成的 header 取 boundary) 已由
+> [`2026-09-11-memory-ingress-structural-provenance.md`](2026-09-11-memory-ingress-structural-provenance.md)
+> 取代 —— 改用 ACP block 自己的 `_meta` 搬運身分, 不再解析文字。本 spec 的 Part 1–6 調查
+> 與其餘 §7 條目仍然有效, 本文**刻意保留原樣**當作那次設計的紀錄 (尤其是 §7.1 為什麼一度
+> 選擇文字解析、以及 §1.6/§1.7 的證據)。
 實作成本: `patches/` + **一個外科式 hermes upstream patch** (7.1.1, 不變量 7 的唯一例外)
 分支: `feat/memory-scope-hardening`
 量測基準: buzz `desktop-v0.5.23` / hermes `v2026.9.7` / paperclip `v2026.831.1` / tencentdb `v2.0.1`
