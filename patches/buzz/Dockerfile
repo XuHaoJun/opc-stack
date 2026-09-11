@@ -55,6 +55,7 @@ RUN apt-get update \
         libssl-dev \
         ca-certificates \
         git \
+        patch \
     && rm -rf /var/lib/apt/lists/*
 ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 COPY --from=planner /build/recipe.json recipe.json
@@ -66,6 +67,27 @@ COPY --exclude=opc . .
 COPY opc/opc-nip-oa-sign.rs crates/buzz-sdk/examples/opc_nip_oa_sign.rs
 RUN cargo test --release --locked -p buzz-sdk --example opc_nip_oa_sign \
     && cargo build --release --locked -p buzz-sdk --example opc_nip_oa_sign
+# Memory ingress: buzz-acp attaches the event identity of each prompt section as
+# ACP `_meta` (patches/buzz/patches/opc-memory-ingress-meta.patch). Applied with
+# --fuzz=0 so an upstream move of the hunk context stops the build instead of
+# silently shipping prompts with no provenance — the front door's memory ingress
+# drops a prompt with no `memoryEvents`, so unprompted drift would read as
+# "nothing to remember" rather than as a failure. Its unit tests run here, inside
+# the image build, before the binary is produced; they also drop
+# $CARGO_TARGET_DIR/opc-memory-ingress-dump.json, which tests/memory-ingress-meta.sh
+# compares against tests/fixtures/buzz-acp-prompt-blocks.json.
+COPY opc/patches/opc-memory-ingress-meta.patch /tmp/
+# `cargo test <filter>` exits 0 when the filter matches NOTHING, so a stale build
+# ("0 tests, ok") would look like a pass and ship a binary without the metadata.
+# Note the per-target output legitimately contains "running 0 tests" for targets the
+# filter does not match, so assert on the count of PASSED tests, not on that string.
+# The dump assertion is the artifact-level check: the tests write the payloads they
+# actually built, and the key must be in what they wrote.
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/opc-memory-ingress-meta.patch \
+    && (cargo test --release --locked -p buzz-acp memory_ingress_meta_tests > /tmp/ingress-tests.log 2>&1 \
+        || { cat /tmp/ingress-tests.log; exit 1; }) \
+    && grep -Eq "test result: ok\. [1-9][0-9]* passed" /tmp/ingress-tests.log \
+    && grep -q '"memoryEvents"' target/opc-memory-ingress-dump.json
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay \
