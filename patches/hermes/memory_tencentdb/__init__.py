@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional
 from agent.memory_provider import MemoryProvider
 
 from .client import MemoryTencentdbSdkClient
+from .recall import recent_only
 from .supervisor import GatewaySupervisor
 
 logger = logging.getLogger(__name__)
@@ -406,6 +407,8 @@ class MemoryTencentdbProvider(MemoryProvider):
         # recall was considered and rejected (see 既有系統的處理): with a single
         # operator there is nothing in that pool worth pushing out, and a window
         # would discard genuinely useful old preferences along with it.
+        # Enforced client-side over `created_at` — the endpoint ignores its own
+        # `time_start` field (see recall.py for the evidence).
         self._recall_window_days = _env_int(
             "MEMORY_TENCENTDB_RECALL_WINDOW_DAYS", 0
         )
@@ -779,13 +782,6 @@ class MemoryTencentdbProvider(MemoryProvider):
         }
         self._snapshot_sent_at[session_key] = now
 
-    def _recall_time_start(self) -> str:
-        if self._recall_window_days <= 0:
-            return ""
-        from datetime import datetime, timedelta, timezone
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self._recall_window_days)
-        return cutoff.isoformat().replace("+00:00", "Z")
-
     def system_prompt_block(self) -> str:
         """STATIC policy text only — never recall content (provider contract).
 
@@ -836,7 +832,6 @@ class MemoryTencentdbProvider(MemoryProvider):
                         team_id=self._team_id,
                         agent_id=self._agent_id,
                         user_id=self._user_id,
-                        time_start=self._recall_time_start(),
                     )),
                     daemon=True,
                 ),
@@ -871,9 +866,11 @@ class MemoryTencentdbProvider(MemoryProvider):
             # Build recall context from results
             parts: List[str] = []
 
-            # L1 memories
+            # L1 memories — age-bounded client-side (the endpoint ignores `time_start`)
             l1_data = results.get("l1", {})
-            l1_items = l1_data.get("data", {}).get("items", [])
+            l1_items = recent_only(
+                l1_data.get("data", {}).get("items", []) or [], self._recall_window_days
+            )
             if l1_items:
                 parts.append(_format_l1_block(l1_items, self._agent_id))
 
@@ -929,7 +926,8 @@ class MemoryTencentdbProvider(MemoryProvider):
 
     def _log_ingress_drop(self, reason: str, session_id: str, content: str,
                           *, sender: Optional[str] = None,
-                          event_id: Optional[str] = None) -> None:
+                          event_id: Optional[str] = None,
+                          channel: Optional[str] = None) -> None:
         try:
             if self._ingress_log is None:
                 from .ingress_log import IngressLog
@@ -940,12 +938,12 @@ class MemoryTencentdbProvider(MemoryProvider):
                     debug=(os.environ.get("MEMORY_TENCENTDB_INGRESS_DEBUG") == "1"),
                 )
             self._ingress_log.record(reason, session_id, self._agent_id, content,
-                                     sender=sender, event_id=event_id)
+                                     sender=sender, event_id=event_id, channel=channel)
         except Exception:
             logger.debug("ingress drop logging failed", exc_info=True)
 
     def sync_turn(self, user_content: str, assistant_content: str, *,
-                  session_id: str = "", memory_ingress: Optional[List[str]] = None,
+                  session_id: str = "", memory_ingress: Optional[List[Dict[str, Any]]] = None,
                   **_ignored: Any) -> None:
         if not self._ensure_alive_for_request() or not self._client:
             return
@@ -953,16 +951,19 @@ class MemoryTencentdbProvider(MemoryProvider):
         if self._capture_mode == "projected":
             from .ingress import project
             if not memory_ingress:
-                # No block list reached us: either the ACP sidecar patch is absent or
+                # No per-block metadata reached us: the ACP sidecar patch is absent, or
                 # this is not the Buzz lane. Fail closed rather than fall back to the
-                # joined string — the joined string has no trustworthy boundary.
+                # joined string — text is not a trustworthy boundary (spec §1).
                 self._log_ingress_drop("no-ingress-blocks", session_id, user_content)
                 return
             p = project(memory_ingress, self._trusted_writers)
+            for drop in p.drops:
+                self._log_ingress_drop(
+                    drop.reason, session_id, drop.content or user_content,
+                    sender=drop.sender_pubkey, event_id=drop.event_id,
+                    channel=drop.channel_id,
+                )
             if p.capture is None:
-                self._log_ingress_drop(p.drop_reason or "unknown", session_id,
-                                       user_content, sender=p.sender_pubkey,
-                                       event_id=p.event_id)
                 return
             capture_text = p.capture
         else:
@@ -1099,7 +1100,6 @@ class MemoryTencentdbProvider(MemoryProvider):
                     team_id=self._team_id,
                     agent_id=self._agent_id,
                     user_id=self._user_id,
-                    time_start=self._recall_time_start(),
                 )
                 self._record_success()
                 # Unwrap v3 envelope for LLM consumption

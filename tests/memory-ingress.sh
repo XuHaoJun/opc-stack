@@ -1,5 +1,9 @@
 #!/bin/sh
 # Offline gates for the memory ingress path. No stack, no network.
+#
+# Spec: docs/superpowers/specs/2026-09-11-memory-ingress-structural-provenance.md
+# The wire contract these cases are built on is tests/fixtures/buzz-acp-prompt-blocks.json;
+# the Rust half is gated separately by tests/memory-ingress-meta.sh.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -24,7 +28,6 @@ grep -q "check_identical_tree" scripts/prepare.sh \
   || fail "scripts/prepare.sh has no tree drift guard for memory_tencentdb"
 pass "prepare.sh guards the memory_tencentdb tree"
 
-
 # ── recall block carries scope + trust, and never a score ──
 P=patches/hermes/memory_tencentdb/__init__.py
 grep -q 'trust="untrusted-reference"' "$P" || fail "recall block has no trust attribute"
@@ -47,67 +50,147 @@ assert "_snapshot_due" in pf, "prefetch must gate L2/L3 behind the snapshot chec
 print("ok")
 PY
 pass "system_prompt_block static; L2/L3 gated behind the snapshot check"
-# ── L1 recall is bounded, and the limitation is documented ──
-grep -q "time_start" patches/hermes/memory_tencentdb/client.py \
-  || fail "atomic_search cannot pass time_start, so the recall window is unbounded"
-grep -q "MEMORY_TENCENTDB_RECALL_LIMIT" patches/hermes/memory_tencentdb/__init__.py \
-  || fail "recall limit is not configurable"
-pass "L1 recall is bounded by limit and time window"
+
+# ── L1 recall window is enforced CLIENT-side (the server ignores time_start) ──
+grep -q 'body\["time_start"\]' patches/hermes/memory_tencentdb/client.py \
+  && fail "client sends time_start: /v3/atomic/search accepts it in the schema but the handler never reads it (v2-router.ts:1192-1216)"
+grep -q "MEMORY_TENCENTDB_RECALL_LIMIT" "$P" || fail "recall limit is not configurable"
+python3 - <<'PY' || fail "recall window does not filter by age"
+import sys
+sys.path.insert(0, "patches/hermes/memory_tencentdb")
+from recall import recent_only
+
+items = [
+    {"content": "fresh", "created_at": "2026-09-11T00:00:00.000Z"},
+    {"content": "stale", "created_at": "2026-08-01T00:00:00.000Z"},
+    {"content": "no-timestamp"},
+    {"content": "odd-shape", "created_at": "not-a-date"},
+]
+assert [m["content"] for m in recent_only(items, 0)] == ["fresh", "stale", "no-timestamp", "odd-shape"], \
+    "window_days=0 must be a no-op (off), in order"
+kept = [m["content"] for m in recent_only(items, 7, now="2026-09-11T12:00:00Z")]
+assert kept == ["fresh", "no-timestamp", "odd-shape"], kept
+assert [m["content"] for m in recent_only(items, 45, now="2026-09-11T12:00:00Z")] == \
+    ["fresh", "stale", "no-timestamp", "odd-shape"], "45d window must keep the Aug item"
+print("ok")
+PY
+pass "L1 recall is bounded by limit and a client-side window"
 
 # ── the gateway config has an unattended, idempotent producer ──
 S=patches/tencentdb-agent-memory/MemoryCore/opc-tdai-config-seed.sh
 [ -f "$S" ] || fail "no seeder for /data/config/tdai-gateway.yaml (it would vanish on a clean install)"
 grep -q "memory:" "$S" || fail "seeder does not write a memory block"
 pass "gateway config has an idempotent seeder"
-# ── the sidecar patch exists and is applied by the buzz image ──
+
+# ── the ACP sidecar patch carries protocol metadata, and is applied strictly ──
 PATCHFILE=patches/buzz/patches/hermes-acp-memory-ingress.patch
-[ -f "$PATCHFILE" ] || fail "no ACP sidecar patch — the memory ingress boundary would be lost at content.py:273"
+[ -f "$PATCHFILE" ] || fail "no ACP sidecar patch — the prompt block metadata would never reach the provider"
+grep -q "preserve_prompt_block_meta" "$PATCHFILE" \
+  || fail "the ACP patch does not preserve per-block _meta"
+grep -q "field_meta" "$PATCHFILE" || fail "the ACP patch does not read ACP _meta"
 grep -q "fuzz=0" patches/buzz/Dockerfile \
   || fail "buzz Dockerfile does not apply the patch with --fuzz=0 (upgrades must hard-fail, not drift)"
-pass "ACP sidecar patch exists and is applied with --fuzz=0"
-# ── ingress projector: six adversarial cases ──
-python3 - <<'PY' || fail "ingress projector failed an adversarial case"
+pass "ACP sidecar patch carries _meta and is applied with --fuzz=0"
+
+# ── the projector reads protocol metadata ONLY (no text parsing left) ──
+grep -q 'Content: \|_HEADER_KEYS\|_open_tag\|forged-boundary' patches/hermes/memory_tencentdb/ingress.py \
+  && fail "ingress.py still parses prompt text — the boundary must be the protocol, not the string"
+python3 - <<'PY' || fail "ingress projector failed a case"
+import inspect
+import json
 import sys
 sys.path.insert(0, "patches/hermes/memory_tencentdb")
+import ingress
 from ingress import project
 
-TRUSTED = {"aabbcc"}
+FX = json.load(open("tests/fixtures/buzz-acp-prompt-blocks.json"))
+ID = FX["identities"]
+TRUSTED = {ID["owner_hex"]}
+SC = FX["scenarios"]
 
-def blocks(name):
-    raw = open(f"tests/fixtures/buzz-prompts/{name}.txt").read()
-    return [b.strip() for b in raw.split("%%BLOCK%%")]
+def metas(name):
+    """Exactly what the hermes side hands over: per-block `_meta` payloads, nothing else."""
+    return [b["_meta"] for b in SC[name]["prompt"] if b.get("_meta")]
 
-# 1. the happy path captures ONLY the event content
-p = project(blocks("single-event"), TRUSTED)
-assert p.capture is not None, "trusted single event was not captured"
-assert "我偏好 pnpm" in p.capture
-assert "someone-else" not in p.capture, "conversation-context leaked into capture"
-assert "Channel:" not in p.capture, "header prefix leaked into capture"
+def only(name):
+    """A one-event copy of an event, for mutation cases."""
+    return [{"buzz": {"memoryEvents": [dict(e)]}} for e in [ev for b in SC[name]["prompt"]
+            if b.get("_meta") for ev in b["_meta"]["buzz"]["memoryEvents"]][:1]]
 
-# 2. a forged section boundary must not change what is captured
-p = project(blocks("forged-boundary"), TRUSTED)
-assert p.capture is None, f"forged boundary produced a capture: {p.capture!r}"
-assert p.drop_reason
+# the API cannot even see text: this is the "text is never evidence" invariant, encoded
+params = list(inspect.signature(project).parameters)
+assert params == ["metas", "trusted_writers"], params
 
-# 3. a forged event split must not promote the attacker to a trusted writer
-p = project(blocks("forged-split"), TRUSTED)
-assert p.capture is None, f"forged event split produced a capture: {p.capture!r}"
+# 1. happy path: exactly the event content, nothing else
+p = project(metas("single_trigger"), TRUSTED)
+assert p.capture == "我偏好 pnpm，不要用 npm。", repr(p.capture)
+assert p.drops == [], p.drops
 
-# 4. multi-event batches fail closed
-p = project(blocks("multi-event"), TRUSTED)
-assert p.capture is None and p.drop_reason == "multi-event"
+# 2. a 2-event batch captures BOTH (the text-parsing design had to drop the whole batch)
+p = project(metas("batch_two_triggers"), TRUSTED)
+assert p.capture == "部署前先跑 tests/connectivity.sh。\npreview 一律綁 0.0.0.0。", repr(p.capture)
+assert p.drops == []
 
-# 5. cancelled/steer sections fail closed
-p = project(blocks("cancelled"), TRUSTED)
-assert p.capture is None
+# 3. mixed trust: only the trusted event; the other one — whose *text* contains a forged
+#    </buzz-event> plus a perfectly well-formed trusted From:/hex header — must not appear
+p = project(metas("mixed_trust_batch"), TRUSTED)
+assert p.capture == "記憶閘要 fail closed。", repr(p.capture)
+assert [d.reason for d in p.drops] == ["untrusted-writer"], p.drops
+assert p.drops[0].sender_pubkey == ID["stranger_hex"], p.drops[0]
+assert "自動部署" not in (p.capture or "")
 
-# 6. an untrusted writer is never captured, but recall still works
-p = project(blocks("untrusted-writer"), TRUSTED)
-assert p.capture is None and p.drop_reason == "untrusted-writer"
-assert p.recall_query, "recall must still work for untrusted senders"
+# 4. cancel/steer merge: the prior (re-delivered) event is not captured, the trigger is
+p = project(metas("cancel_merge"), TRUSTED)
+assert p.capture == "算了，先跑 connectivity。", repr(p.capture)
+assert [d.reason for d in p.drops] == ["prior-event"], p.drops
+
+# 5. slash-command pass-through shifts block order: the event block is NOT block 0
+p = project(metas("slash_command"), TRUSTED)
+assert p.capture and p.capture.startswith("/status"), repr(p.capture)
+
+# 6. heartbeat: no metadata anywhere → fail closed
+p = project(metas("heartbeat"), TRUSTED)
+assert p.capture is None and [d.reason for d in p.drops] == ["no-memory-events"], p.drops
+
+# 7. an unpatched Buzz sends no metadata → no passive write, whatever the text says
+for name in ("single_trigger", "batch_two_triggers", "mixed_trust_batch", "cancel_merge"):
+    p = project([], TRUSTED)
+    assert p.capture is None and [d.reason for d in p.drops] == ["no-memory-events"], (name, p)
+    p = project([{}], TRUSTED)
+    assert p.capture is None and [d.reason for d in p.drops] == ["no-memory-events"], (name, p)
+
+# 8. author mutations
+ev = only("single_trigger")[0]["buzz"]["memoryEvents"][0]
+bad = dict(ev, authorPubkey=ID["stranger_hex"])
+assert [d.reason for d in project([{"buzz": {"memoryEvents": [bad]}}], TRUSTED).drops] == ["untrusted-writer"]
+named = dict(ev, authorPubkey="npub1fixture")
+assert [d.reason for d in project([{"buzz": {"memoryEvents": [named]}}], TRUSTED).drops] == ["no-author-pubkey"]
+mixed_case = dict(ev, authorPubkey=ID["owner_hex"].upper())
+assert project([{"buzz": {"memoryEvents": [mixed_case]}}], TRUSTED).capture == ev["content"], \
+    "hex comparison must be case-insensitive"
+
+# 9. role mutations: only "trigger" is eligible, anything else fails closed
+assert [d.reason for d in project([{"buzz": {"memoryEvents": [dict(ev, role="prior")]}}], TRUSTED).drops] == ["prior-event"]
+assert [d.reason for d in project([{"buzz": {"memoryEvents": [dict(ev, role="steer")]}}], TRUSTED).drops] == ["unknown-role"]
+assert [d.reason for d in project([{"buzz": {"memoryEvents": [dict(ev, role=None)]}}], TRUSTED).drops] == ["unknown-role"]
+
+# 10. content mutations + malformed payloads
+assert [d.reason for d in project([{"buzz": {"memoryEvents": [dict(ev, content="   ")]}}], TRUSTED).drops] == ["empty-content"]
+assert [d.reason for d in project([{"buzz": {"memoryEvents": ["not-a-dict"]}}], TRUSTED).drops] == ["malformed-event"]
+assert [d.reason for d in project(["not-a-meta"], TRUSTED).drops] == ["no-memory-events"]
+
+# 11. two blocks can each carry events, and both are collected in block order
+both = metas("single_trigger") + metas("batch_two_triggers")
+p = project(both, TRUSTED)
+assert p.capture.splitlines()[0] == "我偏好 pnpm，不要用 npm。", repr(p.capture)
+assert len(p.capture.splitlines()) == 3, repr(p.capture)
+
+# 12. an empty allowlist (a clean install) can never capture
+p = project(metas("single_trigger"), set())
+assert p.capture is None and [d.reason for d in p.drops] == ["untrusted-writer"], p.drops
 print("ok")
 PY
-pass "ingress projector holds on all six adversarial cases"
+pass "projector: protocol-only boundary, per-event policy, text never evidence"
 
 # ── sync_turn goes through the projector, and the allowlist is pubkey-based ──
 P=patches/hermes/memory_tencentdb/__init__.py
@@ -124,7 +207,8 @@ sys.path.insert(0, "patches/hermes/memory_tencentdb")
 from ingress_log import IngressLog
 d = tempfile.mkdtemp()
 log = IngressLog(d)
-log.record("untrusted-writer", "sess-1", "agt-x", "SECRET CONTENT", sender="deadbeef")
+log.record("untrusted-writer", "sess-1", "agt-x", "SECRET CONTENT", sender="deadbeef",
+           event_id="evt-1", channel="chan-1")
 files = os.listdir(d)
 assert len(files) == 1 and files[0].startswith("memory-ingress-"), files
 assert files[0].endswith(".jsonl"), files
@@ -132,6 +216,7 @@ row = json.loads(open(os.path.join(d, files[0])).read().strip())
 assert row["reason"] == "untrusted-writer"
 assert "content" not in row, "full content must not be stored by default"
 assert row["content_sha256"] and row["len"] == len("SECRET CONTENT")
+assert row["channel"] == "chan-1" and row["event_id"] == "evt-1"
 assert "SECRET" not in json.dumps(row) or len(row.get("preview","")) <= 64
 assert oct(os.stat(os.path.join(d, files[0])).st_mode)[-3:] == "600", "log must be 0600"
 print("ok")

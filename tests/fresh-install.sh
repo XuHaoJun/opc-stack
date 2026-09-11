@@ -173,16 +173,17 @@ fi
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh tests/memory-scope.sh"
+GATES="tests/audit-bootstrap.sh tests/memory-ingress.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh tests/memory-scope.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
     grep -q 'cd "$(dirname "$0")/\.\."' "$REPO_ROOT/$g" || \
         die "$g does not cd to its own repo root — it would not follow the clone"
-    # audit-bootstrap.sh is a pure file audit and reads no .env; the other two
-    # drive a running stack and must resolve ports/project from the clone's.
+    # audit-bootstrap.sh and memory-ingress.sh are pure file/offline checks and
+    # read no .env; the others drive a running stack and must resolve
+    # ports/project from the clone's.
     case "$g" in
-        tests/audit-bootstrap.sh) ;;
+        tests/audit-bootstrap.sh | tests/memory-ingress.sh) ;;
         *) grep -q 'opc_load_env \./\.env' "$REPO_ROOT/$g" || \
                die "$g does not load ./.env — it would not follow the clone's ports" ;;
     esac

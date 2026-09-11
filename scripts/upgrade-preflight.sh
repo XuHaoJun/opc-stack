@@ -179,6 +179,31 @@ buzz)
     finding "new '-- no-transaction' migration(s): a mid-way failure leaves _sqlx_migrations dirty and needs manual repair"
   fi
   note "auto-apply: BUZZ_AUTO_MIGRATE is hard-coded true in docker-compose.yml (not .env-overridable)"
+  # Memory-ingress metadata patch: the buzz image applies
+  # patches/buzz/patches/opc-memory-ingress-meta.patch with --fuzz=0 in the builder
+  # stage, so any drift in these anchors stops the build. Each failure is a finding.
+  for anchor in "pub fn format_prompt(" "session_prompt_blocks_with_idle_timeout" "fn build_prompt_params("; do
+    if ! git -C "$UP" grep -q -F "$anchor" "$TAG" -- crates/buzz-acp/src 2>/dev/null; then
+      finding "buzz-acp anchor GONE at $TAG: $anchor — the memory-ingress patch must be regenerated"
+    fi
+  done
+  pf="patches/buzz/patches/opc-memory-ingress-meta.patch"
+  if [ -f "$pf" ]; then
+    pf_abs="$PWD/$pf"
+    tmp="$(mktemp -d)"
+    if git -C "$UP" archive "$TAG" crates/buzz-acp/src/queue.rs crates/buzz-acp/src/pool.rs crates/buzz-acp/src/acp.rs 2>/dev/null | tar -x -C "$tmp"; then
+      if (cd "$tmp" && patch -p1 --fuzz=0 --dry-run --force < "$pf_abs" >/dev/null 2>&1); then
+        note "memory-ingress metadata patch applies cleanly at $TAG"
+      else
+        finding "memory-ingress metadata patch does NOT apply at $TAG — regenerate it, or the buzz build stops"
+      fi
+    else
+      finding "memory-ingress patch targets are gone at $TAG — the patch has no target any more"
+    fi
+    rm -rf "$tmp"
+  else
+    finding "overlay patch missing: $pf"
+  fi
   ;;
 
 paperclip)

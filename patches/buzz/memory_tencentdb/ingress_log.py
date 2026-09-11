@@ -54,7 +54,8 @@ class IngressLog:
 
     def record(self, reason: str, session_id: str, agent_id: str, content: str,
                *, sender: Optional[str] = None,
-               event_id: Optional[str] = None) -> None:
+               event_id: Optional[str] = None,
+               channel: Optional[str] = None) -> None:
         text = content or ""
         row = {
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -63,6 +64,7 @@ class IngressLog:
             "agent_id": agent_id,
             "sender": sender,
             "event_id": event_id,
+            "channel": channel,
             "len": len(text),
             "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "preview": text[:_PREVIEW_CHARS],
