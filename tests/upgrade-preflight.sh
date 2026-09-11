@@ -75,9 +75,37 @@ done
 for d in crates web admin-web patches; do
     mkdir -p "$b/$d"; printf 'x\n' > "$b/$d/keep"
 done
+# The memory-ingress overlay (patches/buzz/patches/opc-memory-ingress-meta.patch) is
+# dry-run against the NEW tag and its three buzz-acp anchors are checked, so the
+# fixture carries both halves — same shape as the tencentdb overlay case below. A
+# fixture without them makes every buzz case report "anchor GONE", which is the check
+# working on a repo that simply is not buzz.
+mkdir -p "$b/crates/buzz-acp/src"
+cat > "$b/crates/buzz-acp/src/queue.rs" <<'EOF'
+pub fn format_prompt(batch: &FlushBatch) -> Vec<String> {
+    let mut blocks = Vec::new();
+    blocks.push(render_events(batch));
+    blocks
+}
+EOF
+printf 'fn session_prompt_blocks_with_idle_timeout() {}\n' > "$b/crates/buzz-acp/src/pool.rs"
+printf 'fn build_prompt_params() {}\n' > "$b/crates/buzz-acp/src/acp.rs"
 git_tag "$b" v1.0.0
 printf 'CREATE TABLE b();\n' > "$b/migrations/0002_b.sql"
 git_tag "$b" v1.1.0
+mkdir -p "$fx/patches/buzz/patches"
+cat > "$fx/patches/buzz/patches/opc-memory-ingress-meta.patch" <<'EOF'
+--- a/crates/buzz-acp/src/queue.rs
++++ b/crates/buzz-acp/src/queue.rs
+@@ -1,5 +1,6 @@
+ pub fn format_prompt(batch: &FlushBatch) -> Vec<String> {
+     let mut blocks = Vec::new();
++    blocks.push(memory_events_meta(batch));
+     blocks.push(render_events(batch));
+     blocks
+ }
+EOF
+
 git -C "$b" checkout -q v1.0.0
 run buzz v1.1.0
 expect_rc 0 "buzz additions-only"
@@ -90,6 +118,18 @@ git -C "$b" checkout -q v1.0.0
 run buzz v1.2.0
 expect_rc 1 "buzz edited migration"
 expect_out "were MODIFIED" "buzz edited migration"
+
+# A renamed buzz-acp anchor breaks the overlay, and the build only finds out during
+# `docker compose build` — the preflight has to say so first.
+git -C "$b" checkout -q master 2>/dev/null || git -C "$b" checkout -q main
+git -C "$b" checkout -q v1.0.0 -- migrations/0001_a.sql
+sed -i 's/pub fn format_prompt(/pub fn render_prompt(/' "$b/crates/buzz-acp/src/queue.rs"
+git_tag "$b" v1.3.0
+git -C "$b" checkout -q v1.0.0
+run buzz v1.3.0
+expect_rc 1 "buzz-acp anchor renamed"
+expect_out "anchor GONE at v1.3.0: pub fn format_prompt(" "buzz-acp anchor renamed"
+expect_out "does NOT apply" "buzz-acp anchor renamed"
 
 # ── hermes: _config_version drift names the exact ladder steps ───────────
 h="$fx/upstream/hermes"
@@ -116,6 +156,27 @@ for f in pyproject.toml uv.lock package.json; do printf 'x\n' > "$h/$f"; done
 for d in web ui-tui apps/shared plugins scripts; do
     mkdir -p "$h/$d"; printf 'x\n' > "$h/$d/keep"
 done
+# The ACP sidecar patch (patches/buzz/patches/hermes-acp-memory-ingress.patch) is
+# applied to a hermes checkout whose tag scripts/upgrade.sh realigns to this one, so
+# the preflight dry-runs it here. Every path it archives has to exist at the tag.
+mkdir -p "$h/acp_adapter" "$h/agent"
+cat > "$h/acp_adapter/content.py" <<'EOF'
+def blocks_to_text(text_parts):
+    return "\n".join(text_parts)
+EOF
+printf 'def _content_blocks_to_openai_user_content(): pass\n' > "$h/acp_adapter/server.py"
+for f in agent/conversation_loop.py agent/memory_manager.py agent/turn_facade.py run_agent.py; do
+    printf 'x\n' > "$h/$f"
+done
+mkdir -p "$fx/patches/buzz/patches"
+cat > "$fx/patches/buzz/patches/hermes-acp-memory-ingress.patch" <<'EOF'
+--- a/acp_adapter/content.py
++++ b/acp_adapter/content.py
+@@ -1,2 +1,3 @@
+ def blocks_to_text(text_parts):
++    # memory ingress: carry _meta alongside the joined text
+     return "\n".join(text_parts)
+EOF
 git_tag "$h" v2026.1.1
 printf 'OPC_CONFIG_VERSION=40\n' > "$fx/patches/hermes/hermes-entrypoint.sh"
 run hermes v2026.1.1
@@ -144,6 +205,17 @@ git -C "$h" checkout -q v2026.1.1
 run hermes v2026.3.3
 expect_rc 1 "hermes renamed argv helper"
 expect_out "_is_dashboard_container is GONE" "hermes renamed argv helper"
+
+# The sidecar patch's own hunk context moving is the same class of trouble, and it
+# lands on the frontdoor build rather than on the hermes image.
+git -C "$h" checkout -q master 2>/dev/null || git -C "$h" checkout -q main
+git -C "$h" checkout -q v2026.1.1 -- hermes_cli/container_boot.py hermes_cli/config_defaults.py
+sed -i 's/def blocks_to_text(text_parts):/def blocks_to_text(text_parts, sep):/' "$h/acp_adapter/content.py"
+git_tag "$h" v2026.4.4
+git -C "$h" checkout -q v2026.1.1
+run hermes v2026.4.4
+expect_rc 1 "hermes sidecar patch context moved"
+expect_out "ACP sidecar patch does NOT apply" "hermes sidecar patch context moved"
 
 # ── tencentdb: the overlay patch must be dry-run against the NEW tag ─────
 t="$fx/upstream/tencentdb-agent-memory"
