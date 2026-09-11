@@ -123,7 +123,8 @@ The raw engine, for scripted/CI use:
 
 The stack ships pre-configured for **OpenCode Go** (`https://opencode.ai/zen/go/v1`).
 The shared gateway/dashboard/Paperclip/TencentDB default model is
-`deepseek-v4-flash`; the frontdoor relay's default is `deepseek-v4-pro`. Set
+`deepseek-v4.1-flash`, and the frontdoor relay defaults to the same model.
+Set
 `OPENAI_API_KEY` in `.env`; set `OPENAI_BASE_URL` for the OpenAI-compatible
 endpoint, `OPENAI_MODEL` for the shared services, and `BUZZ_AGENT_MODEL` for
 the frontdoor relay. For Hermes, the custom provider runtime reads its key/base
@@ -132,8 +133,8 @@ persisted in editable `config.yaml` and that file is the model source of truth:
 
 | Project | Where the model/key is configured | UI-editable? |
 |---|---|---|
-| Hermes gateway | `config.yaml` seeded to `provider: custom`, `base_url: https://opencode.ai/zen/go/v1`, `default: deepseek-v4-flash`; custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — dashboard http://localhost:9119 → config/model pages** |
-| Frontdoor relay (Buzz ACP) | `config.yaml` model seeded from `BUZZ_AGENT_MODEL` (`deepseek-v4-pro` by default); custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — shared Hermes dashboard config/model pages** |
+| Hermes gateway | `config.yaml` seeded to `provider: custom`, `base_url: https://opencode.ai/zen/go/v1`, `default: deepseek-v4.1-flash`; custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — dashboard http://localhost:9119 → config/model pages** |
+| Frontdoor relay (Buzz ACP) | `config.yaml` model seeded from `BUZZ_AGENT_MODEL` (`deepseek-v4.1-flash` by default); custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — shared Hermes dashboard config/model pages** |
 | Paperclip | Agents use the Hermes Gateway adapter → shared model default comes from `OPENAI_MODEL` | Agent adapter fields in the Paperclip UI |
 | TencentDB memory | `TDAI_LLM_*` / `LLM_*` / proxy upstream — shared defaults come from `OPENAI_MODEL` and `OPENAI_BASE_URL` | Panel has ApiKeys + knowledge LLM-binding pages; core extraction follows env |
 | Buzz | None needed | — |

@@ -21,7 +21,7 @@
 | `ANTHROPIC/GOOGLE/OPENROUTER/GROQ/DEEPSEEK/XAI_API_KEY` | runtime,compose 每次傳給 frontdoor/hermes/dashboard/paperclip |
 | `OPENAI_BASE_URL` | runtime。Hermes custom provider runtime 讀取；第一次 boot 也用來 seed gateway/frontdoor 的 `config.yaml`，既有 editable config 改 env 後可能仍需手動調整 |
 | `OPENAI_MODEL` | runtime。shared gateway/dashboard/Paperclip/TencentDB defaults 讀取；Hermes gateway 第一次 boot 用來 seed `config.yaml`，既有 editable config 的模型以該檔為 source of truth |
-| `BUZZ_AGENT_MODEL` | runtime。frontdoor relay 專用模型（預設 `deepseek-v4-pro`）；frontdoor 第一次 boot 用來 seed `config.yaml`，既有 editable config 改 env 後可能仍需手動調整 |
+| `BUZZ_AGENT_MODEL` | runtime。frontdoor relay 專用模型（預設 `deepseek-v4.1-flash`）；frontdoor 第一次 boot 用來 seed `config.yaml`，既有 editable config 改 env 後可能仍需手動調整 |
 | `BUZZ_REDIS_PASSWORD` | runtime — `--requirepass` 是啟動參數,每次重啟重套,buzz 的 `REDIS_URL` 同步更新 |
 | `BUZZ_PORT` / `HERMES_DASHBOARD_PORT` / `HERMES_API_PORT` / `PAPERCLIP_PORT` / `TENCENTDB_*_PORT` | host port 綁定,runtime |
 | `BUZZ_RELAY_URL` | runtime,但**語意上改 host = 新 community**(AGENTS.md 不變量 1);`buzz-bootstrap` one-shot 每次 `up` 重跑、冪等補 add-member。流程:改 .env → `docker compose up -d buzz frontdoor` |
@@ -88,11 +88,18 @@ defaults，不覆蓋使用者編輯；既有 config 改 env 後可能仍需手�
   `https://opencode.ai/zen/go/v1` 這個預設值時才會被 entrypoint refresh，自訂過的
   endpoint 要手動改。
 - `OPENAI_MODEL`: fresh gateway config 會取得 env 值；既有 gateway config 只有仍是
-  `deepseek-v4-pro` 這個 legacy model 時才會被 entrypoint refresh。shared
-  gateway/dashboard/Paperclip/TencentDB 的其他使用者設定，env 不會覆蓋，必須手動調整。
+  先前的 stack default(`deepseek-v4-pro` / `deepseek-v4-flash`)時才會被 entrypoint
+  refresh。shared gateway/dashboard/Paperclip/TencentDB 的其他使用者設定，env 不會覆蓋，
+  必須手動調整。
 - `BUZZ_AGENT_MODEL`: fresh frontdoor config 會取得 env 值（預設
-  `deepseek-v4-pro`）；既有 frontdoor config 只有仍是該 legacy model 時才會被
-  entrypoint refresh。其他使用者設定必須手動調整。
+  `deepseek-v4.1-flash`）；既有 frontdoor config 只有仍是先前的 stack default
+  (`deepseek-v4-pro` / `deepseek-v4-flash`)時才會被 entrypoint refresh。其他使用者設定
+  必須手動調整。
+
+同一條精確值 refresh 也涵蓋專家 profile 的 `profiles/<p>/config.yaml`(hermes
+entrypoint)與各容器 home 的 omp config(`.omp/agent/config.yml`，含 frontdoor 的
+`$HERMES_HOME/.omp`)，因此換 `OPENAI_MODEL` 後重啟容器即會把仍是前一個 default 的
+值收斂到新值；被 dashboard/操作者改成其他模型的檔案不動。
 
 換 model 正確做法: shared gateway/dashboard/Paperclip/TencentDB 用
 `OPENAI_MODEL`，frontdoor relay 用 `BUZZ_AGENT_MODEL`；既有 editable config

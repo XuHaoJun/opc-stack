@@ -158,16 +158,20 @@ model:
   provider: custom
   api_key: \${OPENAI_API_KEY}
   base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-  default: ${OPENAI_MODEL:-deepseek-v4-flash}
+  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}
 YAML
-    echo "[hermes] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENAI_MODEL:-deepseek-v4-flash})"
+    echo "[hermes] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENAI_MODEL:-deepseek-v4.1-flash})"
 fi
 
-# Refresh seeded model lines on existing volumes that still carry the legacy
-# hardcoded default (config.yaml is dashboard-editable afterwards; only the
-# exact legacy values are rewritten, not user edits).
+# Refresh seeded model lines on existing volumes that still carry a previous
+# stack default (config.yaml is dashboard-editable afterwards; only the exact
+# legacy values are rewritten, not user edits).
 if [ -f "$HH/config.yaml" ]; then
-    sed -i "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4-flash}|; s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}|" "$HH/config.yaml"
+    sed -i \
+        -e "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
+        -e "s|^  default: deepseek-v4-flash$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
+        -e "s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}|" \
+        "$HH/config.yaml"
     # Existing editable configs may predate the explicit custom-provider key
     # route. Insert only when the model block has no api_key; operator-set
     # credentials are left untouched.
@@ -432,12 +436,21 @@ model:
   provider: custom
   api_key: \${OPENAI_API_KEY}
   base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-  default: ${OPENAI_MODEL:-deepseek-v4-flash}
+  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}
 platforms:
   api_server:
     enabled: false
 YAML
         echo "[hermes] seeded $_ph/config.yaml"
+    fi
+
+    # Same refresh discipline as the default home above: rewrite only the
+    # exact previous stack defaults, never operator/dashboard edits.
+    if [ -f "$_ph/config.yaml" ]; then
+        sed -i \
+            -e "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
+            -e "s|^  default: deepseek-v4-flash$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
+            "$_ph/config.yaml"
     fi
 
     # Converge platforms.api_server.enabled: false on EVERY boot, not just at

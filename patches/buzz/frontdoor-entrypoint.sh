@@ -153,11 +153,20 @@ if [ ! -f "$HH/.omp/agent/config.yml" ]; then
     mkdir -p "$HH/.omp/agent"
     cat > "$HH/.omp/agent/config.yml" <<YAML
 modelRoles:
-  default: opencode-go/${OPENAI_MODEL:-deepseek-v4-flash}
+  default: opencode-go/${OPENAI_MODEL:-deepseek-v4.1-flash}
 startup:
   quiet: true
 YAML
-    echo "[frontdoor] seeded $HH/.omp/agent/config.yml (omp model=${OPENAI_MODEL:-deepseek-v4-flash})"
+    echo "[frontdoor] seeded $HH/.omp/agent/config.yml (omp model=${OPENAI_MODEL:-deepseek-v4.1-flash})"
+fi
+
+# Refresh the omp model when the file still carries a previous stack default
+# (exact-value match only — user edits are left alone).
+if [ -f "$HH/.omp/agent/config.yml" ]; then
+    sed -i \
+        -e "s|default: opencode-go/deepseek-v4-pro$|default: opencode-go/${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
+        -e "s|default: opencode-go/deepseek-v4-flash$|default: opencode-go/${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
+        "$HH/.omp/agent/config.yml" 2>/dev/null || true
 fi
 
 # Runtime-uid key copy for the buzz wrapper: /keys is mounted read-only, so
@@ -228,16 +237,20 @@ model:
   provider: custom
   api_key: \${OPENAI_API_KEY}
   base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-  default: ${OPENAI_MODEL:-deepseek-v4-flash}
+  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}
 YAML
-    echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENAI_MODEL:-deepseek-v4-flash})"
+    echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENAI_MODEL:-deepseek-v4.1-flash})"
 fi
 
-# Refresh seeded model lines on existing volumes that still carry the legacy
-# hardcoded default (config.yaml is dashboard-editable afterwards; only the
-# exact legacy values are rewritten, not user edits).
+# Refresh seeded model lines on existing volumes that still carry a previous
+# stack default (config.yaml is dashboard-editable afterwards; only the exact
+# legacy values are rewritten, not user edits).
 if [ -f "$HH/config.yaml" ]; then
-    sed -i "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4-flash}|; s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}|" "$HH/config.yaml"
+    sed -i \
+        -e "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
+        -e "s|^  default: deepseek-v4-flash$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
+        -e "s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}|" \
+        "$HH/config.yaml"
     # Existing editable configs may predate the explicit custom-provider key
     # route. Insert only when the model block has no api_key; operator-set
     # credentials are left untouched.

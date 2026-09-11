@@ -231,7 +231,13 @@ services:
       RUST_LOG: buzz_relay=info
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4-flash}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}
+      # omp's built-in `opencode-go` provider reads its credential from
+      # OPENCODE_API_KEY specifically (not from OPENAI_API_KEY); every omp
+      # invocation in this container resolves the seeded
+      # `opencode-go/${OPENAI_MODEL}` model through it. Derived from the one
+      # stack key — see the paperclip service for the measurement.
+      OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "${BUZZ_PORT:-3000}:3000"
     volumes:
@@ -352,15 +358,22 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENAI_MODEL: ${BUZZ_AGENT_MODEL:-deepseek-v4-pro}
-      # Agent model: deepseek-v4-flash degenerates (garbage output) with
-      # hermes's long system prompt on the OpenCode Go endpoint — verified by
-      # replaying hermes's exact request. Default deepseek-v4-pro (reliable):
-      # follows the skills index (paperclip-api assign/PR flow works), clean
-      # stream termination. gpt-5.6-luna is the cheaper alternative but
-      # intermittently returns empty streams (hermes EmptyStreamError) and
-      # skips the skills index — the paperclip flow fails with it. Override
-      # via BUZZ_AGENT_MODEL in .env.
+      OPENAI_MODEL: ${BUZZ_AGENT_MODEL:-deepseek-v4.1-flash}
+      # Agent model: defaults to the stack model (deepseek-v4.1-flash).
+      # Measured alternatives against hermes's long system prompt on the
+      # OpenCode Go endpoint: the earlier deepseek-v4-flash (4.0) degenerated
+      # (garbage output); gpt-5.6-luna is cheaper but intermittently returns
+      # empty streams (hermes EmptyStreamError) and skips the skills index —
+      # the paperclip flow fails with it; deepseek-v4-pro is reliable
+      # (follows the skills index, clean stream termination) but pricier.
+      # Override via BUZZ_AGENT_MODEL in .env.
+      #
+      # omp's built-in `opencode-go` provider reads its credential from
+      # OPENCODE_API_KEY specifically (not from OPENAI_API_KEY); the ACP
+      # agent's terminal runs omp with the config seeded into
+      # $HERMES_HOME/.omp. Derived from the one stack key — see the paperclip
+      # service for the measurement.
+      OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -493,7 +506,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4-flash}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}
+      # omp's built-in `opencode-go` provider reads its credential from
+      # OPENCODE_API_KEY specifically (not from OPENAI_API_KEY); agent
+      # terminals here run omp with the config seeded into /root/.omp.
+      # Derived from the one stack key — see the paperclip service.
+      OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -602,7 +620,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4-flash}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}
+      # omp's built-in `opencode-go` provider reads its credential from
+      # OPENCODE_API_KEY specifically (not from OPENAI_API_KEY); the /chat
+      # PTY's terminal runs omp with the config seeded into /root/.omp.
+      # Derived from the one stack key — see the paperclip service.
+      OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -686,7 +709,20 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set in .env}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4-flash}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}
+      # omp's built-in `opencode-go` provider reads its key from
+      # OPENCODE_API_KEY specifically — NOT from OPENAI_API_KEY — and every
+      # omp invocation in this container resolves the seeded
+      # `opencode-go/${OPENAI_MODEL}` model through that provider: the
+      # agents' `omp acp --yolo`, and any `omp` an agent runs from its
+      # terminal. Without it the first model call dies with
+      # "No API key found for opencode-go" (measured 2026-09-11 against both
+      # deepseek-v4-flash and deepseek-v4.1-flash, so it is not model
+      # specific — the 2026-08-20 OPENCODE_* -> OPENAI_* rename dropped it on
+      # the assumption that the provider slug needed no env var; that
+      # assumption is what this line corrects). Derived from the one stack
+      # key; OPENAI_API_KEY remains the source of truth.
+      OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       # devenv: admin credentials for the CLI + boot schema apply. Agents never
@@ -1190,7 +1226,7 @@ services:
       TDAI_SKILL_ENABLED: "true"
       TDAI_LLM_API_KEY: ${OPENAI_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
       TDAI_LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}}
-      TDAI_LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENAI_MODEL:-deepseek-v4-flash}}
+      TDAI_LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENAI_MODEL:-deepseek-v4.1-flash}}
     ports:
       - "${TENCENTDB_CORE_PORT:-8420}:8420"
     volumes:
@@ -1263,7 +1299,7 @@ services:
       LLM_PROTOCOL: openai
       LLM_API_KEY: ${OPENAI_API_KEY:-${TENCENTDB_LLM_API_KEY:-}}
       LLM_BASE_URL: ${TENCENTDB_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}}
-      LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENAI_MODEL:-deepseek-v4-flash}}
+      LLM_MODEL: ${TENCENTDB_LLM_MODEL:-${OPENAI_MODEL:-deepseek-v4.1-flash}}
     ports:
       - "${TENCENTDB_PANEL_PORT:-8125}:8125"
       - "${TENCENTDB_KNOWLEDGE_PORT:-8424}:8424"
