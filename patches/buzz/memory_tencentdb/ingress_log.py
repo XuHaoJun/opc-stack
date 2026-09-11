@@ -20,7 +20,6 @@ import hashlib
 import json
 import os
 import re
-import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -76,15 +75,22 @@ class IngressLog:
     def sweep(self) -> dict:
         """Delete expired shards. Returns a summary dict; log it as one line."""
         summary = {"event": "ingress_log_sweep", "deleted": 0, "kept": 0, "skipped": 0}
+        names = os.listdir(self._dir)
+        # Counted ONCE, out here. A file that is neither kind of shard matches
+        # neither pattern, so counting it inside the per-pattern loop below
+        # counted it twice — in the single summary line this whole sweep exists
+        # to emit, which made "one stray file" read as two.
+        summary["skipped"] += sum(
+            1 for n in names
+            if not _SHARD_RE.match(n) and not _DEBUG_SHARD_RE.match(n)
+        )
         for pattern, days in ((_SHARD_RE, self._retention_days),
                               (_DEBUG_SHARD_RE, self._debug_retention_days)):
             shards = []
-            for name in os.listdir(self._dir):
+            for name in names:
                 m = pattern.match(name)
                 if m:
                     shards.append((name, date(*(int(g) for g in m.groups()))))
-                elif not _SHARD_RE.match(name) and not _DEBUG_SHARD_RE.match(name):
-                    summary["skipped"] += 1
             # Retention floor: never prune down to nothing just because the corpus is
             # young — the same reasoning as memory-cleaner's MIN_RETAIN_L0.
             if len(shards) <= _MIN_RETAIN_SHARDS:

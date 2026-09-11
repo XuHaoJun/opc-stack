@@ -83,6 +83,28 @@ _DEFAULT_AGENT_ID = "default"
 _DEFAULT_USER_ID = "default"
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read an integer knob, degrading to the default instead of raising.
+
+    These are parsed in MemoryTencentdbProvider.__init__, so a bare int() would
+    turn one typo'd value in the environment into a provider that cannot be
+    CONSTRUCTED — the agent loses memory entirely because someone wrote
+    `3600s`. Same shape as _resolve_gateway_port below: name the bad value, say
+    what is being used instead, carry on.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        logger.warning(
+            "memory-tencentdb: invalid %s=%r (not an integer); using default %d.",
+            name, raw, default,
+        )
+        return default
+
+
 def _resolve_gateway_port(default: int = _DEFAULT_GATEWAY_PORT) -> int:
     """Resolve MEMORY_TENCENTDB_GATEWAY_PORT with validation."""
     raw = os.environ.get("MEMORY_TENCENTDB_GATEWAY_PORT")
@@ -366,8 +388,8 @@ class MemoryTencentdbProvider(MemoryProvider):
         # that "re-injects the system snapshot on TTL expiry" therefore fails green:
         # the TTL advances, the log says expired, and the model sees nothing new.
         self._snapshot_sent_at: Dict[str, float] = {}
-        self._snapshot_ttl_seconds = int(
-            os.environ.get("MEMORY_TENCENTDB_SNAPSHOT_TTL_SECONDS") or 3600
+        self._snapshot_ttl_seconds = _env_int(
+            "MEMORY_TENCENTDB_SNAPSHOT_TTL_SECONDS", 3600
         )
         # L1 recall bounds. NOTE: this is NOT relevance gating and cannot be made into
         # relevance gating on this API. /v3/atomic/search takes no threshold, and the
@@ -378,14 +400,14 @@ class MemoryTencentdbProvider(MemoryProvider):
         # gate. Zero-hit abstention already exists server-side (it returns [] when both
         # paths miss); the open gap is weak-but-nonzero hits. Bounding count and age is
         # what we can do honestly. See spec 7.6.
-        self._recall_limit = int(os.environ.get("MEMORY_TENCENTDB_RECALL_LIMIT") or 5)
+        self._recall_limit = _env_int("MEMORY_TENCENTDB_RECALL_LIMIT", 5)
         # Default 0 = off. This is a staleness knob, NOT a migration/reset
         # mechanism — using it to push the pre-hardening pool out of automatic
         # recall was considered and rejected (see 既有系統的處理): with a single
         # operator there is nothing in that pool worth pushing out, and a window
         # would discard genuinely useful old preferences along with it.
-        self._recall_window_days = int(
-            os.environ.get("MEMORY_TENCENTDB_RECALL_WINDOW_DAYS") or 0
+        self._recall_window_days = _env_int(
+            "MEMORY_TENCENTDB_RECALL_WINDOW_DAYS", 0
         )
         # `projected` on the Buzz/ACP lane, where Buzz composes multi-principal prompts.
         # `full` on the gateway lane, where the prompt has a single trusted composer
@@ -744,7 +766,18 @@ class MemoryTencentdbProvider(MemoryProvider):
         return (time.monotonic() - sent) >= self._snapshot_ttl_seconds
 
     def _mark_snapshot_sent(self, session_key: str) -> None:
-        self._snapshot_sent_at[session_key] = time.monotonic()
+        now = time.monotonic()
+        # Prune while we are here. Nothing else ever removes an entry, and ACP
+        # sessions do not rotate (spec 1.8), so this dict otherwise grows by one
+        # key per session for the life of a long-running gateway process. An
+        # entry older than the TTL already answers "due" in _snapshot_due, so
+        # dropping it changes no decision — it only stops the ledger from
+        # remembering deliveries that can no longer matter.
+        cutoff = now - self._snapshot_ttl_seconds
+        self._snapshot_sent_at = {
+            k: v for k, v in self._snapshot_sent_at.items() if v >= cutoff
+        }
+        self._snapshot_sent_at[session_key] = now
 
     def _recall_time_start(self) -> str:
         if self._recall_window_days <= 0:
@@ -845,9 +878,11 @@ class MemoryTencentdbProvider(MemoryProvider):
                 parts.append(_format_l1_block(l1_items, self._agent_id))
 
             # L3 core (persona) — snapshot only
+            core_text = ""
+            l2_entries = []
             if want_snapshot:
                 l3_data = results.get("l3", {})
-                core_text = l3_data.get("data", {}).get("content", "")
+                core_text = l3_data.get("data", {}).get("content", "") or ""
                 if core_text:
                     parts.append(_format_core_block(
                         core_text, l3_data.get("data", {}).get("updated_at", "") or "",
@@ -857,7 +892,7 @@ class MemoryTencentdbProvider(MemoryProvider):
             # L2 scene navigation — snapshot only
             if want_snapshot:
                 l2_data = results.get("l2", {})
-                l2_entries = l2_data.get("data", {}).get("entries", [])
+                l2_entries = l2_data.get("data", {}).get("entries", []) or []
                 if l2_entries:
                     lines = []
                     for s in l2_entries:
@@ -870,7 +905,14 @@ class MemoryTencentdbProvider(MemoryProvider):
                         + "\n</scene-navigation>"
                     )
 
-            if want_snapshot and (results.get("l3") or results.get("l2")):
+            # Gate on what was EXTRACTED, not on the responses being present.
+            # _snapshot_due's docstring already promises "the caller only records
+            # a delivery after the fetch actually returned content" — but a
+            # successful fetch with nothing to say is `{"data": {}}`, a truthy
+            # dict. A session opened before any persona or scene exists was
+            # therefore marked delivered having emitted nothing, and would not
+            # try again for a whole TTL (default 1h).
+            if want_snapshot and (core_text or l2_entries):
                 self._mark_snapshot_sent(session_key)
 
             self._record_success()

@@ -734,7 +734,16 @@ if grep -q '_SHARD_RE' "$P/ingress_log.py" && grep -q 'def sweep' "$P/ingress_lo
 else
   fail "ingress log is date-sharded, rotating, metadata-only by default"
 fi
-if ! grep -q 'remember' "$P/__init__.py"; then
+# Predicate on the TOOL SURFACE, not on prose. This was a bare `grep -q
+# remember` over the whole module, which any comment or docstring using the
+# ordinary English word tripped — and a gate that fails on a code comment is a
+# gate people learn to edit around rather than one they trust. Three ways a
+# remember affordance could actually exist, all covered: a declared tool name
+# (the tools are dicts with a "name" key, :254/:283/:307), a function that
+# implements one, or the literal tool id anywhere at all.
+if ! grep -E '^[[:space:]]*"name": *"' "$P/__init__.py" | grep -qi 'remember' \
+  && ! grep -qiE '^[[:space:]]*def [a-z_]*remember' "$P/__init__.py" \
+  && ! grep -q 'memory_tencentdb_remember' "$P/__init__.py"; then
   pass "no memory_tencentdb_remember tool"
 else
   fail "no memory_tencentdb_remember tool"
