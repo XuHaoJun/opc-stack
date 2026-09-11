@@ -194,6 +194,21 @@ that produce evidence and backlog recommendations, not production code.
 3. In the Buzz desktop app, add workspace `ws://<this-machine-LAN-IP>:3000`.
    The relay also serves an invite landing page (`POST /api/invites` mints
    NIP-98 invite codes that `/invite/<code>` claims) if you prefer that flow.
+4. **Bind the front-door agent to you.** This step cannot run before step 3 —
+   it resolves a live human account out of `buzz-db`, and one only exists once
+   you have signed in from the desktop app:
+   ```bash
+   scripts/set-buzz-agent-owner.sh <your-display-name-or-64-hex-pubkey>
+   ```
+   It writes only public config to `.env` (`BUZZ_ACP_AGENT_OWNER`,
+   `BUZZ_AUTH_TAG`; your pkey stays on the host, named by
+   `BUZZ_OWNER_KEY_FILE`, and is never passed into a container), recreates
+   `frontdoor`, and verifies four ownership surfaces. **Two things stay broken
+   until you run it**, both silently: the desktop's ACP activity panel shows
+   "No ACP activity yet" (those frames are encrypted to the owner), and passive
+   memory capture drops every turn (see "Frontdoor memory hardening" below).
+   It refuses to rotate an owner that is already set — run it from the account
+   that owns the agent.
 
 The front-door Hermes (buzz-acp → `hermes acp`) is added as a relay member
 automatically by the `buzz-bootstrap` one-shot container on first boot, and
@@ -222,6 +237,13 @@ pubkey can then connect; no invites needed).
   Team/Agent loadouts in the kernel meta registry automatically — the panel
   (http://localhost:8125) renders them without manual setup. Confirm
   `memory-tencentdb Gateway already running` in hermes/frontdoor logs.
+- **Frontdoor memory hardening**: passive capture is gated on protocol structure (the per-block ACP `_meta` that buzz-acp attaches — `_meta.buzz.memoryEvents`) and writer identity (`MEMORY_TRUSTED_WRITERS`, which defaults to `BUZZ_ACP_AGENT_OWNER` — no extra `.env` key needed). **Passive capture therefore does not work until you have bound an agent owner** (step 4 of "Buzz: adding users" above): that script resolves a live human account out of `buzz-db`, so on a machine nobody has signed into with Buzz Desktop yet the allowlist resolves EMPTY and every turn drops as `untrusted-writer`. It is fail-closed on purpose, and the frontdoor log carries a `capture_mode=projected with an EMPTY MEMORY_TRUSTED_WRITERS` WARNING while it lasts. Prompt **text** is never evidence — a message may render a well-formed `<buzz-event>` header and still not be captured, because nothing parses it. Anything dropped is recorded in a metadata-only ingress log, and L2/L3 recall arrives as a per-session snapshot. The pre-hardening pool is deliberately **not** migrated — with a single operator it holds only the operator's own words — but know the two consequences: recall has no session dimension, so old rows keep entering every new thread, and the L3 persona re-seeds itself from the previous one. If a second human ever writes through Buzz, re-evaluate. Deploy it with:
+  ```bash
+  scripts/prepare.sh
+  docker compose build frontdoor hermes
+  docker compose up -d frontdoor hermes hermes-dashboard
+  sh tests/memory-scope.sh
+  ```
 - **TencentDB memory for other coding agents** (Codex/Claude/… — PRD phase K3,
   optional): point an agent's LLM base URL at the proxy
   `http://localhost:8096/<agent>/<spaceId>` with headers

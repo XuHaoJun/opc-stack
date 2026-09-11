@@ -173,16 +173,17 @@ fi
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="tests/audit-bootstrap.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh"
+GATES="tests/audit-bootstrap.sh tests/memory-ingress.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh tests/memory-scope.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
     grep -q 'cd "$(dirname "$0")/\.\."' "$REPO_ROOT/$g" || \
         die "$g does not cd to its own repo root — it would not follow the clone"
-    # audit-bootstrap.sh is a pure file audit and reads no .env; the other two
-    # drive a running stack and must resolve ports/project from the clone's.
+    # audit-bootstrap.sh and memory-ingress.sh are pure file/offline checks and
+    # read no .env; the others drive a running stack and must resolve
+    # ports/project from the clone's.
     case "$g" in
-        tests/audit-bootstrap.sh) ;;
+        tests/audit-bootstrap.sh | tests/memory-ingress.sh) ;;
         *) grep -q 'opc_load_env \./\.env' "$REPO_ROOT/$g" || \
                die "$g does not load ./.env — it would not follow the clone's ports" ;;
     esac
@@ -437,6 +438,25 @@ set_env TENCENTDB_KNOWLEDGE_PUBLIC_URL "http://$HOST:${TEST_PORT_OF[TENCENTDB_KN
 # it, not stored) but stable across rehearsals, so a --keep stack's handed-out
 # .env files survive a re-provision.
 set_env DEVENV_SECRET_SALT "$(printf 'opc-fresh-install-rehearsal:%s' "$TEST_PROJECT" | sha256sum | cut -c1-64)"
+
+# The frontdoor's memory writer allowlist. A clean machine CANNOT have one:
+# compose defaults it to BUZZ_ACP_AGENT_OWNER, and that value is only ever
+# produced by scripts/set-buzz-agent-owner.sh, which resolves a live HUMAN row
+# out of buzz-db — a rehearsal stack nobody has signed into has no such row. So
+# the allowlist would resolve empty, projected capture would drop 100% of turns,
+# and tests/memory-scope.sh could not run at all.
+#
+# Set the DEDICATED variable, never BUZZ_ACP_AGENT_OWNER. That one carries a
+# second job — recipient of the encrypted ACP observer frames the Buzz desktop
+# decrypts to render its ACP activity panel — and set-buzz-agent-owner.sh
+# refuses to rotate a pre-existing value. A synthetic owner there would be a
+# rehearsal convenience that quietly breaks both. MEMORY_TRUSTED_WRITERS has
+# exactly one job, so it is the honest knob.
+#
+# Derived like DEVENV_SECRET_SALT: deterministic per rehearsal project (a
+# --keep stack keeps working across runs), distinct from any real Buzz pubkey.
+set_env MEMORY_TRUSTED_WRITERS \
+    "$(printf 'opc-fresh-install-memory-writer:%s' "$TEST_PROJECT" | sha256sum | cut -c1-64)"
 
 # An EMPTY file, not the host's credential. AGENTS.md: the Claude OAuth
 # refresh token is single-use, so whichever container refreshes it invalidates

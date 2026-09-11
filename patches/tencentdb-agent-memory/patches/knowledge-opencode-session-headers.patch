@@ -1,0 +1,64 @@
+--- a/src/engines/wiki/ingest-v2/llm.ts
++++ b/src/engines/wiki/ingest-v2/llm.ts
+@@ -9,6 +9,7 @@
+  * 这里做归一化以兼容 INTERFACE 文档里写的 { baseUrl, maxTokens, timeoutMs } 别名。
+  */
+ 
++import { randomUUID } from "node:crypto";
+ import { generateText, streamText } from "ai";
+ import { createOpenAI } from "@ai-sdk/openai";
+ import { createAnthropic } from "@ai-sdk/anthropic";
+@@ -38,6 +39,8 @@
+    * 完整文本"的兼容层。
+    */
+   stream?: boolean;
++  /** Optional conversation ID for OpenCode Go session affinity. */
++  sessionId?: string;
+ }
+ 
+ /** 归一化后的配置。 */
+@@ -49,11 +52,22 @@
+   maxTokens: number;
+   timeoutMs: number;
+   stream: boolean;
++  sessionId?: string;
+ }
+ 
+ const DEFAULT_MODEL = "Memory-Model";
+ const DEFAULT_MAX_TOKENS = 8192;
+ const DEFAULT_TIMEOUT_MS = 1_200_000; // 20min — reasoning 模型需要更长时间
++const OPENCODE_HOST = "opencode.ai";
++
++function buildOpenCodeHeaders(baseUrl: string, sessionId?: string): Record<string, string> {
++  try {
++    if (new URL(baseUrl).hostname !== OPENCODE_HOST) return {};
++  } catch {
++    return {};
++  }
++  return { "x-opencode-session": sessionId?.trim() || randomUUID() };
++}
+ 
+ /**
+  * 把上层多种命名的 config 归一化。
+@@ -71,7 +85,7 @@
+   const maxTokens = cfg.maxTokens ?? cfg.maxContextSize ?? DEFAULT_MAX_TOKENS;
+   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+   const stream = cfg.stream ?? false;
+-  return { protocol, baseUrl, apiKey, model, maxTokens, timeoutMs, stream };
++  return { protocol, baseUrl, apiKey, model, maxTokens, timeoutMs, stream, sessionId: cfg.sessionId };
+ }
+ 
+ export interface ChatParams {
+@@ -112,9 +126,10 @@
+   }
+ 
+   // 按 protocol 选 AI SDK provider 工厂（两者都实现 LanguageModelV3 接口）。
++  const headers = buildOpenCodeHeaders(config.baseUrl, config.sessionId);
+   const provider = config.protocol === "anthropic"
+-    ? createAnthropic({ baseURL: config.baseUrl, apiKey: config.apiKey })
+-    : createOpenAI({ baseURL: config.baseUrl, apiKey: config.apiKey });
++    ? createAnthropic({ baseURL: config.baseUrl, apiKey: config.apiKey, headers })
++    : createOpenAI({ baseURL: config.baseUrl, apiKey: config.apiKey, headers });
+ 
+   return {
+     config,

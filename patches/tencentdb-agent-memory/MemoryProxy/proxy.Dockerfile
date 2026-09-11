@@ -16,7 +16,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         python3 \
         make \
         g++ \
-        ca-certificates
+        ca-certificates \
+        patch
 
 WORKDIR /app
 
@@ -61,6 +62,14 @@ RUN --mount=type=cache,id=proxy-npm-cache,target=/root/.npm \
         --no-fund
 
 COPY . .
+
+# OPC overlay: attach stable x-opencode-session headers to direct task-draft calls.
+# Keep this strict: a TencentDB upstream source drift must stop the image build.
+COPY opc/patches/opencode-session-headers.patch /tmp/opencode-session-headers.patch
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/opencode-session-headers.patch \
+    && rm -f /tmp/opencode-session-headers.patch \
+    && grep -q 'x-opencode-session' src/mem-command/task-draft-generator.ts \
+    && grep -q 'sessionId: input.sessionKey' src/routes/session-task.ts
 
 FROM node:22-slim AS runtime
 

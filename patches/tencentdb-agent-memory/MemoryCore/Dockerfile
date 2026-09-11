@@ -108,6 +108,16 @@ RUN --mount=type=cache,id=npm-cache,target=/root/.npm \
 # 注意: .dockerignore 已排除 node_modules/.git/__tests__/docs 等
 COPY . .
 
+# OPC overlay: attach stable x-opencode-session headers to all Core inference paths.
+# Keep this strict: a TencentDB upstream source drift must stop the image build.
+COPY opc/patches/opencode-session-headers.patch /tmp/opencode-session-headers.patch
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/opencode-session-headers.patch \
+    && rm -f /tmp/opencode-session-headers.patch \
+    && grep -q 'buildOpenCodeHeaders' src/adapters/standalone/llm-runner.ts \
+    && grep -q 'buildOpenCodeHeaders' src/offload/local-llm/llm-caller.ts \
+    && grep -q 'buildOpenCodeHeaders' src/gateway/server.ts \
+    && grep -q 'sessionId,' src/offload_server/offload-task-executor.ts
+
 # OPC overlay: explicit team_id/agent_id on team/create + agent/create.
 # Runtime executes TS directly via tsx, so patching the source is enough —
 # no build step needed.
@@ -153,6 +163,11 @@ COPY --from=deps-builder /build /app
 
 # OPC overlay: meta-plane provisioning one-shot (tencentdb-bootstrap).
 COPY --chmod=0755 opc/opc-tencentdb-provision.sh /usr/local/bin/opc-tencentdb-provision.sh
+# OPC overlay: idempotent gateway-config seeder + entrypoint that runs it
+# before the gateway starts (a hand-placed yaml would not exist on a clean
+# install; the gateway runs on parser defaults without it).
+COPY --chmod=0755 opc/opc-tdai-config-seed.sh /usr/local/bin/opc-tdai-config-seed.sh
+COPY --chmod=0755 opc/opc-tdai-entrypoint.sh /usr/local/bin/opc-tdai-entrypoint.sh
 
 # Data directory (mountable as PVC in K8s)
 RUN mkdir -p /data/tdai-memory /data/config
@@ -176,8 +191,7 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD curl -fsS http://127.0.0.1:${TDAI_GATEWAY_PORT:-8420}/health || exit 1
 
 # Use tini as PID 1 so SIGTERM/SIGKILL propagate cleanly to Node and its
-# pipeline workers, and zombie processes are reaped.
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/opc-tdai-entrypoint.sh"]
 
 # Start the Gateway. tsx is a runtime dependency so we can run TypeScript directly.
 CMD ["node", "--import", "tsx", "src/gateway/server.ts"]

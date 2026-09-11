@@ -22,11 +22,21 @@
 # retrieved: conmon process killed"). The cause (unverified beyond this): the
 # outer container's PID namespace is torn down on `restart`, but `restart`
 # preserves its writable layer, and podman's rootless runtime state under
-# /run/user/<uid> lives in that layer (not a tmpfs mount — confirmed via
-# /proc/mounts), so podman keeps believing the old instance is alive.
-# `--force-recreate` builds a fresh writable layer, which is why plain
-# `start` happens to work there — but this script cannot assume which path
-# brought it up, so it never trusts recorded state at all.
+# /run/user/<uid> lived in that layer, so podman kept believing the old
+# instance was alive. `--force-recreate` builds a fresh writable layer, which
+# is why plain `start` happened to work there.
+#
+# SINCE THEN, the underlying condition is gone: /run/user/<uid> is declared as
+# a tmpfs on the podenv service, which is the lifetime XDG_RUNTIME_DIR is
+# defined to have, so podman now does its normal new-boot refresh on every
+# start instead of inheriting a previous instance's runtime state. That fixed
+# the failure that has no other cure (a stale cached boot ID after a host
+# reboot, which crashlooped this service until someone force-recreated it).
+# This script still never trusts recorded state: it cannot assume which path
+# brought it up, the probe below is the same one it needs afterwards anyway,
+# and the ON-DEMAND caller in patches/paperclip/podenv/podenv runs this shape
+# against a live stack where the tmpfs says nothing about whether a lease's
+# process is still there.
 #
 # CORRECTED AGAIN (task-5 review F1, previous fix in this file measured to
 # be a regression, not just a wart): "never trust recorded state" got

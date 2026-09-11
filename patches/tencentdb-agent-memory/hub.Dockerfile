@@ -6,7 +6,7 @@
 FROM node:22-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 make g++ git curl ca-certificates \
+      python3 make g++ git curl ca-certificates patch \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g npm@11 --no-audit --no-fund
@@ -33,6 +33,13 @@ WORKDIR /build/knowledge
 COPY MemoryKnowledge/package*.json ./
 RUN npm install --no-audit --no-fund
 COPY MemoryKnowledge/ ./
+
+# OPC overlay: attach a stable x-opencode-session header to wiki ingest calls.
+# Keep this strict: a TencentDB upstream source drift must stop the image build.
+COPY opc/patches/knowledge-opencode-session-headers.patch /tmp/knowledge-opencode-session-headers.patch
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/knowledge-opencode-session-headers.patch \
+    && rm -f /tmp/knowledge-opencode-session-headers.patch \
+    && grep -q 'x-opencode-session' src/engines/wiki/ingest-v2/llm.ts
 RUN npm run build
 
 FROM base AS runtime

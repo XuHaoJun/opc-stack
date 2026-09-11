@@ -194,7 +194,15 @@ class MemoryTencentdbSdkClient:
         agent_id: str = "default",
         user_id: str = "default",
     ) -> Dict[str, Any]:
-        """Search L1 structured memories (v3 /atomic/search)."""
+        """Search L1 structured memories (v3 /atomic/search).
+
+        Do NOT add `time_start` here. The SDK schema advertises it
+        (`gateway/generated/schemas.ts:191-197`) but this endpoint ignores it:
+        `handleAtomicSearch` destructures only `{query, type}`
+        (`gateway/v2-router.ts:1192-1216`) and `executeMemorySearch` has no time
+        parameter at all (`core/tools/memory-search.ts:87-96`). The recall window is
+        therefore applied client-side over `created_at` — see `recall.py`.
+        """
         body: Dict[str, Any] = {
             "team_id": team_id,
             "agent_id": agent_id,

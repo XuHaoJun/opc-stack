@@ -377,6 +377,22 @@ services:
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
       MEMORY_TENCENTDB_AGENT_ID: agt-hermes-front-door
+      MEMORY_TENCENTDB_CAPTURE_MODE: projected
+      # Whose events may mutate shared memory. Defaults to the agent's owner —
+      # BUZZ_ACP_AGENT_OWNER is already the human owner's 64-char hex pubkey
+      # (see the comment at docker-compose.yml:334-338), which is exactly the
+      # immutable form this allowlist needs.
+      #
+      # ON A CLEAN INSTALL BOTH ARE EMPTY, AND THAT IS NOT FIXABLE HERE. The
+      # owner value is only ever produced by scripts/set-buzz-agent-owner.sh,
+      # which resolves a live HUMAN row out of buzz-db — a machine nobody has
+      # signed into with Buzz Desktop yet has no such row, so there is nothing
+      # to default to. Until an operator binds an owner, capture_mode=projected
+      # drops EVERY turn as untrusted-writer. That is fail-closed by design, but
+      # it must not be fail-silent: the provider logs a WARNING at construction
+      # when this resolves empty (memory_tencentdb/__init__.py). SETUP.md says
+      # the same thing in the "Frontdoor memory hardening" bullet.
+      MEMORY_TRUSTED_WRITERS: ${MEMORY_TRUSTED_WRITERS:-${BUZZ_ACP_AGENT_OWNER}}
       # Paperclip work-plane integration (GitHub dev flow): REST base only —
       # the board API key is injected by the entrypoint from
       # /keys/paperclip-api.key (paperclip-bootstrap writes it); no .env var.
@@ -491,6 +507,11 @@ services:
       MEMORY_TENCENTDB_GATEWAY_PORT: "8420"
       MEMORY_TENCENTDB_GATEWAY_API_KEY: ${TENCENTDB_GATEWAY_API_KEY:-}
       MEMORY_TENCENTDB_TEAM_ID: opc
+      # Gateway lane: single trusted composer (paperclip dispatch), no ACP prompt
+      # blocks to project — `projected` here would fail closed on every turn and
+      # silently delete the expert profiles' memory. See 「已決：scientist lane 用
+      # `full`」in docs/superpowers/plans/2026-09-10-frontdoor-memory-hardening.md.
+      MEMORY_TENCENTDB_CAPTURE_MODE: full
       # Paperclip work-plane integration (GitHub dev flow): REST base only —
       # board API key comes from /keys/paperclip-api.key via the entrypoint.
       PAPERCLIP_API_URL: http://paperclip:3100
@@ -1111,6 +1132,32 @@ services:
     # entrypoint) warns when they drift, and tests/podenv.sh fails on it too.
     ports:
       - "127.0.0.1:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}:${PODENV_PORT_BASE:-23000}-${PODENV_PORT_RANGE_END:-23015}"
+    # podman's rootless RUNTIME state (runroot + libpod tmp) lives here, and
+    # XDG_RUNTIME_DIR is defined as per-session state that is GONE when the
+    # session ends. On a real host systemd-logind supplies that lifetime by
+    # making /run/user/<uid> a tmpfs; a container gets nothing, so without this
+    # line the directory is an ordinary directory in the container's writable
+    # overlay layer — which `docker restart` PRESERVES.
+    #
+    # Measured consequence, reproducible in one command (corrupt
+    # /run/user/1000/libpod/tmp/alive, then `docker compose restart podenv`):
+    # podman refuses to start at all with "current system boot ID differs from
+    # cached boot ID; an unhandled reboot has occurred", the entrypoint's
+    # self-test fails all five attempts, and the service crashloops FOREVER —
+    # `docker restart` cannot clear it because it keeps the same layer. Only
+    # `--force-recreate` (a fresh layer) or deleting the directories by hand
+    # recovers it. In the field this fires on every host reboot.
+    #
+    # Making it a tmpfs removes the class rather than healing it: the cache
+    # cannot outlive the container, so the boot ID podman reads is always the
+    # one it cached this boot. It also means podman performs its normal
+    # new-boot refresh on every start instead of inheriting runtime state from
+    # a previous instance. No size cap: nothing in the runroot grows unbounded
+    # (measured 12K idle, 116K with two leases running), an arbitrary cap would
+    # surface as an ENOSPC nobody could read, and mem_limit already bounds the
+    # container as a whole.
+    tmpfs:
+      - /run/user/1000:mode=0700,uid=1000,gid=1000
     volumes:
       - opc-podenv-sock:/run/podenv
       - opc-podenv-store:/home/podman/.local/share/containers
@@ -1148,6 +1195,7 @@ services:
       - "${TENCENTDB_CORE_PORT:-8420}:8420"
     volumes:
       - tencentdb-core-data:/data/tdai-memory
+      - tencentdb-core-config:/data/config
 
   # First-boot admin: POST /v3/internal/meta/user/init-admin (idempotent),
   # then meta-plane provisioning (team "opc" + agent "agt-hermes-front-door" —
@@ -1288,5 +1336,6 @@ volumes:
   frontdoor-omp:
   hermes-omp:
   tencentdb-core-data:
+  tencentdb-core-config:
   tencentdb-hub-data:
   tencentdb-proxy-data:

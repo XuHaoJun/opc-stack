@@ -1,0 +1,84 @@
+--- a/src/mem-command/task-draft-generator.ts
++++ b/src/mem-command/task-draft-generator.ts
+@@ -14,6 +14,8 @@
+  *
+  * 参考：docs/design/... TODO(阶段5) 补设计文档
+  */
++
++import { randomUUID } from "node:crypto";
+ 
+ /** LLM 端点配置。字段与 LLMInferConfig 保持形状一致，便于将来抽公共。 */
+ export interface TaskDraftConfig {
+@@ -50,6 +52,8 @@
+   hint?: string;
+   /** 最近对话消息（proxy 从 sessionMessages 剪出来，通常近 30 条）。 */
+   recentMessages: DraftMessage[];
++  /** Conversation ID for OpenCode Go session affinity. */
++  sessionId?: string;
+   /** update 模式必填，其它模式忽略。 */
+   currentTask?: CurrentTask;
+   /**
+@@ -122,6 +126,16 @@
+  * 兜底"真的慢但会成功"的场景。env TDAI_TASK_DRAFT_FIRST_TIMEOUT_MS 可覆盖。
+  */
+ const LLM_FIRST_ATTEMPT_TIMEOUT_MS_DEFAULT = 10_000;
++const OPENCODE_HOST = "opencode.ai";
++
++function buildOpenCodeHeaders(baseUrl: string, sessionId: string): Record<string, string> {
++  try {
++    if (new URL(baseUrl).hostname !== OPENCODE_HOST) return {};
++  } catch {
++    return {};
++  }
++  return { "x-opencode-session": sessionId };
++}
+ 
+ function firstAttemptTimeoutMs(configuredTimeoutMs: number): number {
+   const raw = process.env.TDAI_TASK_DRAFT_FIRST_TIMEOUT_MS;
+@@ -415,10 +429,11 @@
+       ? (input.lockedTitle ? SYSTEM_PROMPT_CREATE_LOCKED_TITLE : SYSTEM_PROMPT_CREATE)
+       : SYSTEM_PROMPT_UPDATE;
+   const userMessage = buildUserMessage(input);
++  const sessionId = input.sessionId?.trim() || randomUUID();
+ 
+   let lastError = "unknown";
+   for (let attempt = 1; attempt <= LLM_RETRY_MAX_ATTEMPTS; attempt++) {
+-    const result = await attemptDraftOnce(cfg, input, systemPrompt, userMessage, attempt);
++    const result = await attemptDraftOnce(cfg, input, systemPrompt, userMessage, attempt, sessionId);
+     if (result.ok) {
+       if (attempt > 1) {
+         // 打点：让运维知道触发过 retry，但最终成功了
+@@ -460,6 +475,7 @@
+   systemPrompt: string,
+   userMessage: string,
+   attempt: number,
++  sessionId: string,
+ ): Promise<TaskDraftResult> {
+   let resp: Response;
+   // 首次用短 timeout（默认 10s），后续用完整 cfg.timeoutMs
+@@ -470,6 +486,7 @@
+       headers: {
+         "Content-Type": "application/json",
+         Authorization: `Bearer ${cfg.apiKey}`,
++        ...buildOpenCodeHeaders(cfg.url, sessionId),
+       },
+       body: JSON.stringify({
+         model: cfg.model,
+--- a/src/routes/session-task.ts
++++ b/src/routes/session-task.ts
+@@ -263,6 +263,7 @@
+   // Step 1: LLM 生成草稿（lockedTitle 情况下只出 description）
+   const draft = await generateTaskDraft(draftCfg.cfg, {
+     mode: "create",
++    sessionId: input.sessionKey,
+     hint: input.hint,
+     recentMessages: input.recentMessages,
+     ...(input.lockedTitle ? { lockedTitle: input.lockedTitle } : {}),
+@@ -431,6 +432,7 @@
+ 
+     const draft = await generateTaskDraft(draftCfg.cfg, {
+       mode: "update",
++      sessionId: input.sessionKey,
+       hint: input.hint,
+       recentMessages: input.recentMessages,
+       currentTask: {

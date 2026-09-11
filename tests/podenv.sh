@@ -179,6 +179,24 @@ expect_empty "mounts no secret volume" \
 bad={"opc-keys","opc-gh-creds","opc-prototyper-home","frontdoor-hermes","hermes-profiles","hermes-data"}
 s=json.load(sys.stdin)["services"]["podenv"]
 print(",".join(sorted({v.get("source","") for v in s.get("volumes",[])} & bad)))'
+# The fourth declaration, and the only one that is about LIFETIME rather than
+# permissions. Without it /run/user/<uid> is an ordinary directory in the
+# container's overlay layer, which `docker restart` preserves — so podman's
+# cached boot ID survives a host reboot and the service crashloops until
+# someone force-recreates it. Reproduced in one command: corrupt
+# /run/user/1000/libpod/tmp/alive, `docker compose restart podenv`.
+expect "runtime dir is declared tmpfs (podman runtime state must not outlive the container)" "yes" \
+    podenv_field 'import json,sys
+s=json.load(sys.stdin)["services"]["podenv"]
+t=s.get("tmpfs",[])
+t=[t] if isinstance(t,str) else t
+print("yes" if any(x.split(":")[0]=="/run/user/1000" for x in t) else "no")'
+# Declared is not mounted: read what the kernel actually did. `mode=0700` plus
+# the entrypoint chown is what keeps this dir usable by the runtime uid, and a
+# tmpfs that silently failed to mount would leave every check above green.
+expect "runtime dir is really a tmpfs in the running container" "tmpfs" \
+    docker compose exec -T podenv awk '$2 == "/run/user/1000" { print $3 }' /proc/mounts
+
 expect "port range is published on 127.0.0.1 only" "127.0.0.1" \
     podenv_field 'import json,sys
 s=json.load(sys.stdin)["services"]["podenv"]

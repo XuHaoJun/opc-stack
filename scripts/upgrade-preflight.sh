@@ -179,6 +179,31 @@ buzz)
     finding "new '-- no-transaction' migration(s): a mid-way failure leaves _sqlx_migrations dirty and needs manual repair"
   fi
   note "auto-apply: BUZZ_AUTO_MIGRATE is hard-coded true in docker-compose.yml (not .env-overridable)"
+  # Memory-ingress metadata patch: the buzz image applies
+  # patches/buzz/patches/opc-memory-ingress-meta.patch with --fuzz=0 in the builder
+  # stage, so any drift in these anchors stops the build. Each failure is a finding.
+  for anchor in "pub fn format_prompt(" "session_prompt_blocks_with_idle_timeout" "fn build_prompt_params("; do
+    if ! git -C "$UP" grep -q -F "$anchor" "$TAG" -- crates/buzz-acp/src 2>/dev/null; then
+      finding "buzz-acp anchor GONE at $TAG: $anchor — the memory-ingress patch must be regenerated"
+    fi
+  done
+  pf="patches/buzz/patches/opc-memory-ingress-meta.patch"
+  if [ -f "$pf" ]; then
+    pf_abs="$PWD/$pf"
+    tmp="$(mktemp -d)"
+    if git -C "$UP" archive "$TAG" crates/buzz-acp/src/queue.rs crates/buzz-acp/src/pool.rs crates/buzz-acp/src/acp.rs 2>/dev/null | tar -x -C "$tmp"; then
+      if (cd "$tmp" && patch -p1 --fuzz=0 --dry-run --force < "$pf_abs" >/dev/null 2>&1); then
+        note "memory-ingress metadata patch applies cleanly at $TAG"
+      else
+        finding "memory-ingress metadata patch does NOT apply at $TAG — regenerate it, or the buzz build stops"
+      fi
+    else
+      finding "memory-ingress patch targets are gone at $TAG — the patch has no target any more"
+    fi
+    rm -rf "$tmp"
+  else
+    finding "overlay patch missing: $pf"
+  fi
   ;;
 
 paperclip)
@@ -227,7 +252,32 @@ hermes)
   if git -C "$UP" diff --quiet "$OLD..$TAG" -- hermes_cli/container_boot.py 2>/dev/null; then :; else
     finding "container_boot.py changed — re-read the two argv helpers and re-sync opc_is_dashboard_container in patches/hermes/hermes-entrypoint.sh"
   fi
-  note "frontdoor bakes its own hermes checkout; upgrade.sh realigns patches/buzz/Dockerfile"
+  # ACP sidecar patch (memory ingress): the buzz frontdoor image applies
+  # patches/buzz/patches/hermes-acp-memory-ingress.patch with --fuzz=0, so any
+  # drift in these anchors stops the build. Each failure is a finding, not a warning.
+  if ! git -C "$UP" show "$TAG:acp_adapter/server.py" 2>/dev/null | grep -q "_content_blocks_to_openai_user_content"; then
+    finding "acp_adapter/server.py no longer calls _content_blocks_to_openai_user_content at $TAG — the sidecar patch's call-site anchor is gone, regenerate it"
+  fi
+  if ! git -C "$UP" show "$TAG:acp_adapter/content.py" 2>/dev/null | grep -q '"\\n".join(text_parts)'; then
+    finding "acp_adapter/content.py no longer joins with \"\\\\n\".join(text_parts) at $TAG — the sidecar patch's hunk context moved, regenerate it"
+  fi
+  pf="patches/buzz/patches/hermes-acp-memory-ingress.patch"
+  if [ -f "$pf" ]; then
+    pf_abs="$PWD/$pf"
+    tmp="$(mktemp -d)"
+    if git -C "$UP" archive "$TAG" acp_adapter/content.py acp_adapter/server.py agent/conversation_loop.py agent/memory_manager.py agent/turn_facade.py run_agent.py 2>/dev/null | tar -x -C "$tmp"; then
+      if (cd "$tmp" && patch -p1 --fuzz=0 --dry-run --force < "$pf_abs" >/dev/null 2>&1); then
+        note "ACP sidecar patch applies cleanly at $TAG"
+      else
+        finding "ACP sidecar patch does NOT apply at $TAG — regenerate it, or the frontdoor build stops"
+      fi
+    else
+      finding "sidecar patch targets are gone at $TAG — the patch has no target any more"
+    fi
+    rm -rf "$tmp"
+  else
+    finding "overlay patch missing: $pf"
+  fi
   ;;
 
 tencentdb)
