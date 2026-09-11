@@ -400,6 +400,22 @@ class MemoryTencentdbProvider(MemoryProvider):
             for w in (os.environ.get("MEMORY_TRUSTED_WRITERS") or "").split(",")
             if w.strip()
         }
+        if self._capture_mode == "projected" and not self._trusted_writers:
+            # Total, permanent, and otherwise invisible: EVERY turn drops with
+            # `untrusted-writer`, and the only trace is a JSONL row in a log
+            # directory nobody reads. This is the state a clean install is in —
+            # the allowlist defaults to BUZZ_ACP_AGENT_OWNER, and that value can
+            # only come from scripts/set-buzz-agent-owner.sh, which resolves a
+            # live human row out of buzz-db. A machine nobody has signed into
+            # yet has no such row, so passive capture is OFF until an operator
+            # binds an owner. Say so once, loudly, at construction.
+            logger.warning(
+                "memory_tencentdb: capture_mode=projected with an EMPTY "
+                "MEMORY_TRUSTED_WRITERS — passive capture is off and every turn "
+                "will drop as untrusted-writer. Bind the agent owner "
+                "(scripts/set-buzz-agent-owner.sh <name-or-pubkey>) or set "
+                "MEMORY_TRUSTED_WRITERS to 64-char hex pubkeys."
+            )
         self._user_id = _DEFAULT_USER_ID
         self._team_id = _DEFAULT_TEAM_ID
         self._agent_id = _DEFAULT_AGENT_ID

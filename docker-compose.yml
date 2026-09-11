@@ -381,9 +381,17 @@ services:
       # Whose events may mutate shared memory. Defaults to the agent's owner —
       # BUZZ_ACP_AGENT_OWNER is already the human owner's 64-char hex pubkey
       # (see the comment at docker-compose.yml:334-338), which is exactly the
-      # immutable form this allowlist needs. Defaulting to it rather than to
-      # empty matters: an empty allowlist silently stops all passive capture,
-      # which is the fail-silent class this whole spec objects to.
+      # immutable form this allowlist needs.
+      #
+      # ON A CLEAN INSTALL BOTH ARE EMPTY, AND THAT IS NOT FIXABLE HERE. The
+      # owner value is only ever produced by scripts/set-buzz-agent-owner.sh,
+      # which resolves a live HUMAN row out of buzz-db — a machine nobody has
+      # signed into with Buzz Desktop yet has no such row, so there is nothing
+      # to default to. Until an operator binds an owner, capture_mode=projected
+      # drops EVERY turn as untrusted-writer. That is fail-closed by design, but
+      # it must not be fail-silent: the provider logs a WARNING at construction
+      # when this resolves empty (memory_tencentdb/__init__.py). SETUP.md says
+      # the same thing in the "Frontdoor memory hardening" bullet.
       MEMORY_TRUSTED_WRITERS: ${MEMORY_TRUSTED_WRITERS:-${BUZZ_ACP_AGENT_OWNER}}
       # Paperclip work-plane integration (GitHub dev flow): REST base only —
       # the board API key is injected by the entrypoint from

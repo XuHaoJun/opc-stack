@@ -438,6 +438,25 @@ set_env TENCENTDB_KNOWLEDGE_PUBLIC_URL "http://$HOST:${TEST_PORT_OF[TENCENTDB_KN
 # .env files survive a re-provision.
 set_env DEVENV_SECRET_SALT "$(printf 'opc-fresh-install-rehearsal:%s' "$TEST_PROJECT" | sha256sum | cut -c1-64)"
 
+# The frontdoor's memory writer allowlist. A clean machine CANNOT have one:
+# compose defaults it to BUZZ_ACP_AGENT_OWNER, and that value is only ever
+# produced by scripts/set-buzz-agent-owner.sh, which resolves a live HUMAN row
+# out of buzz-db — a rehearsal stack nobody has signed into has no such row. So
+# the allowlist would resolve empty, projected capture would drop 100% of turns,
+# and tests/memory-scope.sh could not run at all.
+#
+# Set the DEDICATED variable, never BUZZ_ACP_AGENT_OWNER. That one carries a
+# second job — recipient of the encrypted ACP observer frames the Buzz desktop
+# decrypts to render its ACP activity panel — and set-buzz-agent-owner.sh
+# refuses to rotate a pre-existing value. A synthetic owner there would be a
+# rehearsal convenience that quietly breaks both. MEMORY_TRUSTED_WRITERS has
+# exactly one job, so it is the honest knob.
+#
+# Derived like DEVENV_SECRET_SALT: deterministic per rehearsal project (a
+# --keep stack keeps working across runs), distinct from any real Buzz pubkey.
+set_env MEMORY_TRUSTED_WRITERS \
+    "$(printf 'opc-fresh-install-memory-writer:%s' "$TEST_PROJECT" | sha256sum | cut -c1-64)"
+
 # An EMPTY file, not the host's credential. AGENTS.md: the Claude OAuth
 # refresh token is single-use, so whichever container refreshes it invalidates
 # every other copy including the host's own login — two stacks holding it is

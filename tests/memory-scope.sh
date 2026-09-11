@@ -28,8 +28,24 @@ TMPDIR="$(mktemp -d)"
 # core must be back and temp files gone when the gate exits.
 trap 'rm -rf "$TMPDIR"; docker compose start tencentdb-core >/dev/null 2>&1 || true' EXIT
 
-[ -n "${BUZZ_ACP_AGENT_OWNER:-}" ] || { echo "FAIL  BUZZ_ACP_AGENT_OWNER unset — the trusted-writer default is untestable"; exit 1; }
-OWNER_PUB="$BUZZ_ACP_AGENT_OWNER"
+# Resolve the trusted writer exactly the way compose does:
+# MEMORY_TRUSTED_WRITERS:-BUZZ_ACP_AGENT_OWNER (docker-compose.yml, frontdoor).
+# Reading the explicit variable FIRST is what lets a machine with no human Buzz
+# account run this gate: BUZZ_ACP_AGENT_OWNER can only be produced by
+# scripts/set-buzz-agent-owner.sh, which resolves a live human row out of
+# buzz-db, and a clean rehearsal stack has no such row. It also carries a second
+# job — recipient of the encrypted ACP observer frames the Buzz desktop decrypts
+# — so a synthetic value there would cost the desktop its ACP activity panel and
+# would trip set-buzz-agent-owner.sh's no-implicit-rotation guard later.
+# MEMORY_TRUSTED_WRITERS has only this one job, so that is the one to set.
+OWNER_PUB="${MEMORY_TRUSTED_WRITERS:-}"
+OWNER_PUB="${OWNER_PUB%%,*}"
+[ -n "$OWNER_PUB" ] || OWNER_PUB="${BUZZ_ACP_AGENT_OWNER:-}"
+[ -n "$OWNER_PUB" ] || { echo "FAIL  neither MEMORY_TRUSTED_WRITERS nor BUZZ_ACP_AGENT_OWNER is set — the writer allowlist is empty, so passive capture is off and this gate is untestable"; exit 1; }
+case "$OWNER_PUB" in
+  *[!0-9a-f]* | "") echo "FAIL  trusted writer is not a 64-char hex pubkey: $OWNER_PUB"; exit 1 ;;
+esac
+[ "${#OWNER_PUB}" = 64 ] || { echo "FAIL  trusted writer is not a 64-char hex pubkey: $OWNER_PUB"; exit 1; }
 # Same source the frontdoor entrypoint uses for the live agent's user_id.
 GATE_USER="$(docker compose exec -T frontdoor cat /keys/tencentdb-admin-user-id 2>/dev/null | tr -d '\r\n')"
 [ -n "$GATE_USER" ] || GATE_USER="default"
