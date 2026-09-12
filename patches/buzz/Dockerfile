@@ -261,7 +261,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv python3-pip git patch \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/hermes-venv \
-    && git clone --depth 1 --branch v2026.9.7 \
+    && git clone --depth 1 --branch v2026.9.11 \
         https://github.com/NousResearch/hermes-agent.git /opt/hermes-src \
     && (cd /opt/hermes-src && patch -p1 --fuzz=0 --no-backup-if-mismatch \
         < /tmp/hermes-acp-memory-ingress.patch) \
