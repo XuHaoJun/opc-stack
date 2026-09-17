@@ -80,7 +80,23 @@ done
 if [ -s /keys/paperclip-api.key ]; then
     AUTH_MODE=key
     KEY="$(cat /keys/paperclip-api.key)"
-    echo "[pc-bootstrap] using existing board key for reconciliation"
+    # A key file is not proof of a usable key. Board keys expire after 30 days
+    # (server/src/services/board-auth.ts BOARD_API_KEY_TTL_MS) while every
+    # consumer keeps reading the file, so after one month this path had no
+    # credentials at all: /companies came back empty, the "create company"
+    # fallback got the same 401, and the one-shot exited 1 — which, through
+    # `depends_on: service_completed_successfully`, is a hermes/frontdoor that
+    # never starts. Probe the key and fall through to the admin session, which
+    # mints a fresh one in step 4 (the file is removed here so step 4 runs).
+    _key_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $KEY" "$API/companies" 2>/dev/null || printf '000')"
+    case "$_key_code" in
+        2*) echo "[pc-bootstrap] using existing board key for reconciliation" ;;
+        *)  echo "[pc-bootstrap] board key rejected (HTTP $_key_code) — re-minting via the admin session"
+            rm -f /keys/paperclip-api.key
+            AUTH_MODE=session
+            KEY="" ;;
+    esac
 else
     AUTH_MODE=session
 fi
@@ -189,10 +205,12 @@ api_post() { # path body
     fi
 }
 
-# ── 1. First admin (only when no admin exists yet) ──
-if [ "$(curl -fsS "${API%/api}/api/health" | jq -r '.bootstrapStatus // "bootstrap_pending"')" = "ready" ]; then
-    echo "[pc-bootstrap] instance already bootstrapped; skipping admin claim"
-else
+# ── 1. Credentials ──
+# The already-bootstrapped branch must NOT short-circuit the sign-in: a
+# rejected board key (see above) also needs a session — both to reconcile and
+# to mint the replacement key in step 4 — yet `bootstrap/claim` is a
+# first-run-only endpoint and is what the status check actually gates.
+if [ "$AUTH_MODE" = session ]; then
     if ! curl -fsS -c "$JAR" -X POST "$API/auth/sign-in/email" \
             -H 'Content-Type: application/json' \
             -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" >/dev/null 2>&1; then
@@ -202,7 +220,15 @@ else
             -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\",\"name\":\"$ADMIN_NAME\"}" >/dev/null \
             || { echo "[pc-bootstrap] sign-up failed"; exit 1; }
     fi
+fi
 
+if [ "$(curl -fsS "${API%/api}/api/health" | jq -r '.bootstrapStatus // "bootstrap_pending"')" = "ready" ]; then
+    echo "[pc-bootstrap] instance already bootstrapped; skipping admin claim"
+else
+    [ "$AUTH_MODE" = session ] || {
+        echo "[pc-bootstrap] instance needs its first admin but no admin credentials were supplied" >&2
+        exit 1
+    }
     code="$(curl -sS -b "$JAR" -o /dev/null -w '%{http_code}' -X POST \
         -H "Origin: $ORIGIN" "$API/bootstrap/claim")"
     case "$code" in
