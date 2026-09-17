@@ -209,18 +209,24 @@ docker compose exec -it paperclip prototype destroy <name>   # 唯一的刪除�
   - **`SOUL.md` 才對** — `AIAgent` 自己組 prompt 時會讀 (`agent/system_prompt.py` → `load_soul_md`, 且 scope 在 agent 自己的 `HERMES_HOME`), 所以**每個 lane 都吃得到**。兩個 image 各 bake 一份 `/opt/hermes/SOUL.md`, entrypoint 每次開機覆蓋進 home (與 skill 同一套機制)。兩份必須逐字相同, `scripts/prepare.sh` 會擋。
   lane 表繼續留在 skill (那是會變的細節), 「你不是實作者」是常駐約束。
 - **hermes multiplex 的 provider key 隔離是 per-variable-name, 不是 per-profile
-  (實測), 但背後機制未證實**: 量到的三件事都是真的 —— 只存在於某 profile 自己
+  (實測); 背後機制一度判為未證實, 2026-09-17 在 source 裡找到了 (見下方修正), 但結論
+  仍需在新版重測**: 量到的三件事都是真的 —— 只存在於某 profile 自己
   `.env` 的變數, 在該 profile 的 `config.yaml` `${VAR}` 引用裡解析正常; default 與
   `agt-scientist` 用**同名變數**(`OPENAI_API_KEY`)但**不同值**時, 重啟後**先接到請求
   的那個 profile 決定了兩條路由都拿到的值**(另一邊直接 401); 換成**不同的變數名**則
-  兩邊乾淨。但「`${VAR}` 是對著該 profile 自己的 `.env` 解析」這個因果**沒有證實**
-  —— 讀 source 反而指向相反方向: `config.py::_env_expand_match` (~2591-2637) 只從
-  `os.environ` 解析 `${VAR}`, 解不到就留字面不動; `gateway/run.py:1963-1975` 在
-  multiplex 下明確拒絕把 profile 的 `.env` load 進 `os.environ`;
-  `_profile_runtime_scope` (`gateway/run.py:2067-2100`) 建的是完全不動
-  `os.environ` 的隔離 dict。沒找到能讓「per-profile `.env` 解析」這個說法成立的路徑
-  —— 真正在解析的可能是某個共用的 credential pool, 或另一個 global, 目前不知道是
-  哪個。**操作規則不受這個因果影響, 照樣成立**: 別讓兩個 profile 的 `config.yaml`
+  兩邊乾淨。當時 (v2026.9.11) 判「per-profile `.env` 解析」這個因果**沒有證實**的依據
+  有三條, 全部在 2026-09-17 升 v2026.9.14 時重讀 source 修正:
+  `gateway/run.py:1564-1573` (`_reload_runtime_env_preserving_config_authority`) 在
+  multiplex 下確實拒絕把 profile 的 `.env` load 進 `os.environ`; `_profile_runtime_scope`
+  (`gateway/run.py:1732-1761`) 建的也確實是**不動 `os.environ`** 的隔離 dict —— 兩者都真,
+  但都**不蘊含**「沒有 per-profile 解析路徑」, 因為解析走的是第三條路: per-turn
+  `set_secret_scope`, 而 `config.py::_env_ref_lookup` (`config.py:1533-1549`) 在 scope
+  生效時就是改讀它 —— 讀到的正是**該 profile 自己的 `.env`**;
+  `current_secret_scope()` 為 None 才退回 `os.environ` (default profile 的舊行為)。
+  這條路徑在 v2026.9.11 就已存在 (`config.py:1519`), 所以「某個共用的 credential pool」
+  這個猜測可以刪掉。**但這仍然只是 source 的說法**: 下面第一段「先接到請求的 profile
+  決定兩條路由」是 v2026.9.11 量到的行為, 尚未在新版重測 —— 要拿掉操作規則之前先量一次。
+  **操作規則本身不變**: 別讓兩個 profile 的 `config.yaml`
   用同一個變數名裝不同值; 專家要自己的 provider key 就換一個變數名; 這裡的憑證行為
   要靠量測驗證, 不要只靠讀 source 判斷。另外 profile 的 `config.yaml` **不可省略
   `model.api_key`**(這件事是獨立且已證實的): 省掉會 401, 因為

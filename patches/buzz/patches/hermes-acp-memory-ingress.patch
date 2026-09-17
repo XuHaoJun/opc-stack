@@ -19,7 +19,6 @@
 +    eligible), so it can be deleted the day Hermes exposes prompt metadata itself.
 +    """
 +    return [dict(meta) for block in prompt if (meta := getattr(block, "field_meta", None))]
-
 --- a/acp_adapter/server.py
 +++ b/acp_adapter/server.py
 @@ -26,7 +26,9 @@
@@ -31,9 +30,9 @@
 +    PromptBlock, _content_blocks_to_openai_user_content, _extract_text, preserve_prompt_block_meta,
 +)
  from acp_adapter.events import (
-     _build_plan_update_from_todo_result, make_message_cb, make_step_cb, make_thinking_cb, make_tool_progress_cb,
- )
-@@ -715,6 +717,7 @@
+     AssistantMessageIdAllocator, _build_plan_update_from_todo_result, make_message_cb, make_step_cb,
+     make_thinking_cb, make_tool_progress_cb,
+@@ -717,6 +719,7 @@
      def _run_agent_turn(
          self, *, state: SessionState, session_id: str, user_text: str, user_content: Any, conn: Any,
          loop: asyncio.AbstractEventLoop, approval_cb: Any, edit_approval_requester: Any,
@@ -41,7 +40,7 @@
      ) -> dict:
          """Executor-thread body of one turn, run inside ``contextvars.copy_context()`` so
          ContextVar writes are isolated from concurrent sessions.
-@@ -771,6 +774,7 @@
+@@ -773,6 +776,7 @@
                  return agent.run_conversation(
                      user_message=user_content, conversation_history=state.history, task_id=session_id,
                      persist_user_message=user_text or "[Image attachment]",
@@ -49,7 +48,7 @@
                  )
              except Exception as e:
                  logger.exception("Agent error in session %s", session_id)
-@@ -785,6 +789,8 @@
+@@ -787,6 +791,8 @@
  
          user_text = _extract_text(prompt).strip()
          user_content = _content_blocks_to_openai_user_content(prompt)
@@ -58,7 +57,7 @@
          text_only_prompt = all(isinstance(block, TextContentBlock) for block in prompt)
          if not user_text and not (isinstance(user_content, list) and user_content):
              return PromptResponse(stop_reason="end_turn")
-@@ -816,6 +822,7 @@
+@@ -820,6 +826,7 @@
              return self._run_agent_turn(
                  state=state, session_id=session_id, user_text=user_text, user_content=user_content, conn=conn,
                  loop=loop, approval_cb=cbs.approval_cb, edit_approval_requester=cbs.edit_approval_requester,
@@ -66,7 +65,6 @@
              )
  
          try:
-
 --- a/agent/conversation_loop.py
 +++ b/agent/conversation_loop.py
 @@ -1434,6 +1434,7 @@
@@ -77,18 +75,18 @@
  ) -> Dict[str, Any]:
      """Run a complete conversation with tool calling until completion; returns the result dict.
  
-@@ -1445,6 +1446,11 @@
-         user_message, moa_config, persist_user_message = _decode_inline_moa_turn(
+@@ -1446,6 +1447,11 @@
              user_message, persist_user_message
          )
-+
+ 
 +    # OPC memory ingress: stash the unjoined ACP text blocks for this turn only.
 +    # `_sync_external_memory_for_turn` pops it when the turn completes; the
 +    # unconditional assignment keeps non-ACP turns from seeing stale blocks.
 +    agent._memory_ingress_blocks = memory_ingress
- 
++
      # The gateway caches agents across turns; compression state is per-turn, or a stale
      # in-place boundary would make a later uncompressed result look compacted.
+     agent._last_compaction_in_place = agent._last_compression_attempt_recorded = False
 @@ -1584,6 +1590,7 @@
      persist_user_platform_id: Optional[str] = None,
      moa_config: Optional[dict[str, Any]] = None,
@@ -105,7 +103,6 @@
      )
      return export_current_turn_boundary(agent, result, user_message)
  
-
 --- a/agent/memory_manager.py
 +++ b/agent/memory_manager.py
 @@ -479,18 +479,23 @@
@@ -135,7 +132,6 @@
  
          def _sync(provider: MemoryProvider) -> None:
              kwargs: Dict[str, Any] = {"session_id": session_id}
-
 --- a/agent/turn_facade.py
 +++ b/agent/turn_facade.py
 @@ -27,6 +27,7 @@
@@ -155,7 +151,6 @@
                      )
                  finally:
                      # Post-loop relay/task finalization must not receive a late refresh interrupt;
-
 --- a/run_agent.py
 +++ b/run_agent.py
 @@ -885,6 +885,10 @@

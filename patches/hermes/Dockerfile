@@ -165,7 +165,12 @@ RUN cd plugins/platforms/photon/sidecar && \
 
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
+# `--extra google-chat` mirrors upstream's Dockerfile (v2026.9.14): it is kept
+# out of [all] so a quarantined google-cloud-pubsub cannot break every fresh
+# install, and is baked here because this image is sealed — runtime
+# --install-deps would have to write the venv, which HERMES_DISABLE_LAZY_INSTALLS=1
+# (below) forbids.
+RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix --extra google-chat
 
 COPY web/ web/
 COPY ui-tui/ ui-tui/

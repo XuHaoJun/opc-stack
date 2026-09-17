@@ -23,7 +23,7 @@ set -eu
 # file rejoins the ladder at the rung it was actually written for. Bumping it
 # would assert that an old file is current and skip every migration it still
 # needs. Do not touch it.
-OPC_CONFIG_VERSION=42
+OPC_CONFIG_VERSION=44
 OPC_CONFIG_VERSION_LEGACY=34
 
 . /usr/local/bin/opc-nix-seed.sh
