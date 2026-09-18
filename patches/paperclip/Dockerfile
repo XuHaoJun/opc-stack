@@ -42,7 +42,7 @@ FROM node:24-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 \
+  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 tini \
        postgresql-client redis-tools amqp-tools \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
@@ -64,6 +64,7 @@ COPY packages/adapter-utils/package.json packages/adapter-utils/
 COPY packages/google-sheets-mcp-server/package.json packages/google-sheets-mcp-server/
 COPY packages/kv-demo-mcp-server/package.json packages/kv-demo-mcp-server/
 COPY packages/mcp-server/package.json packages/mcp-server/
+COPY packages/paperclip-eval-kernel/package.json packages/paperclip-eval-kernel/
 COPY packages/paperclip-runner/package.json packages/paperclip-runner/
 COPY packages/skills-catalog/package.json packages/skills-catalog/
 COPY packages/tailscale-https-broker/package.json packages/tailscale-https-broker/
@@ -90,34 +91,87 @@ COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
 RUN pnpm install --frozen-lockfile
 
-FROM base AS build
+FROM base AS rust-toolchain
 WORKDIR /app
+# Upstream v2026.916.0+: Debian's packaged rust (trixie ships 1.85) lags the
+# runner's dependency tree — install rustup (pinned, checksum-verified) and let
+# the runner's own rust-toolchain.toml choose the compiler. OPC keeps this
+# block in sync with upstream Dockerfile; the old `apt cargo rustc` no longer
+# builds the runner.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends cargo rustc \
+  && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config \
   && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+ARG RUSTUP_VERSION=1.29.0
+ARG RUSTUP_SHA256_AMD64=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+ARG RUSTUP_SHA256_ARM64=9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) rustTarget="x86_64-unknown-linux-gnu"; sha256="$RUSTUP_SHA256_AMD64" ;; \
+      arm64) rustTarget="aarch64-unknown-linux-gnu"; sha256="$RUSTUP_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustTarget}/rustup-init"; \
+    echo "${sha256}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none; \
+    rm /tmp/rustup-init
+COPY packages/paperclip-runner/rust-toolchain.toml /tmp/runner-toolchain/rust-toolchain.toml
+RUN cd /tmp/runner-toolchain && rustup show
+
+FROM rust-toolchain AS rust-chef
+RUN cd /tmp/runner-toolchain && cargo install cargo-chef --version 0.1.73 --locked
+
+FROM rust-chef AS runner-plan
+WORKDIR /app/packages/paperclip-runner
+COPY packages/paperclip-runner/rust-toolchain.toml ./
+COPY packages/paperclip-runner/runner ./runner
+RUN cd runner && cargo chef prepare --recipe-path /tmp/runner-recipe.json
+
+FROM rust-chef AS runner-deps
+WORKDIR /app/packages/paperclip-runner/runner
+COPY packages/paperclip-runner/rust-toolchain.toml ../
+COPY --from=runner-plan /tmp/runner-recipe.json /tmp/runner-recipe.json
+RUN cargo chef cook --release --locked --package paperclip-runner-core --bin paperclip-runnerd --recipe-path /tmp/runner-recipe.json \
+  && find . -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +
+
+FROM runner-deps AS runner-build
+WORKDIR /app/packages/paperclip-runner
+COPY packages/paperclip-runner/rust-toolchain.toml ./
+COPY packages/paperclip-runner/runner ./runner
+COPY packages/paperclip-runner/protocol ./protocol
+RUN find runner protocol -type f -exec touch -d @0 {} + \
+  && touch -d @0 rust-toolchain.toml \
+  && cargo build --release --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --bin paperclip-runnerd
+
+FROM runner-build AS build
+WORKDIR /app
 COPY --from=deps /app /app
 # opc/ (OPC overlay, synced from patches/) is copied explicitly in the
 # production stage; excluding it keeps entrypoint/script edits from
 # invalidating the pnpm build cache.
 COPY --exclude=opc . .
+RUN find packages/paperclip-runner/runner packages/paperclip-runner/protocol -type f -exec touch -d @0 {} + \
+  && touch -d @0 packages/paperclip-runner/rust-toolchain.toml
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
-# The server build vendors the Paperclip runner, whose release build includes
-# a locked Rust binary.
+# The server build runs scripts/write-build-stamp.mjs, which stamps the built
+# commit into dist/build-info.json. The build context has no .git, so the
+# script reads PAPERCLIP_BUILD_COMMIT instead. Declared here (build stage)
+# before the server build; production declares the same ARG again for the
+# runtime fallback (an ARG goes out of scope at the end of its stage).
 ARG PAPERCLIP_BUILD_COMMIT=""
 ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN pnpm --filter @paperclipai/server build
-RUN rm -rf packages/paperclip-runner/runner/target
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+RUN rm -rf packages/paperclip-runner/runner/target
 
 FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
-# Version/commit stamps: the image has no .git, so server-info cannot derive
-# them at runtime and falls back to these. Empty for local builds, which is
-# what compose does — /api/health then reports its normal fallback.
-ARG PAPERCLIP_BUILD_VERSION=""
-ARG PAPERCLIP_BUILD_COMMIT=""
 # Busts the tool layer below when it changes (upstream CI stamps an ISO week
 # so the @latest CLIs advance weekly). Empty here: the OPC stack pins its
 # rebuilds to explicit upgrades, so the tools move when we say so.
@@ -140,6 +194,14 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 COPY --chown=node:node --from=build /app /app
 
+# Declare per-build metadata after the stable RUN layers (upstream ordering
+# since v2026.916.0): Docker includes in-scope ARG values in a RUN's
+# environment even when its command does not mention them; declaring these
+# earlier invalidates the weekly tool cache above. The build stage still
+# receives the commit before writing dist/build-info.json. Empty for local
+# builds — /api/health then reports its normal fallback.
+ARG PAPERCLIP_BUILD_VERSION=""
+ARG PAPERCLIP_BUILD_COMMIT=""
 ENV NODE_ENV=production \
   PAPERCLIP_BUILD_VERSION=${PAPERCLIP_BUILD_VERSION} \
   PAPERCLIP_BUILD_COMMIT=${PAPERCLIP_BUILD_COMMIT} \
