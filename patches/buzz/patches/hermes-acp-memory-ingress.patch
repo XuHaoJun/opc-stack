@@ -1,6 +1,6 @@
 --- a/acp_adapter/content.py
 +++ b/acp_adapter/content.py
-@@ -273,3 +273,18 @@
+@@ -273,3 +273,18 @@ def _content_blocks_to_openai_user_content(prompt: list[PromptBlock]) -> str | l
          return "\n".join(text_parts)
  
      return parts
@@ -21,7 +21,7 @@
 +    return [dict(meta) for block in prompt if (meta := getattr(block, "field_meta", None))]
 --- a/acp_adapter/server.py
 +++ b/acp_adapter/server.py
-@@ -26,7 +26,9 @@
+@@ -26,7 +26,9 @@ from acp.schema import (
  
  from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, detect_provider
  from acp_adapter.commands import HERMES_VERSION, SlashCommandsMixin, _estimate_tokens
@@ -30,9 +30,9 @@
 +    PromptBlock, _content_blocks_to_openai_user_content, _extract_text, preserve_prompt_block_meta,
 +)
  from acp_adapter.events import (
-     AssistantMessageIdAllocator, _build_plan_update_from_todo_result, make_message_cb, make_step_cb,
-     make_thinking_cb, make_tool_progress_cb,
-@@ -717,6 +719,7 @@
+     AssistantMessageIdAllocator, _build_plan_update_from_todo_result, _send_update, flush_open_tool_calls,
+     make_message_cb, make_step_cb, make_thinking_cb, make_tool_progress_cb,
+@@ -747,6 +749,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
      def _run_agent_turn(
          self, *, state: SessionState, session_id: str, user_text: str, user_content: Any, conn: Any,
          loop: asyncio.AbstractEventLoop, approval_cb: Any, edit_approval_requester: Any,
@@ -40,7 +40,7 @@
      ) -> dict:
          """Executor-thread body of one turn, run inside ``contextvars.copy_context()`` so
          ContextVar writes are isolated from concurrent sessions.
-@@ -773,6 +776,7 @@
+@@ -803,6 +806,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                  return agent.run_conversation(
                      user_message=user_content, conversation_history=state.history, task_id=session_id,
                      persist_user_message=user_text or "[Image attachment]",
@@ -48,7 +48,7 @@
                  )
              except Exception as e:
                  logger.exception("Agent error in session %s", session_id)
-@@ -787,6 +791,8 @@
+@@ -817,6 +821,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
  
          user_text = _extract_text(prompt).strip()
          user_content = _content_blocks_to_openai_user_content(prompt)
@@ -57,17 +57,17 @@
          text_only_prompt = all(isinstance(block, TextContentBlock) for block in prompt)
          if not user_text and not (isinstance(user_content, list) and user_content):
              return PromptResponse(stop_reason="end_turn")
-@@ -820,6 +826,7 @@
-             return self._run_agent_turn(
-                 state=state, session_id=session_id, user_text=user_text, user_content=user_content, conn=conn,
-                 loop=loop, approval_cb=cbs.approval_cb, edit_approval_requester=cbs.edit_approval_requester,
-+                memory_ingress=memory_ingress,
-             )
- 
-         try:
+@@ -853,6 +859,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
+                 return self._run_agent_turn(
+                     state=state, session_id=session_id, user_text=user_text, user_content=user_content, conn=conn,
+                     loop=loop, approval_cb=cbs.approval_cb, edit_approval_requester=cbs.edit_approval_requester,
++                    memory_ingress=memory_ingress,
+                 )
+             finally:
+                 # Still on the executor thread: ``_send_update`` blocks on the loop, so flushing
 --- a/agent/conversation_loop.py
 +++ b/agent/conversation_loop.py
-@@ -1434,6 +1434,7 @@
+@@ -1448,6 +1448,7 @@ def _run_conversation_turn(
      persist_user_platform_id: Optional[str] = None,
      turn_author: Optional[Dict[str, Any]] = None,
      moa_config: Optional[dict[str, Any]] = None,
@@ -75,7 +75,7 @@
  ) -> Dict[str, Any]:
      """Run a complete conversation with tool calling until completion; returns the result dict.
  
-@@ -1446,6 +1447,11 @@
+@@ -1460,6 +1461,11 @@ def _run_conversation_turn(
              user_message, persist_user_message
          )
  
@@ -87,7 +87,7 @@
      # The gateway caches agents across turns; compression state is per-turn, or a stale
      # in-place boundary would make a later uncompressed result look compacted.
      agent._last_compaction_in_place = agent._last_compression_attempt_recorded = False
-@@ -1584,6 +1590,7 @@
+@@ -1605,6 +1611,7 @@ def run_conversation(
      persist_user_platform_id: Optional[str] = None,
      moa_config: Optional[dict[str, Any]] = None,
      turn_author: Optional[Dict[str, Any]] = None,
@@ -95,17 +95,17 @@
  ) -> Dict[str, Any]:
      """Run one turn (see ``_run_conversation_turn``) and export the current-turn boundary.
  
-@@ -1608,6 +1615,7 @@
-         persist_user_platform_id=persist_user_platform_id,
-         moa_config=moa_config,
-         turn_author=turn_author,
-+        memory_ingress=memory_ingress,
-     )
-     return export_current_turn_boundary(agent, result, user_message)
- 
+@@ -1633,6 +1640,7 @@ def run_conversation(
+             persist_user_platform_id=persist_user_platform_id,
+             moa_config=moa_config,
+             turn_author=turn_author,
++            memory_ingress=memory_ingress,
+         )
+     result = export_current_turn_boundary(agent, result, user_message)
+     _close_durable_failed_turn(agent, result)
 --- a/agent/memory_manager.py
 +++ b/agent/memory_manager.py
-@@ -479,18 +479,23 @@
+@@ -479,18 +479,23 @@ class MemoryManager:
  
      def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "",
                   messages: Optional[List[Dict[str, Any]]] = None,
@@ -134,7 +134,7 @@
              kwargs: Dict[str, Any] = {"session_id": session_id}
 --- a/agent/turn_facade.py
 +++ b/agent/turn_facade.py
-@@ -27,6 +27,7 @@
+@@ -27,6 +27,7 @@ class TurnFacadeMixin:
          persist_user_display_metadata: Optional[Dict[str, Any]]=None,
          persist_user_platform_id: Optional[str]=None, moa_config: Optional[dict[str, Any]]=None,
          turn_author: Optional[Dict[str, Any]] = None,
@@ -142,7 +142,7 @@
          relay_metadata: Optional[Dict[str, Any]] = None,
      ) -> Dict[str, Any]:
          """Forwarder — see ``agent.conversation_loop.run_conversation``."""
-@@ -136,7 +137,7 @@
+@@ -141,7 +142,7 @@ class TurnFacadeMixin:
                          persist_user_display_kind=persist_user_display_kind,
                          persist_user_display_metadata=persist_user_display_metadata,
                          persist_user_platform_id=persist_user_platform_id, moa_config=moa_config,
@@ -153,7 +153,7 @@
                      # Post-loop relay/task finalization must not receive a late refresh interrupt;
 --- a/run_agent.py
 +++ b/run_agent.py
-@@ -885,6 +885,10 @@
+@@ -920,6 +920,10 @@ class AIAgent(
          is almost certainly a retry of the same intent, and a prefetch keyed on the interrupted turn would
          fire against stale context. See #15218.
          """
@@ -164,7 +164,7 @@
          if interrupted or not (self._memory_manager and final_response and original_user_message):
              return
          # Flatten multimodal parts to text (newline-joined for memory).
-@@ -898,6 +902,8 @@
+@@ -933,6 +937,8 @@ class AIAgent(
              turn_author = getattr(self, "_turn_author", None)
              if turn_author is not None:
                  sync_kwargs["turn_author"] = turn_author

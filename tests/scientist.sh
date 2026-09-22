@@ -377,12 +377,15 @@ echo "── dashboard ──"
 # `command` back to `sleep infinity` makes _read_container_argv() find
 # "sleep"/"infinity" after the main-wrapper.sh token instead of "dashboard",
 # so _is_dashboard_container() returns False and this check goes red. See
-# upstream/hermes/hermes_cli/container_boot.py at v2026.8.16:
-# _read_container_argv 252-296 reads /proc/1/cmdline,
-# _strip_container_argv_prefix 298-342 peels the s6/main-wrapper.sh launcher
-# prefix and an optional leading `hermes`, and _is_dashboard_container 353-371
-# requires args[0] == "dashboard". (The previous span 298-371 also swallowed
-# _is_legacy_gateway_run_request at 345-351, which is not part of this path.)
+# upstream/hermes/hermes_cli/container_boot.py at v2026.9.21:
+# _read_container_argv 180-201 reads /proc/1/cmdline,
+# _strip_container_argv_prefix 202-218 peels the s6/main-wrapper.sh launcher
+# prefix and an optional leading `hermes`, and _is_dashboard_container 229-232
+# requires args[0] == "dashboard". (The span 202-232 would also swallow
+# _is_legacy_gateway_run_request at 221-226, which is not part of this path.)
+# (Line numbers only — the three bodies are
+# byte-identical to v2026.8.16; v2026.9.21 rewrote reconcile_profile_gateways
+# above them, which is what moved them.)
 # These are PRIVATE functions and /opt/hermes/.venv/bin/python3 is a baked
 # path — a hermes upgrade can break this row without anything in the
 # scientist lane having changed; see the hermes entry in
