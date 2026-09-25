@@ -170,7 +170,7 @@ RUN touch ./README.md
 # install, and is baked here because this image is sealed — runtime
 # --install-deps would have to write the venv, which HERMES_DISABLE_LAZY_INSTALLS=1
 # (below) forbids.
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix --extra google-chat
+RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock --extra azure-identity --extra matrix --extra google-chat
 
 COPY web/ web/
 COPY ui-tui/ ui-tui/

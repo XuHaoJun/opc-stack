@@ -115,9 +115,28 @@ The raw engine, for scripted/CI use:
   patch edits. Review `git -C upstream/<proj> log --oneline <old>..<new>`
   before rebuilding if in doubt.
 - Component → services mapping: `buzz` → buzz-keys/buzz/buzz-bootstrap/frontdoor ·
-  `hermes` → hermes · `paperclip` → paperclip · `tencentdb` → tencentdb-core/
-  bootstrap/hub/proxy.
+  `hermes` → frontdoor/hermes/hermes-dashboard · `paperclip` → paperclip ·
+  `tencentdb` → tencentdb-core/bootstrap/hub/proxy.
 - To see available tags: `git -C upstream/<proj> ls-remote --tags origin`.
+
+When upgrading Buzz across `desktop-v0.5.25`, migration 0049 adds a
+`thread_metadata` index. On an existing, populated database, build it
+concurrently **before** running `scripts/upgrade.sh buzz ...` so the migration
+does not block writes while building it. This is safe to rerun when the
+index already exists; verify the final query reports `t` for all three flags
+and the same columns/order as the create command. An existing index with a
+different definition must be corrected before proceeding.
+
+```bash
+index=$(docker compose exec -T buzz-db psql -U buzz -d buzz -v ON_ERROR_STOP=1 \
+  -Atqc "SELECT to_regclass('public.idx_thread_metadata_window');")
+if [ $? -eq 0 ] && [ -z "$index" ]; then
+  docker compose exec -T buzz-db psql -U buzz -d buzz -v ON_ERROR_STOP=1 \
+    -c 'CREATE INDEX CONCURRENTLY idx_thread_metadata_window ON public.thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);'
+fi
+docker compose exec -T buzz-db psql -U buzz -d buzz -v ON_ERROR_STOP=1 \
+  -c "SELECT indisvalid, indisready, indislive, pg_get_indexdef(indexrelid) FROM pg_index WHERE indexrelid = 'public.idx_thread_metadata_window'::regclass;"
+```
 
 ## LLM provider: OpenCode Go (default)
 

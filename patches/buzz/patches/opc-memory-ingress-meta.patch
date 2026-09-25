@@ -179,7 +179,7 @@ index 0d87bca0..8c7ac353 100644
 +            huddle_instructions: None,
 +            channel_info,
 +            conversation_context,
-+            conversation_context_had_delivered_events: false,
++            conversation_context_had_session_events: false,
 +            profile_lookup: None,
 +            has_system_prompt_support: true,
 +            base_prompt: None,
@@ -599,8 +599,8 @@ index 06383d45..2d47838a 100644
  use crate::acp::{
      extract_model_config_options, extract_model_state, extract_thought_level_config_id,
      model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
--    ModelSwitchMethod, StopReason, SystemPromptTransport,
-+    ModelSwitchMethod, PromptBlock, StopReason, SystemPromptTransport,
+-    ModelSwitchMethod, StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
++    ModelSwitchMethod, PromptBlock, StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
  };
  use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
  use crate::observer;
@@ -653,18 +653,14 @@ index 06383d45..2d47838a 100644
  /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
  /// paired tag, keeping the base/workspace/persona boundaries recoverable downstream.
  ///
-@@ -2695,7 +2737,10 @@ pub async fn run_prompt_task(
-     // Event IDs represented by this prompt. Commit only after ACP reports a
-     // successful turn; failed/cancelled prompts must be retryable without loss.
-     let mut pending_delivered_event_ids = HashSet::new();
+@@ -2904,3 +2946,6 @@ pub async fn run_prompt_task(
+     let mut pending_hydrated_thread_roots = HashSet::new();
 -    let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
 +    // `prompt_metas[i]` is the `_meta` payload for `prompt_sections[i]`: the
 +    // memory-ingress structured provenance (spec §3). Heartbeats carry none —
 +    // they are not event-derived, so there is nothing to trust.
 +    let (prompt_sections, prompt_metas) = if let Some(text) = prompt_text {
          // Heartbeats create their session before this point, so a Goose method-not-found
-         // probe has already selected the correct framing for this process.
-         //
 @@ -2717,7 +2762,7 @@ pub async fn run_prompt_task(
                  &text,
              )
@@ -804,7 +800,7 @@ index b2203f62..0537b6b9 100644
          args.channel_info,
          &thread_tags,
 @@ -2043,11 +2070,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
-             args.conversation_context_had_delivered_events,
+             args.conversation_context_had_session_events,
          ),
          reply_anchor.as_deref(),
 -    ));
