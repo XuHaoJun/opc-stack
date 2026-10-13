@@ -21,8 +21,11 @@
 #     is never "upgraded" to a mobile- release;
 #   * allowing MORE components than the pin keeps a hotfix shape like hermes'
 #     v2026.8.16.2 eligible instead of invisible.
-# Repin a submodule to a different family and this report follows it; there is
-# no table here to keep in sync.
+# At HEAD, prefer a stable tag over any prerelease alias of the same commit.
+# Hermes has one documented ordering cutover: v0.21.6 supersedes v2026.9.24.
+# Source: https://github.com/NousResearch/hermes-agent/releases/tag/v0.21.6
+# Earlier semantic tags precede the date releases; v0.21.6+ follows them.
+# Other components retain numeric ordering within their inferred family.
 #
 # Two deliberate refusals:
 #   * `git describe` is NOT used to read the current pin. It reports buzz as
@@ -107,7 +110,7 @@ split_tag() {
 # there is exactly one ordering rule in this script. Missing components read as
 # zero, which is what makes 2026.8.16.2 > 2026.8.16 and 0.5.18 > 0.5.9.
 VCMP_AWK='
-function vcmp(a, b,   x, y, i, m, na, nb, xa, yb) {
+function numeric_vcmp(a, b,   x, y, i, m, na, nb, xa, yb) {
   na = split(a, x, "."); nb = split(b, y, ".")
   m = (na > nb) ? na : nb
   for (i = 1; i <= m; i++) {
@@ -117,11 +120,23 @@ function vcmp(a, b,   x, y, i, m, na, nb, xa, yb) {
     if (xa < yb) return -1
   }
   return 0
+}
+function hermes_era(v,   parts) {
+  split(v, parts, ".")
+  if (parts[1] + 0 >= 2000) return 0
+  return numeric_vcmp(v, "0.21.6") >= 0 ? 1 : -1
+}
+function vcmp(a, b,   ea, eb) {
+  if (component == "hermes") {
+    ea = hermes_era(a); eb = hermes_era(b)
+    if (ea != eb) return ea > eb ? 1 : -1
+  }
+  return numeric_vcmp(a, b)
 }'
 
-# True when version $1 is newer than version $2.
+# True when version $1 is newer than version $2 for component $3.
 ver_gt() {
-  awk -v a="$1" -v b="$2" "$VCMP_AWK"'
+  awk -v a="$1" -v b="$2" -v component="$3" "$VCMP_AWK"'
     BEGIN { exit (vcmp(a, b) > 0) ? 0 : 1 }
   '
 }
@@ -130,7 +145,7 @@ ver_gt() {
 # Reads tag names on stdin, prints "<tag>\t<version>\t<behind>", exit 1 if the
 # family is empty.
 family_latest() {
-  awk -v p="$1" -v n="$2" -v pin="$3" "$VCMP_AWK"'
+  awk -v p="$1" -v n="$2" -v pin="$3" -v component="$4" "$VCMP_AWK"'
     BEGIN { plen = length(p); best = ""; bestv = ""; behind = 0 }
     {
       if (substr($0, 1, plen) != p) next
@@ -155,7 +170,7 @@ FRONTDOOR_PIN_FILE=patches/buzz/Dockerfile
 frontdoor_pin() {
   local pin count
   [ -f "$FRONTDOOR_PIN_FILE" ] || return 1
-  pin="$(sed -n -E 's/.*git clone --depth 1 --branch (v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})[[:space:]].*/\1/p' "$FRONTDOOR_PIN_FILE")"
+  pin="$(sed -n -E 's/.*git clone --depth 1 --branch (v[0-9]+(\.[0-9]+){2,})[[:space:]].*/\1/p' "$FRONTDOOR_PIN_FILE")"
   count="$(printf '%s\n' "$pin" | sed '/^$/d' | wc -l)"
   [ "$count" = 1 ] || return 1
   printf '%s\n' "$pin"
@@ -178,13 +193,19 @@ for proj in "${SELECTED[@]}"; do
   pin_tag=""
   pin_prefix=""
   pin_ver=""
+  pin_stable=0
   for tag in "${head_tags[@]}"; do
     [ -n "$tag" ] || continue
     if split="$(split_tag "$tag")"; then
       prefix="${split%%$'\t'*}"
       ver="${split##*$'\t'}"
-      if [ -z "$pin_tag" ] || ver_gt "$ver" "$pin_ver"; then
+      tag_stable=0
+      [ "$tag" = "$prefix$ver" ] && tag_stable=1
+      if [ -z "$pin_tag" ] || [ "$tag_stable" -gt "$pin_stable" ] || {
+        [ "$tag_stable" -eq "$pin_stable" ] && ver_gt "$ver" "$pin_ver" "$proj"
+      }; then
         pin_tag="$tag"; pin_prefix="$prefix"; pin_ver="$ver"
+        pin_stable="$tag_stable"
       fi
     fi
   done
@@ -198,6 +219,9 @@ for proj in "${SELECTED[@]}"; do
     warn "$proj: more than one tag at HEAD (${head_tags[*]}); reporting against $pin_tag"
   fi
   ncomp="$(awk -F. '{print NF}' <<<"$pin_ver")"
+  # A date hotfix may have four components, but successor semantic releases
+  # have three. Keep both eligible across Hermes' naming cutover.
+  if [ "$proj" = hermes ] && [ "$pin_prefix" = v ]; then ncomp=3; fi
 
   if ! remote="$(git -C "$dir" ls-remote --tags origin 2>&1)"; then
     ROWS+=("$proj"$'\t'"$pin_tag"$'\t'"?"$'\t'"?"$'\t'"?")
@@ -206,7 +230,7 @@ for proj in "${SELECTED[@]}"; do
     continue
   fi
   tags="$(printf '%s\n' "$remote" | sed -n -E 's#^[0-9a-f]+[[:space:]]+refs/tags/(.*)$#\1#p' | grep -v '\^{}$' || true)"
-  if ! found="$(printf '%s\n' "$tags" | family_latest "$pin_prefix" "$ncomp" "$pin_ver")"; then
+  if ! found="$(printf '%s\n' "$tags" | family_latest "$pin_prefix" "$ncomp" "$pin_ver" "$proj")"; then
     ROWS+=("$proj"$'\t'"$pin_tag"$'\t'"?"$'\t'"?"$'\t'"?")
     warn "$proj: no stable tags in family '${pin_prefix}*' on origin — the pin ($pin_tag) may be a pre-release"
     bump 2
@@ -269,13 +293,13 @@ done
 
 echo
 total="${#SELECTED[@]}"
-if [ "$OUTDATED" -eq 0 ]; then
+if [ "$OUTDATED" -eq 0 ] && [ "$WORST" -ne 2 ]; then
   if [ "$total" -eq 1 ]; then
     echo "${SELECTED[0]} is on the newest stable tag in its family."
   else
     echo "all $total components are on the newest stable tag in their family."
   fi
-else
+elif [ "$OUTDATED" -gt 0 ]; then
   if [ "$OUTDATED" -eq 1 ]; then
     echo "1 of $total components has a newer stable tag:"
   else
@@ -291,6 +315,9 @@ else
     tag="${up##*$'\t'}"
     printf '  scripts/upgrade.sh %-*s %s\n' "$cmd_width" "$name" "$tag"
   done
+fi
+if [ "$WORST" -eq 2 ]; then
+  echo "Report incomplete — cannot determine whether all selected components are current; see warnings."
 fi
 
 if [ "${#WARNINGS[@]}" -gt 0 ]; then

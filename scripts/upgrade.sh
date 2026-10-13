@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Upgrade one component to a new upstream tag, then rebuild + redeploy.
 #   scripts/upgrade.sh <buzz|hermes|paperclip|tencentdb> <tag>
-#   e.g. scripts/upgrade.sh hermes v2026.9.1
+#   e.g. scripts/upgrade.sh hermes v0.21.7
 #
 # Flow: preflight → fetch tags → verify tag exists upstream → clean stale
 # patches from the submodule worktree → checkout the tag → record new submodule
@@ -25,6 +25,8 @@
 # Hermes owns two images in this stack: the gateway/dashboard image and the
 # Buzz frontdoor image, which bakes a Hermes ACP checkout. Upgrading Hermes
 # aligns both pins and redeploys all three runtime services together.
+# Hermes accepts stable numeric v-tags (date, semantic, and hotfix forms);
+# prerelease suffixes remain forbidden for both the target and frontdoor pin.
 #
 # ⚠ patches/ were written against the pinned tag; a major upgrade may need
 #   patch edits. Review `git -C upstream/<proj> log --oneline <old>..<tag>`
@@ -106,13 +108,13 @@ if ! git -C "$UP" ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" |
 fi
 OLD="$(git -C "$UP" describe --tags --always)"
 if [[ "$PROJ" == hermes ]]; then
-  if [[ ! "$TAG" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$ ]]; then
-    echo "Hermes target must be a date tag like v2026.8.19: $TAG" >&2
+  if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+){2,}$ ]]; then
+    echo "Hermes target must be a stable numeric v-tag like v0.21.7 or v2026.9.24: $TAG" >&2
     exit 1
   fi
   pin_file="patches/buzz/Dockerfile"
   [ -f "$pin_file" ] || { echo "missing frontdoor Dockerfile: $pin_file" >&2; exit 1; }
-  old_pin="$(sed -n -E 's/.*git clone --depth 1 --branch (v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})[[:space:]].*/\1/p' "$pin_file")"
+  old_pin="$(sed -n -E 's/.*git clone --depth 1 --branch (v[0-9]+(\.[0-9]+){2,})[[:space:]].*/\1/p' "$pin_file")"
   pin_count="$(printf '%s\n' "$old_pin" | sed '/^$/d' | wc -l)"
   [ "$pin_count" = 1 ] || {
     echo "expected exactly one frontdoor Hermes tag in $pin_file; found $pin_count" >&2
