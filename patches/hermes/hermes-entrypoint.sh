@@ -23,7 +23,7 @@ set -eu
 # file rejoins the ladder at the rung it was actually written for. Bumping it
 # would assert that an old file is current and skip every migration it still
 # needs. Do not touch it.
-OPC_CONFIG_VERSION=46
+OPC_CONFIG_VERSION=50
 OPC_CONFIG_VERSION_LEGACY=34
 
 . /usr/local/bin/opc-nix-seed.sh
@@ -145,6 +145,8 @@ if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<YAML
 _config_version: ${OPC_CONFIG_VERSION}
+security:
+  allow_lazy_installs: false
 agent:
   disabled_toolsets:
     - kanban
@@ -423,6 +425,8 @@ opc_seed_expert_profile() { # <profile-name> <api-key-value>
     if [ ! -f "$_ph/config.yaml" ]; then
         cat > "$_ph/config.yaml" <<YAML
 _config_version: ${OPC_CONFIG_VERSION}
+security:
+  allow_lazy_installs: false
 agent:
   disabled_toolsets:
     - kanban
@@ -804,6 +808,11 @@ opc_is_dashboard_container() { # <container command argv...>
 if opc_is_dashboard_container "$@"; then
     echo "[hermes] dashboard container — skipping expert profile seeding (the gateway container owns the shared profiles volume)"
 else
+    # v0.21.7 reloads the launch profile under a fail-closed secret scope too:
+    # process-only credentials no longer enable its API listener/model. This
+    # container owns hermes-data; the dashboard must not write these values
+    # into the separate frontdoor-hermes home it observes.
+    python3 /usr/local/lib/opc-default-env.py "$HH/.env"
     opc_seed_expert_profile agt-scientist "${HERMES_SCIENTIST_API_KEY:-}"
 fi
 

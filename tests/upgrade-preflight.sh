@@ -217,6 +217,74 @@ run hermes v2026.4.4
 expect_rc 1 "hermes sidecar patch context moved"
 expect_out "ACP sidecar patch does NOT apply" "hermes sidecar patch context moved"
 
+# ── paperclip: each build overlay must apply independently ──────────────
+p="$fx/upstream/paperclip"
+git_init "$p"
+mkdir -p "$p/scripts" "$p/server" "$p/ui" "$p/packages/db/src/migrations" \
+    "$p/packages/adapters/claude-local/src/server" "$p/server/src/services" \
+    "$fx/patches/paperclip/patches"
+printf 'x\n' > "$p/package.json"
+printf 'lock\n' > "$p/pnpm-lock.yaml"
+printf 'x\n' > "$p/scripts/docker-entrypoint.sh"
+printf 'x\n' > "$p/server/keep"; printf 'x\n' > "$p/ui/keep"
+printf 'FROM scratch\n' > "$p/Dockerfile"
+printf 'CREATE TABLE a();\n' > "$p/packages/db/src/migrations/0001_a.sql"
+printf 'export const config = {};\n' > "$p/packages/adapters/claude-local/src/server/acp.ts"
+printf 'export const runtimeTools = true;\n' > "$p/server/src/services/heartbeat.ts"
+cat > "$fx/patches/paperclip/patches/server-runtime-dependencies-lock.patch" <<'EOF'
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -1 +1,2 @@
+ lock
++dependency
+EOF
+cat > "$fx/patches/paperclip/patches/omp-acpx-runtime-env.patch" <<'EOF'
+--- a/packages/adapters/claude-local/src/server/acp.ts
++++ b/packages/adapters/claude-local/src/server/acp.ts
+@@ -1 +1,2 @@
+ export const config = {};
++export const env = {};
+EOF
+cat > "$fx/patches/paperclip/patches/task-bound-runtime-mcp.patch" <<'EOF'
+--- a/server/src/services/heartbeat.ts
++++ b/server/src/services/heartbeat.ts
+@@ -1 +1,2 @@
+ export const runtimeTools = true;
++export const scoped = true;
+EOF
+mkdir -p "$p/patches"
+printf 'package-env\n' > "$p/patches/acpx@0.12.0.patch"
+cat > "$fx/patches/paperclip/patches/acpx-terminal-env.patch" <<'EOF'
+--- a/patches/acpx@0.12.0.patch
++++ b/patches/acpx@0.12.0.patch
+@@ -1 +1,2 @@
+ package-env
++scoped-terminal-env
+EOF
+git_tag "$p" v1.0.0
+printf 'CREATE TABLE b();\n' > "$p/packages/db/src/migrations/0002_b.sql"
+git_tag "$p" v1.1.0
+git -C "$p" checkout -q v1.0.0
+run paperclip v1.1.0
+expect_rc 0 "paperclip overlays apply"
+for overlay in server-runtime-dependencies-lock omp-acpx-runtime-env task-bound-runtime-mcp acpx-terminal-env; do
+    git -C "$p" checkout -q v1.0.0
+    if [ "$overlay" = server-runtime-dependencies-lock ]; then
+        printf 'lock changed\n' > "$p/pnpm-lock.yaml"
+    elif [ "$overlay" = task-bound-runtime-mcp ]; then
+        printf 'export const runtimeTools = false;\n' > "$p/server/src/services/heartbeat.ts"
+    elif [ "$overlay" = acpx-terminal-env ]; then
+        printf 'package-env changed\n' > "$p/patches/acpx@0.12.0.patch"
+    else
+        printf 'export const config = {changed: true};\n' > "$p/packages/adapters/claude-local/src/server/acp.ts"
+    fi
+    git_tag "$p" "$overlay-drift"
+    git -C "$p" checkout -q v1.0.0
+    run paperclip "$overlay-drift"
+    expect_rc 1 "paperclip $overlay context moved"
+    expect_out "$overlay overlay patch does NOT apply" "paperclip $overlay context moved"
+done
+
 # ── tencentdb: the overlay patch must be dry-run against the NEW tag ─────
 t="$fx/upstream/tencentdb-agent-memory"
 git_init "$t"
@@ -241,6 +309,23 @@ printf 'FROM scratch\n' > "$t/MemoryProxy/Dockerfile"
 printf 'FROM scratch\n' > "$t/deploy/panel-knowledge-combined/Dockerfile"
 printf 'x\n' > "$t/deploy/panel-knowledge-combined/start-combined.sh"
 printf 'x\n' > "$t/MemoryPanel/keep"; printf 'x\n' > "$t/MemoryKnowledge/keep"
+for context in MemoryCore MemoryProxy MemoryKnowledge; do
+    mkdir -p "$t/$context/src"
+    printf 'export const headers = {};\n' > "$t/$context/src/headers.ts"
+done
+for context in MemoryCore MemoryProxy; do
+    mkdir -p "$fx/patches/tencentdb-agent-memory/$context/patches"
+    cat > "$fx/patches/tencentdb-agent-memory/$context/patches/opencode-session-headers.patch" <<'EOF'
+--- a/src/headers.ts
++++ b/src/headers.ts
+@@ -1 +1,2 @@
+ export const headers = {};
++export const sessionHeader = "x-opencode-session";
+EOF
+done
+mkdir -p "$fx/patches/tencentdb-agent-memory/patches"
+cp "$fx/patches/tencentdb-agent-memory/MemoryCore/patches/opencode-session-headers.patch" \
+    "$fx/patches/tencentdb-agent-memory/patches/knowledge-opencode-session-headers.patch"
 git_tag "$t" v1.0.0
 
 mkdir -p "$fx/patches/tencentdb-agent-memory/MemoryCore/patches"
@@ -276,6 +361,18 @@ run tencentdb v1.2.0
 expect_rc 1 "tencentdb overlay context moved"
 expect_out "does NOT apply" "tencentdb overlay context moved"
 
+# Header overlays are independent build blockers even when the schema applies.
+for context in MemoryCore MemoryProxy MemoryKnowledge; do
+    git -C "$t" checkout -q v1.0.0
+    printf 'export const headers = {changed: true};\n' > "$t/$context/src/headers.ts"
+    git_tag "$t" "headers-$context"
+    git -C "$t" checkout -q v1.0.0
+    run tencentdb "headers-$context"
+    expect_rc 1 "tencentdb $context header overlay context moved"
+    expect_out "$context session-header overlay patch does NOT apply" \
+        "tencentdb $context header overlay context moved"
+done
+
 # A session-binding key format change orphans every existing binding.
 git -C "$t" checkout -q master 2>/dev/null || git -C "$t" checkout -q main
 git -C "$t" checkout -q v1.0.0 -- "MemoryCore/src/metadata/router/v3-meta-schemas.ts"
@@ -302,3 +399,4 @@ echo "PASS  hermes _config_version drift names the exact ladder steps"
 echo "PASS  hermes private argv helpers tracked"
 echo "PASS  tencentdb overlay patch dry-run against the target tag"
 echo "PASS  tencentdb binding format + hub build context"
+echo "PASS  paperclip lock/runtime overlays independently reject context drift"

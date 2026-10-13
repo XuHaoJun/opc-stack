@@ -89,6 +89,15 @@ COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
+# Reconcile the declared runtime graph and scoped terminal package patches
+# before frozen installation; the build-only patch tool never enters runtime.
+COPY opc/patches/server-runtime-dependencies-lock.patch opc/patches/acpx-terminal-env.patch /tmp/
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends patch \
+  && rm -rf /var/lib/apt/lists/* \
+  && patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/acpx-terminal-env.patch \
+  && patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/server-runtime-dependencies-lock.patch \
+  && rm /tmp/server-runtime-dependencies-lock.patch /tmp/acpx-terminal-env.patch
 RUN pnpm install --frozen-lockfile
 
 FROM base AS rust-toolchain
@@ -153,21 +162,45 @@ COPY --from=deps /app /app
 # opc/ (OPC overlay, synced from patches/) is copied explicitly in the
 # production stage; excluding it keeps entrypoint/script edits from
 # invalidating the pnpm build cache.
-COPY --exclude=opc . .
+# Keep the reconciled lock from deps for later provider-pack deployment too.
+COPY --exclude=opc --exclude=pnpm-lock.yaml . .
+# The frozen graph hashes these corrected patches. Do not let the full source
+# copy silently restore older bytes before provider-pack deployment.
+COPY --from=deps /app/patches/acpx@0.12.0.patch /app/patches/acpx@0.13.1.patch patches/
+# The local omp ACP command needs the container's shared tool/resource roots.
+# Keep the closed host projection intact; the adapter contributes only OPC
+# capabilities, and remote callers still supply no host environment.
+COPY --from=deps /usr/bin/patch /usr/local/bin/opc-build-patch
+COPY opc/patches/omp-acpx-runtime-env.patch opc/patches/task-bound-runtime-mcp.patch /tmp/
+RUN opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/omp-acpx-runtime-env.patch \
+  && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/task-bound-runtime-mcp.patch \
+  && rm /tmp/omp-acpx-runtime-env.patch /tmp/task-bound-runtime-mcp.patch /usr/local/bin/opc-build-patch
 RUN find packages/paperclip-runner/runner packages/paperclip-runner/protocol -type f -exec touch -d @0 {} + \
   && touch -d @0 packages/paperclip-runner/rust-toolchain.toml
+# Both the browser bundle and server stamp need the exact source commit.
+# Declare it after dependency layers, before either application build.
+ARG PAPERCLIP_BUILD_COMMIT=""
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 # The server build runs scripts/write-build-stamp.mjs, which stamps the built
 # commit into dist/build-info.json. The build context has no .git, so the
-# script reads PAPERCLIP_BUILD_COMMIT instead. Declared here (build stage)
-# before the server build; production declares the same ARG again for the
-# runtime fallback (an ARG goes out of scope at the end of its stage).
-ARG PAPERCLIP_BUILD_COMMIT=""
+# script reads PAPERCLIP_BUILD_COMMIT instead. Docker exposes the ARG above
+# to each build RUN; production declares it again for the runtime fallback.
 ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
+
+# Ship the target's controller-owned remote provider pack without changing
+# OPC's local omp ACP configuration. An unstamped local build cannot qualify
+# a remote pack; never substitute a fabricated source revision.
+FROM build AS runner-provider-pack
+RUN mkdir -p /provider-pack \
+  && if [ -n "${PAPERCLIP_BUILD_COMMIT}" ]; then \
+    PAPERCLIP_RUNNER_SOURCE_REVISION="${PAPERCLIP_BUILD_COMMIT}" node packages/paperclip-runner/scripts/build-provider-pack.mjs /provider-pack; \
+  else \
+    echo "Skipping remote provider pack: supply a full PAPERCLIP_BUILD_COMMIT to enable remote OpenCode/ACPX execution"; \
+  fi
 
 FROM base AS production
 ARG USER_UID=1000
@@ -193,6 +226,15 @@ COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 COPY --chown=node:node --from=build /app /app
+
+COPY --from=runner-provider-pack /provider-pack /opt/paperclip-runner/provider-pack
+# This immutable, root-owned pack contains public code/integrity metadata,
+# not credentials. It must stay readable even after the runtime UID remap.
+RUN chmod -R a+rX /opt/paperclip-runner/provider-pack \
+  && if [ -f /opt/paperclip-runner/provider-pack/provider-pack.json ]; then \
+    gosu 65534:65534 node -e 'const fs = require("node:fs"); const path = require("node:path"); const root = "/opt/paperclip-runner/provider-pack"; const manifest = JSON.parse(fs.readFileSync(path.join(root, "provider-pack.json"), "utf8")); for (const artifact of Object.values(manifest.payload.artifacts)) fs.readFileSync(path.join(root, artifact.path)); fs.accessSync(path.join(root, manifest.payload.artifacts.nodeCommand.path), fs.constants.X_OK);'; \
+  fi
+ENV PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH=/opt/paperclip-runner/provider-pack
 
 # Declare per-build metadata after the stable RUN layers (upstream ordering
 # since v2026.916.0): Docker includes in-scope ARG values in a RUN's

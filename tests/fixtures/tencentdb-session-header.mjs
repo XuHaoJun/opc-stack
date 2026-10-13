@@ -76,6 +76,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   requests.push({ headers: req.headers, body });
+  if (mode === "proxy") {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(`data: ${JSON.stringify({
+      choices: [{ index: 0, delta: { content: responseContent } }],
+    })}\n\ndata: [DONE]\n\n`);
+    return;
+  }
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify({
     id: "chatcmpl-session-header-test",

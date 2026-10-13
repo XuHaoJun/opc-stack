@@ -46,15 +46,17 @@ fi
 # The one-shots belong here, not in a second table: --force-recreate below is
 # what makes them re-run, and it applies uniformly.
 declare -A SERVICES=(
-  [buzz]="buzz-keys buzz buzz-bootstrap frontdoor"
+  [buzz]="buzz-keys buzz buzz-bootstrap frontdoor hermes-dashboard"
   [hermes]="frontdoor hermes hermes-dashboard"
-  [paperclip]="paperclip paperclip-bootstrap"
+  [paperclip]="paperclip paperclip-bootstrap podenv"
   [tencentdb]="tencentdb-core tencentdb-bootstrap tencentdb-hub tencentdb-proxy"
 )
 # Dashboard uses the Hermes image but has no build section of its own.
 # Hermes upgrades also rebuild frontdoor because its image bakes hermes-agent
 # from the tag pinned in patches/buzz/Dockerfile.
 declare -A BUILD_SERVICES=(
+  [buzz]="buzz-keys buzz buzz-bootstrap frontdoor"
+  [paperclip]="paperclip paperclip-bootstrap"
   [hermes]="frontdoor hermes"
 )
 if [ -z "${SERVICES[$PROJ]:-}" ]; then
@@ -135,7 +137,17 @@ echo "── re-apply patches ──"
 scripts/prepare.sh
 BUILD_SERVICES_FOR_PROJ="${BUILD_SERVICES[$PROJ]:-${SERVICES[$PROJ]}}"
 echo "── rebuild + redeploy ${SERVICES[$PROJ]} ──"
-docker compose build $BUILD_SERVICES_FOR_PROJ
+BUILD_ARGS=()
+case "$PROJ" in
+  paperclip)
+    BUILD_ARGS=(--build-arg "PAPERCLIP_BUILD_VERSION=$TAG"
+      --build-arg "PAPERCLIP_BUILD_COMMIT=$(git -C "$UP" rev-parse HEAD)")
+    ;;
+  hermes)
+    BUILD_ARGS=(--build-arg "HERMES_GIT_SHA=$(git -C "$UP" rev-parse HEAD)")
+    ;;
+esac
+docker compose build $BUILD_SERVICES_FOR_PROJ "${BUILD_ARGS[@]}"
 docker compose up -d --force-recreate ${SERVICES[$PROJ]}
 
 echo "── verify: migrations advanced ──"

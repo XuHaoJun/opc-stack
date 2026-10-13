@@ -1,30 +1,20 @@
 --- a/acp_adapter/content.py
 +++ b/acp_adapter/content.py
-@@ -273,3 +273,18 @@ def _content_blocks_to_openai_user_content(prompt: list[PromptBlock]) -> str | l
+@@ -280,3 +280,8 @@
          return "\n".join(text_parts)
  
      return parts
 +
 +
 +def preserve_prompt_block_meta(prompt: list[PromptBlock]) -> list[dict[str, Any]]:
-+    """Return each prompt block's `_meta` payload, unjoined, in block order.
-+
-+    OPC memory ingress: `_content_blocks_to_openai_user_content` joins the text blocks
-+    with "\n", which is correct for the model but destroys the only trustworthy
-+    structural boundary the prompt has — Buzz sends one section per content block and
-+    section bodies are NOT escaped, so the boundary cannot be recovered by parsing the
-+    joined string. ACP blocks carry a free `_meta` field (`TextContentBlock.field_meta`,
-+    alias `_meta`), and Buzz attaches the event identity there; passing it through
-+    unread keeps this function policy-free (the memory provider decides what is
-+    eligible), so it can be deleted the day Hermes exposes prompt metadata itself.
-+    """
++    """Carry per-block ACP provenance without reconstructing boundaries from text."""
 +    return [dict(meta) for block in prompt if (meta := getattr(block, "field_meta", None))]
 --- a/acp_adapter/server.py
 +++ b/acp_adapter/server.py
-@@ -26,7 +26,9 @@ from acp.schema import (
+@@ -26,7 +26,9 @@
  
  from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, detect_provider
- from acp_adapter.commands import HERMES_VERSION, SlashCommandsMixin, _estimate_tokens
+ from acp_adapter.commands import SlashCommandsMixin, _estimate_tokens
 -from acp_adapter.content import PromptBlock, _content_blocks_to_openai_user_content, _extract_text
 +from acp_adapter.content import (
 +    PromptBlock, _content_blocks_to_openai_user_content, _extract_text, preserve_prompt_block_meta,
@@ -32,7 +22,7 @@
  from acp_adapter.events import (
      AssistantMessageIdAllocator, _build_plan_update_from_todo_result, _send_update, flush_open_tool_calls,
      make_message_cb, make_step_cb, make_thinking_cb, make_tool_progress_cb,
-@@ -747,6 +749,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
+@@ -754,6 +756,7 @@
      def _run_agent_turn(
          self, *, state: SessionState, session_id: str, user_text: str, user_content: Any, conn: Any,
          loop: asyncio.AbstractEventLoop, approval_cb: Any, edit_approval_requester: Any,
@@ -40,7 +30,7 @@
      ) -> dict:
          """Executor-thread body of one turn, run inside ``contextvars.copy_context()`` so
          ContextVar writes are isolated from concurrent sessions.
-@@ -803,6 +806,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
+@@ -810,6 +813,7 @@
                  return agent.run_conversation(
                      user_message=user_content, conversation_history=state.history, task_id=session_id,
                      persist_user_message=user_text or "[Image attachment]",
@@ -48,16 +38,15 @@
                  )
              except Exception as e:
                  logger.exception("Agent error in session %s", session_id)
-@@ -817,6 +821,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
+@@ -824,6 +828,7 @@
  
          user_text = _extract_text(prompt).strip()
          user_content = _content_blocks_to_openai_user_content(prompt)
-+        # OPC memory ingress: carry the per-block `_meta` the join above would drop.
 +        memory_ingress = preserve_prompt_block_meta(prompt)
          text_only_prompt = all(isinstance(block, TextContentBlock) for block in prompt)
          if not user_text and not (isinstance(user_content, list) and user_content):
              return PromptResponse(stop_reason="end_turn")
-@@ -853,6 +859,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
+@@ -860,6 +865,7 @@
                  return self._run_agent_turn(
                      state=state, session_id=session_id, user_text=user_text, user_content=user_content, conn=conn,
                      loop=loop, approval_cb=cbs.approval_cb, edit_approval_requester=cbs.edit_approval_requester,
@@ -67,104 +56,127 @@
                  # Still on the executor thread: ``_send_update`` blocks on the loop, so flushing
 --- a/agent/conversation_loop.py
 +++ b/agent/conversation_loop.py
-@@ -1448,6 +1448,7 @@ def _run_conversation_turn(
-     persist_user_platform_id: Optional[str] = None,
-     turn_author: Optional[Dict[str, Any]] = None,
+@@ -1560,6 +1560,7 @@
      moa_config: Optional[dict[str, Any]] = None,
-+    memory_ingress: Optional[List[Dict[str, Any]]] = None,
- ) -> Dict[str, Any]:
+     title_user_message: Optional[str] = None,
+     prelude: Optional[Prelude] = None,
++    memory_ingress: Optional[list[dict[str, Any]]] = None,
+ ) -> dict[str, Any]:
      """Run a complete conversation with tool calling until completion; returns the result dict.
  
-@@ -1460,6 +1461,11 @@ def _run_conversation_turn(
+@@ -1575,6 +1576,9 @@
+         user_message, moa_config, persist_user_message = _decode_inline_moa_turn(
              user_message, persist_user_message
          )
- 
-+    # OPC memory ingress: stash the unjoined ACP text blocks for this turn only.
-+    # `_sync_external_memory_for_turn` pops it when the turn completes; the
-+    # unconditional assignment keeps non-ACP turns from seeing stale blocks.
-+    agent._memory_ingress_blocks = memory_ingress
 +
++    # Cached agents must never inherit the preceding turn's ACP metadata.
++    agent._memory_ingress_blocks = memory_ingress
+ 
      # The gateway caches agents across turns; compression state is per-turn, or a stale
      # in-place boundary would make a later uncompressed result look compacted.
-     agent._last_compaction_in_place = agent._last_compression_attempt_recorded = False
-@@ -1605,6 +1611,7 @@ def run_conversation(
-     persist_user_platform_id: Optional[str] = None,
-     moa_config: Optional[dict[str, Any]] = None,
-     turn_author: Optional[Dict[str, Any]] = None,
-+    memory_ingress: Optional[List[Dict[str, Any]]] = None,
- ) -> Dict[str, Any]:
+@@ -1722,6 +1726,7 @@
+     turn_author: Optional[dict[str, Any]] = None,
+     title_user_message: Optional[str] = None,
+     prelude: Optional[Prelude] = None,
++    memory_ingress: Optional[list[dict[str, Any]]] = None,
+ ) -> dict[str, Any]:
      """Run one turn (see ``_run_conversation_turn``) and export the current-turn boundary.
  
-@@ -1633,6 +1640,7 @@ def run_conversation(
-             persist_user_platform_id=persist_user_platform_id,
-             moa_config=moa_config,
-             turn_author=turn_author,
-+            memory_ingress=memory_ingress,
-         )
+@@ -1756,8 +1761,10 @@
+                 turn_author=turn_author,
+                 title_user_message=title_user_message,
+                 prelude=prelude,
++                memory_ingress=memory_ingress,
+             )
+         finally:
++            agent._memory_ingress_blocks = None
+             end_voice_turn_route(agent)
      result = export_current_turn_boundary(agent, result, user_message)
-     _close_durable_failed_turn(agent, result)
+     if isinstance(result, dict):
 --- a/agent/memory_manager.py
 +++ b/agent/memory_manager.py
-@@ -479,18 +479,23 @@ class MemoryManager:
+@@ -598,12 +598,13 @@
  
      def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "",
-                  messages: Optional[List[Dict[str, Any]]] = None,
--                 turn_author: Optional[Dict[str, Any]] = None) -> None:
-+                 turn_author: Optional[Dict[str, Any]] = None,
-+                 memory_ingress: Optional[List[Dict[str, Any]]] = None) -> None:
+                  messages: Optional[list[dict[str, Any]]] = None,
+-                 turn_author: Optional[dict[str, Any]] = None) -> None:
++                 turn_author: Optional[dict[str, Any]] = None,
++                 memory_ingress: Optional[list[dict[str, Any]]] = None) -> None:
          """Sync a completed turn to all providers on the background worker.
  
          Never inline: a provider's ``sync_turn`` may block for minutes, which kept ``run_conversation``
          open after the user saw the response. The single worker also serializes writes (turn N before N+1).
 -        ``turn_author`` reaches only providers whose ``sync_turn`` accepts it.
-+        ``turn_author`` and ``memory_ingress`` reach only providers whose ``sync_turn`` accepts them.
-         """
-         providers = list(self._providers)
++        ``turn_author`` and ``memory_ingress`` reach only providers that accept them.
+ 
+         Everything forwarded is provider egress: turn strings AND the ``messages`` transcript slice
+         (tool outputs included) go through ``_redact_for_provider`` so secrets are never archived
+@@ -613,9 +614,31 @@
          clean_user_content = self._strip_skill_scaffolding(user_content) if providers else None
          if not clean_user_content:
              return
--        optional_kwargs = {"messages": messages, "turn_author": turn_author}
+-        clean_user_content, assistant_content, redacted_messages = _redact_for_provider(
+-            clean_user_content, assistant_content, messages)
+-        optional_kwargs = {"messages": redacted_messages, "turn_author": turn_author}
++        # Only event content is user text. Identities and provenance are not scrubbed.
++        # Include content in the SAME fan-out pass so secrets learned in tool results
++        # are also masked when repeated bare in the ACP metadata.
++        ingress_contents = [
++            event.get("content") for meta in (memory_ingress or [])
++            if isinstance(meta, dict) and isinstance(meta.get("buzz"), dict)
++            and isinstance(meta["buzz"].get("memoryEvents"), list)
++            for event in meta["buzz"]["memoryEvents"] if isinstance(event, dict)
++        ]
++        clean_user_content, assistant_content, redacted_messages, redacted_contents = _redact_for_provider(
++            clean_user_content, assistant_content, messages, ingress_contents)
++        if memory_ingress is not None:
++            contents = iter(redacted_contents)
++            memory_ingress = [
++                {**meta, "buzz": {**meta["buzz"], "memoryEvents": [
++                    {**event, "content": next(contents)} if isinstance(event, dict) else event
++                    for event in meta["buzz"]["memoryEvents"]
++                ]}}
++                if isinstance(meta, dict) and isinstance(meta.get("buzz"), dict)
++                and isinstance(meta["buzz"].get("memoryEvents"), list) else meta
++                for meta in memory_ingress
++            ]
 +        optional_kwargs = {
-+            "messages": messages,
-+            "turn_author": turn_author,
-+            "memory_ingress": memory_ingress,
++            "messages": redacted_messages, "turn_author": turn_author, "memory_ingress": memory_ingress,
 +        }
  
          def _sync(provider: MemoryProvider) -> None:
-             kwargs: Dict[str, Any] = {"session_id": session_id}
+             kwargs: dict[str, Any] = {"session_id": session_id}
 --- a/agent/turn_facade.py
 +++ b/agent/turn_facade.py
-@@ -27,6 +27,7 @@ class TurnFacadeMixin:
-         persist_user_display_metadata: Optional[Dict[str, Any]]=None,
+@@ -27,6 +27,7 @@
+         persist_user_display_metadata: Optional[dict[str, Any]]=None,
          persist_user_platform_id: Optional[str]=None, moa_config: Optional[dict[str, Any]]=None,
-         turn_author: Optional[Dict[str, Any]] = None,
-+        memory_ingress: Optional[List[Dict[str, Any]]] = None,
-         relay_metadata: Optional[Dict[str, Any]] = None,
-     ) -> Dict[str, Any]:
-         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
-@@ -141,7 +142,7 @@ class TurnFacadeMixin:
-                         persist_user_display_kind=persist_user_display_kind,
+         turn_author: Optional[dict[str, Any]] = None,
++        memory_ingress: Optional[list[dict[str, Any]]] = None,
+         relay_metadata: Optional[dict[str, Any]] = None,
+         title_user_message: Optional[str]=None,
+         prelude: Optional[Generator]=None,
+@@ -153,6 +154,7 @@
                          persist_user_display_metadata=persist_user_display_metadata,
                          persist_user_platform_id=persist_user_platform_id, moa_config=moa_config,
--                        turn_author=turn_author,
-+                        turn_author=turn_author, memory_ingress=memory_ingress,
+                         turn_author=turn_author,
++                        memory_ingress=memory_ingress,
+                         title_user_message=title_user_message,
+                         prelude=prelude,
                      )
-                 finally:
-                     # Post-loop relay/task finalization must not receive a late refresh interrupt;
 --- a/run_agent.py
 +++ b/run_agent.py
-@@ -920,6 +920,10 @@ class AIAgent(
+@@ -897,6 +897,9 @@
          is almost certainly a retry of the same intent, and a prefetch keyed on the interrupted turn would
          fire against stale context. See #15218.
          """
-+        # Pop unconditionally so an interrupted or otherwise ineligible turn cannot
-+        # leak ACP metadata into the next turn on this cached agent.
++        # Pop before eligibility checks, including interrupted/empty turns.
 +        memory_ingress = getattr(self, "_memory_ingress_blocks", None)
 +        self._memory_ingress_blocks = None
          if interrupted or not (self._memory_manager and final_response and original_user_message):
              return
          # Flatten multimodal parts to text (newline-joined for memory).
-@@ -933,6 +937,8 @@ class AIAgent(
+@@ -910,6 +913,8 @@
              turn_author = getattr(self, "_turn_author", None)
              if turn_author is not None:
                  sync_kwargs["turn_author"] = turn_author

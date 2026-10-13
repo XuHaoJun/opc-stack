@@ -11,8 +11,8 @@
 # Stateful per component (mirror of references/risk-checklist.md):
 #   buzz      → buzz-pgdata buzz-redisdata buzz-miniodata buzz-git frontdoor-hermes opc-keys
 #   hermes    → hermes-data hermes-profiles frontdoor-hermes
-#   paperclip → paperclip-data
-#   tencentdb → tencentdb-core-data tencentdb-hub-data tencentdb-proxy-data
+#   paperclip → paperclip-data opc-prototypes opc-prototyper-home opc-keys
+#   tencentdb → tencentdb-core-data tencentdb-core-config tencentdb-hub-data tencentdb-proxy-data
 # Regenerable caches (*-nix, *-omp) are never backed up.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
@@ -32,19 +32,19 @@ opc_load_env .env
 PNAME="${COMPOSE_PROJECT_NAME:-opc}"
 
 declare -A STOP_SERVICES=(
-  [buzz]="buzz-db buzz-redis buzz-minio buzz-minio-init buzz-keys buzz buzz-bootstrap frontdoor"
+  [buzz]="buzz-db buzz-redis buzz-minio buzz-minio-init buzz-keys buzz buzz-bootstrap frontdoor hermes-dashboard paperclip-bootstrap tencentdb-bootstrap devenv-expert-leases"
   # Hermes upgrades also rebuild the Buzz frontdoor, which runs Hermes ACP
   # against frontdoor-hermes. Stop every writer of the Hermes-related volumes
   # before taking a consistent snapshot.
   [hermes]="hermes hermes-dashboard frontdoor"
-  [paperclip]="paperclip"
+  [paperclip]="paperclip paperclip-bootstrap podenv host-sync-claude buzz-keys tencentdb-bootstrap devenv-expert-leases"
   [tencentdb]="tencentdb-core tencentdb-bootstrap tencentdb-hub tencentdb-proxy"
 )
 declare -A VOLUMES=(
   [buzz]="buzz-pgdata buzz-redisdata buzz-miniodata buzz-git frontdoor-hermes opc-keys"
   [hermes]="hermes-data hermes-profiles frontdoor-hermes"
-  [paperclip]="paperclip-data"
-  [tencentdb]="tencentdb-core-data tencentdb-hub-data tencentdb-proxy-data"
+  [paperclip]="paperclip-data opc-prototypes opc-prototyper-home opc-keys"
+  [tencentdb]="tencentdb-core-data tencentdb-core-config tencentdb-hub-data tencentdb-proxy-data"
 )
 [ -n "${VOLUMES[$PROJ]:-}" ] || usage
 

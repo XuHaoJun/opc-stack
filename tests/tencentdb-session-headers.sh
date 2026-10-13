@@ -56,6 +56,9 @@ run_proxy() {
   docker run --rm --network=none --add-host=opencode.ai:127.0.0.1 \
     --volume "$FIXTURE:/tmp/tencentdb-session-header.mjs:ro" \
     "$PROXY_IMAGE" node --import tsx /tmp/tencentdb-session-header.mjs proxy /app
+  docker run --rm --network=none \
+    --volume "$PWD/tests/fixtures/tencentdb-draft-protocols.mjs:/tmp/tencentdb-draft-protocols.mjs:ro" \
+    "$PROXY_IMAGE" node --import tsx /tmp/tencentdb-draft-protocols.mjs /app
 }
 
 case "$MODE" in

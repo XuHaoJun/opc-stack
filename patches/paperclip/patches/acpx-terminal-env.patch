@@ -1,0 +1,473 @@
+--- a/patches/acpx@0.12.0.patch
++++ b/patches/acpx@0.12.0.patch
+@@ -44,7 +44,93 @@
+  		stdio: [
+  			"pipe",
+  			"pipe",
+-@@ -3724,10 +3724,13 @@ function resolveClientCapabilities(params) {
++@@ -3124,14 +3124,13 @@
++ 	const renderedArgs = (args ?? []).map((arg) => JSON.stringify(arg)).join(" ");
++ 	return renderedArgs.length > 0 ? `${command} ${renderedArgs}` : command;
++ }
++-function toEnvObject(env) {
++-	if (!env || env.length === 0) return;
++-	const merged = { ...process.env };
++-	for (const entry of env) merged[entry.name] = entry.value;
+++function toEnvObject(env, sessionEnv, inheritProcessEnv) {
+++	const merged = buildAgentEnvironment(void 0, sessionEnv, inheritProcessEnv);
+++	if (env) for (const entry of env) merged[entry.name] = entry.value;
++ 	return merged;
++ }
++-function buildTerminalSpawnOptions(command, cwd, env, platform = process.platform) {
++-	const resolvedEnv = toEnvObject(env);
+++function buildTerminalSpawnOptions(command, cwd, env, sessionEnv, inheritProcessEnv, platform = process.platform) {
+++	const resolvedEnv = toEnvObject(env, sessionEnv, inheritProcessEnv);
++ 	return buildSpawnCommandOptions(command, {
++ 		cwd,
++ 		env: resolvedEnv,
++@@ -3141,7 +3140,7 @@
++ 			"pipe"
++ 		],
++ 		windowsHide: true
++-	}, platform, resolvedEnv ?? process.env);
+++	}, platform, resolvedEnv);
++ }
++ function trimToUtf8Boundary(buffer, limit) {
++ 	if (limit <= 0) return Buffer.alloc(0);
++@@ -3178,6 +3177,8 @@
++ }
++ var TerminalManager = class {
++ 	cwd;
+++	sessionEnv;
+++	inheritProcessEnv;
++ 	permissionMode;
++ 	nonInteractivePermissions;
++ 	onOperation;
++@@ -3187,6 +3188,8 @@
++ 	terminals = /* @__PURE__ */ new Map();
++ 	constructor(options) {
++ 		this.cwd = options.cwd;
+++		this.sessionEnv = options.sessionEnv;
+++		this.inheritProcessEnv = options.inheritProcessEnv;
++ 		this.permissionMode = options.permissionMode;
++ 		this.nonInteractivePermissions = options.nonInteractivePermissions ?? "deny";
++ 		this.onOperation = options.onOperation;
++@@ -3210,7 +3213,7 @@
++ 		try {
++ 			if (!await this.isExecuteApproved(commandLine)) throw new PermissionDeniedError("Permission denied for terminal/create");
++ 			const outputByteLimit = Math.max(0, Math.round(params.outputByteLimit ?? DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES));
++-			const { proc, spawnCommand } = await spawnTerminalProcess(params, this.cwd);
+++			const { proc, spawnCommand } = await spawnTerminalProcess(params, this.cwd, this.sessionEnv, this.inheritProcessEnv);
++ 			let resolveExit = () => {};
++ 			const exitPromise = new Promise((resolve) => {
++ 				resolveExit = resolve;
++@@ -3455,24 +3458,24 @@
++ 		while (hasLivePid(terminal.descendantPids)) await waitMs(25);
++ 	}
++ };
++-async function spawnTerminalProcess(params, defaultCwd) {
+++async function spawnTerminalProcess(params, defaultCwd, sessionEnv, inheritProcessEnv) {
++ 	const directCommand = buildTerminalSpawnCommand(params.command, params.args);
++ 	try {
++ 		return {
++-			proc: await spawnAndWait(directCommand, params, defaultCwd),
+++			proc: await spawnAndWait(directCommand, params, defaultCwd, sessionEnv, inheritProcessEnv),
++ 			spawnCommand: directCommand
++ 		};
++ 	} catch (error) {
++ 		const fallbackCommand = params.args === void 0 && isNotFoundSpawnError(error) ? buildTerminalFallbackSpawnCommand(params.command, params.cwd ?? defaultCwd) : void 0;
++ 		if (!fallbackCommand) throw error;
++ 		return {
++-			proc: await spawnAndWait(fallbackCommand, params, defaultCwd),
+++			proc: await spawnAndWait(fallbackCommand, params, defaultCwd, sessionEnv, inheritProcessEnv),
++ 			spawnCommand: fallbackCommand
++ 		};
++ 	}
++ }
++-async function spawnAndWait(spawnCommand, params, defaultCwd) {
++-	const spawnOptions = buildTerminalSpawnOptions(spawnCommand.command, params.cwd ?? defaultCwd, params.env);
+++async function spawnAndWait(spawnCommand, params, defaultCwd, sessionEnv, inheritProcessEnv) {
+++	const spawnOptions = buildTerminalSpawnOptions(spawnCommand.command, params.cwd ?? defaultCwd, params.env, sessionEnv, inheritProcessEnv);
++ 	if (spawnCommand.killProcessGroup) spawnOptions.detached = true;
++ 	const proc = spawn(spawnCommand.command, spawnCommand.args, spawnOptions);
++ 	await waitForSpawn(proc);
++@@ -3724,10 +3727,13 @@ function resolveClientCapabilities(params) {
+  		},
+  		terminal: params.terminal
+  	};
+@@ -60,7 +146,16 @@
+  	};
+  }
+  function isDevinRequestDiagnosticsMethod(method) {
+-@@ -3957,9 +3960,26 @@ var AcpClient = class {
++@@ -3878,6 +3884,8 @@
++ 		});
++ 		this.terminalManager = new TerminalManager({
++ 			cwd: this.options.cwd,
+++			sessionEnv: this.options.sessionOptions?.env,
+++			inheritProcessEnv: this.options.inheritProcessEnv,
++ 			permissionMode: this.options.permissionMode,
++ 			nonInteractivePermissions: this.options.nonInteractivePermissions,
++ 			onOperation: (operation) => {
++@@ -3957,9 +3965,26 @@ var AcpClient = class {
+  		this.lastAgentExit = void 0;
+  		this.lastKnownPid = child.pid ?? void 0;
+  		this.attachAgentLifecycleObservers(child);
+@@ -87,7 +182,7 @@
+  			if (!this.options.verbose) return;
+  			process.stderr.write(chunk);
+  		});
+-@@ -3994,7 +4014,7 @@ var AcpClient = class {
++@@ -3994,7 +4019,7 @@ var AcpClient = class {
+  			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
+  			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
+  			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
+@@ -96,7 +191,7 @@
+  		};
+  	}
+  	logAgentLaunch(plan) {
+-@@ -6070,6 +6090,27 @@ async function withConnectedSession(options) {
++@@ -6070,6 +6095,27 @@ async function withConnectedSession(options) {
+  //#region src/runtime/engine/prompt-turn.ts
+  const SESSION_REPLY_IDLE_MS = 1e3;
+  const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
+@@ -124,7 +219,7 @@
+  async function runPromptTurn(params) {
+  	try {
+  		const promptPromise = params.client.prompt(params.sessionId, params.prompt);
+-@@ -6079,6 +6120,20 @@ async function runPromptTurn(params) {
++@@ -6079,6 +6125,20 @@ async function runPromptTurn(params) {
+  			idleMs: SESSION_REPLY_IDLE_MS,
+  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
+  		}).catch(() => {});
+--- a/patches/acpx@0.13.1.patch
++++ b/patches/acpx@0.13.1.patch
+@@ -99,7 +99,93 @@
+  		stdio: [
+  			"pipe",
+  			"pipe",
+-@@ -3961,10 +3977,13 @@ function resolveClientCapabilities(params) {
++@@ -3347,14 +3363,12 @@
++ 	const renderedArgs = (args ?? []).map((arg) => JSON.stringify(arg)).join(" ");
++ 	return renderedArgs.length > 0 ? `${command} ${renderedArgs}` : command;
++ }
++-function toEnvObject(env) {
++-	if (!env || env.length === 0) return;
++-	const merged = { ...process.env };
++-	for (const entry of env) merged[entry.name] = entry.value;
+++function toEnvObject(env, sessionEnv, spawnEnvironment) {
+++	const merged = buildAgentEnvironment(void 0, sessionEnv, spawnEnvironment);
+++	if (env) for (const entry of env) merged[entry.name] = entry.value;
++ 	return merged;
++ }
++-function buildTerminalSpawnOptions(command, cwd, env, platform = process.platform) {
++-	const resolvedEnv = toEnvObject(env);
+++function buildTerminalSpawnOptions(command, cwd, resolvedEnv, platform = process.platform) {
++ 	return buildSpawnCommandOptions(command, {
++ 		cwd,
++ 		env: resolvedEnv,
++@@ -3364,7 +3378,7 @@
++ 			"pipe"
++ 		],
++ 		windowsHide: true
++-	}, platform, resolvedEnv ?? process.env);
+++	}, platform, resolvedEnv);
++ }
++ function trimToUtf8Boundary(buffer, limit) {
++ 	if (limit <= 0) return Buffer.alloc(0);
++@@ -3401,6 +3415,8 @@
++ }
++ var TerminalManager = class {
++ 	cwd;
+++	sessionEnv;
+++	spawnEnvironment;
++ 	permissionMode;
++ 	nonInteractivePermissions;
++ 	onOperation;
++@@ -3411,6 +3427,8 @@
++ 	terminals = /* @__PURE__ */ new Map();
++ 	constructor(options) {
++ 		this.cwd = options.cwd;
+++		this.sessionEnv = options.sessionEnv;
+++		this.spawnEnvironment = options.spawnEnvironment;
++ 		this.permissionMode = options.permissionMode;
++ 		this.nonInteractivePermissions = options.nonInteractivePermissions ?? "deny";
++ 		this.onOperation = options.onOperation;
++@@ -3435,7 +3453,7 @@
++ 		try {
++ 			if (!await this.isExecuteApproved(commandLine)) throw new PermissionDeniedError("Permission denied for terminal/create");
++ 			const outputByteLimit = Math.max(0, Math.round(params.outputByteLimit ?? DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES));
++-			const { proc, spawnCommand } = await spawnTerminalProcess(params, this.cwd);
+++			const { proc, spawnCommand } = await spawnTerminalProcess(params, this.cwd, this.sessionEnv, this.spawnEnvironment);
++ 			let resolveExit = () => {};
++ 			const exitPromise = new Promise((resolve) => {
++ 				resolveExit = resolve;
++@@ -3681,24 +3699,25 @@
++ 		while (hasLivePid(terminal.descendantPids)) await waitMs(25);
++ 	}
++ };
++-async function spawnTerminalProcess(params, defaultCwd) {
+++async function spawnTerminalProcess(params, defaultCwd, sessionEnv, spawnEnvironment) {
+++	const env = toEnvObject(params.env, sessionEnv, spawnEnvironment);
++ 	const directCommand = buildTerminalSpawnCommand(params.command, params.args);
++ 	try {
++ 		return {
++-			proc: await spawnAndWait(directCommand, params, defaultCwd),
+++			proc: await spawnAndWait(directCommand, params, defaultCwd, env),
++ 			spawnCommand: directCommand
++ 		};
++ 	} catch (error) {
++ 		const fallbackCommand = params.args === void 0 && isNotFoundSpawnError(error) ? buildTerminalFallbackSpawnCommand(params.command, params.cwd ?? defaultCwd) : void 0;
++ 		if (!fallbackCommand) throw error;
++ 		return {
++-			proc: await spawnAndWait(fallbackCommand, params, defaultCwd),
+++			proc: await spawnAndWait(fallbackCommand, params, defaultCwd, env),
++ 			spawnCommand: fallbackCommand
++ 		};
++ 	}
++ }
++-async function spawnAndWait(spawnCommand, params, defaultCwd) {
++-	const spawnOptions = buildTerminalSpawnOptions(spawnCommand.command, params.cwd ?? defaultCwd, params.env);
+++async function spawnAndWait(spawnCommand, params, defaultCwd, env) {
+++	const spawnOptions = buildTerminalSpawnOptions(spawnCommand.command, params.cwd ?? defaultCwd, env);
++ 	if (spawnCommand.killProcessGroup) spawnOptions.detached = true;
++ 	const proc = spawn(spawnCommand.command, spawnCommand.args, spawnOptions);
++ 	await waitForSpawn(proc);
++@@ -3961,10 +3980,13 @@ function resolveClientCapabilities(params) {
+  			...params.elicitationModes.includes("url") ? { url: {} } : {}
+  		} } : {}
+  	};
+@@ -115,7 +201,7 @@
+  	};
+  }
+  function hasResponseField(response, field) {
+-@@ -4067,6 +4086,27 @@ function createNdJsonMessageStream(agentCommand, output, input) {
++@@ -4067,6 +4089,27 @@ function createNdJsonMessageStream(agentCommand, output, input) {
+  		} })
+  	};
+  }
+@@ -143,7 +229,7 @@
+  var AcpClient = class {
+  	options;
+  	connection;
+-@@ -4105,7 +4145,9 @@ var AcpClient = class {
++@@ -4105,7 +4148,9 @@ var AcpClient = class {
+  			cwd: asAbsoluteCwd(options.cwd),
+  			authPolicy: options.authPolicy ?? "skip",
+  			permissionPolicy: snapshotPermissionPolicy(options.permissionPolicy),
+@@ -154,7 +240,16 @@
+  		};
+  		this.eventHandlers = {
+  			onAcpMessage: this.options.onAcpMessage,
+-@@ -4216,9 +4258,21 @@ var AcpClient = class {
++@@ -4124,6 +4169,8 @@
++ 		});
++ 		this.terminalManager = new TerminalManager({
++ 			cwd: this.options.cwd,
+++			sessionEnv: this.options.sessionOptions?.env,
+++			spawnEnvironment: this.options.spawnEnvironment,
++ 			permissionMode: this.options.permissionMode,
++ 			nonInteractivePermissions: this.options.nonInteractivePermissions,
++ 			onOperation: (operation) => {
++@@ -4216,9 +4263,21 @@ var AcpClient = class {
+  		this.lastAgentExit = void 0;
+  		this.lastKnownPid = child.pid ?? void 0;
+  		this.attachAgentLifecycleObservers(child);
+@@ -176,7 +271,7 @@
+  			if (!this.options.verbose) return;
+  			process.stderr.write(chunk);
+  		});
+-@@ -4226,6 +4280,7 @@ var AcpClient = class {
++@@ -4226,6 +4285,7 @@ var AcpClient = class {
+  		const output = Readable.toWeb(child.stdout);
+  		const stream = this.createTappedStream(createNdJsonMessageStream(this.options.agentCommand, input, output));
+  		const connection = this.createConnection(stream, launch);
+@@ -184,7 +279,7 @@
+  		connection.signal.addEventListener("abort", () => {
+  			this.recordAgentExit("connection_close", child.exitCode ?? null, child.signalCode ?? null);
+  		}, { once: true });
+-@@ -4253,7 +4308,12 @@ var AcpClient = class {
++@@ -4253,7 +4313,12 @@ var AcpClient = class {
+  			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
+  			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
+  			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
+@@ -198,7 +293,7 @@
+  		};
+  	}
+  	logAgentLaunch(plan) {
+-@@ -4279,10 +4339,17 @@ var AcpClient = class {
++@@ -4279,10 +4344,17 @@ var AcpClient = class {
+  	}
+  	async spawnAgentProcess(plan) {
+  		const spawnCommand = buildAgentSpawnCommand(plan.spawnCommand, plan.args, process.platform, plan.spawnOptions.env);
+@@ -218,7 +313,7 @@
+  		try {
+  			await waitForSpawn$1(spawnedChild);
+  		} catch (error) {
+-@@ -4293,10 +4360,10 @@ var AcpClient = class {
++@@ -4293,10 +4365,10 @@ var AcpClient = class {
+  	createConnection(stream, launch) {
+  		const app = client({ name: "acpx" }).onNotification(methods.client.session.update, async ({ params }) => {
+  			await this.handleSessionUpdate(params);
+@@ -232,7 +327,7 @@
+  		}).onRequest(methods.client.fs.readTextFile, async ({ params }) => {
+  			return await this.handleReadTextFile(params);
+  		}).onRequest(methods.client.fs.writeTextFile, async ({ params }) => {
+-@@ -4312,6 +4379,11 @@ var AcpClient = class {
++@@ -4312,6 +4384,11 @@ var AcpClient = class {
+  		}).onRequest(methods.client.terminal.release, async ({ params }) => {
+  			return await this.handleReleaseTerminal(params);
+  		});
+@@ -244,7 +339,7 @@
+  		if (launch.devinAcp) app.onRequest("_cognition.ai/request_diagnostics", (params) => {
+  			return params && typeof params === "object" && !Array.isArray(params) ? params : {};
+  		}, async () => ({}));
+-@@ -4333,12 +4405,12 @@ var AcpClient = class {
++@@ -4333,12 +4410,12 @@ var AcpClient = class {
+  	async initializeProtocolConnection(connection, launch) {
+  		const initializePromise = connection.initialize({
+  			protocolVersion: PROTOCOL_VERSION,
+@@ -259,7 +354,7 @@
+  			clientInfo: resolveClientInfo(launch.devinAcp)
+  		});
+  		const initialized = launch.geminiAcp ? await withTimeout(initializePromise, resolveGeminiAcpStartupTimeoutMs()) : await initializePromise;
+-@@ -4358,6 +4430,36 @@ var AcpClient = class {
++@@ -4358,6 +4435,36 @@ var AcpClient = class {
+  		throw normalizedError;
+  	}
+  	createTappedStream(base) {
+@@ -296,7 +391,7 @@
+  		const onAcpMessage = () => this.eventHandlers.onAcpMessage;
+  		const onAcpOutputMessage = () => this.eventHandlers.onAcpOutputMessage;
+  		const elicitationRequestIds = /* @__PURE__ */ new Set();
+-@@ -4367,8 +4469,9 @@ var AcpClient = class {
++@@ -4367,8 +4474,9 @@ var AcpClient = class {
+  		const shouldSuppressInboundReplaySessionUpdate = (message) => {
+  			return this.suppressReplaySessionUpdateMessages && isSessionUpdateNotification(message);
+  		};
+@@ -307,7 +402,7 @@
+  			if (requestId !== void 0) {
+  				elicitationRequestIds.add(requestId);
+  				return;
+-@@ -4379,6 +4482,7 @@ var AcpClient = class {
++@@ -4379,6 +4487,7 @@ var AcpClient = class {
+  			}
+  		};
+  		return {
+@@ -315,7 +410,7 @@
+  			readable: new ReadableStream({ async start(controller) {
+  				const reader = base.readable.getReader();
+  				try {
+-@@ -4387,10 +4491,16 @@ var AcpClient = class {
++@@ -4387,10 +4496,16 @@ var AcpClient = class {
+  						if (done) break;
+  						if (!value) continue;
+  						observeInbound(value);
+@@ -333,7 +428,7 @@
+  					reader.releaseLock();
+  					controller.close();
+  				}
+-@@ -4403,10 +4513,20 @@ var AcpClient = class {
++@@ -4403,10 +4518,20 @@ var AcpClient = class {
+  					onAcpOutputMessage()?.("outbound", message);
+  					onAcpMessage()?.("outbound", message);
+  				}
+@@ -354,7 +449,7 @@
+  					writer.releaseLock();
+  				}
+  			} })
+-@@ -4422,7 +4542,10 @@ var AcpClient = class {
++@@ -4422,7 +4547,10 @@ var AcpClient = class {
+  			const createPromise = this.runConnectionRequest(() => connection.newSession({
+  				cwd: sessionCwd,
+  				mcpServers: this.options.mcpServers ?? [],
+@@ -366,7 +461,7 @@
+  			}));
+  			result = claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
+  		} catch (error) {
+-@@ -4864,7 +4987,7 @@ var AcpClient = class {
++@@ -4864,7 +4992,7 @@ var AcpClient = class {
+  	}
+  	selectAuthMethod(methods) {
+  		for (const method of methods) {
+@@ -375,7 +470,7 @@
+  			if (envCredential) return {
+  				methodId: method.id,
+  				credential: envCredential,
+-@@ -4890,7 +5013,7 @@ var AcpClient = class {
++@@ -4890,7 +5018,7 @@ var AcpClient = class {
+  	}
+  	readAgentSpecificEnvCredential(methodId) {
+  		if (!this.isGrokBuildAcpCommand() || methodId !== "xai.api_key") return;
+@@ -384,7 +479,7 @@
+  		return typeof value === "string" && value.trim().length > 0 ? value : void 0;
+  	}
+  	selectAgentManagedAuthMethod(methodId) {
+-@@ -4915,9 +5038,9 @@ var AcpClient = class {
++@@ -4915,9 +5043,9 @@ var AcpClient = class {
+  		await connection.authenticate({ methodId: selected.methodId });
+  		this.log(`authenticated with method ${selected.methodId} (${selected.source})`);
+  	}
+@@ -396,7 +491,7 @@
+  		if (hostResponse) return hostResponse;
+  		const { response, recorded } = await this.resolvePermissionRequestFromMode(params);
+  		if (!recorded) {
+-@@ -4926,14 +5049,49 @@ var AcpClient = class {
++@@ -4926,14 +5054,49 @@ var AcpClient = class {
+  		}
+  		return response;
+  	}
+@@ -448,7 +543,7 @@
+  		})).then((response) => ({
+  			kind: "response",
+  			response
+-@@ -4970,7 +5128,7 @@ var AcpClient = class {
++@@ -4970,7 +5133,7 @@ var AcpClient = class {
+  	isElicitationSessionCancelling(sessionId) {
+  		return this.closing || this.cancellingSessionIds.has(sessionId);
+  	}
+@@ -457,7 +552,7 @@
+  		if (!this.options.onPermissionRequest) return;
+  		const signal = this.cancellationSignalForSession(params.sessionId);
+  		try {
+-@@ -4978,7 +5136,7 @@ var AcpClient = class {
++@@ -4978,7 +5141,7 @@ var AcpClient = class {
+  				sessionId: params.sessionId,
+  				raw: params,
+  				inferredKind: inferToolKind(params)
+@@ -466,7 +561,7 @@
+  			return this.hostPermissionDecisionResponse(params, signal, decision);
+  		} catch (error) {
+  			return this.hostPermissionErrorResponse(params, signal, error);
+-@@ -5028,6 +5186,12 @@ var AcpClient = class {
++@@ -5028,6 +5191,12 @@ var AcpClient = class {
+  	attachAgentLifecycleObservers(child) {
+  		child.once("exit", (exitCode, signal) => {
+  			this.recordAgentExit("process_exit", exitCode, signal);
+@@ -479,7 +574,7 @@
+  		});
+  		child.once("close", (exitCode, signal) => {
+  			this.recordAgentExit("process_close", exitCode, signal);
+-@@ -5771,10 +5935,20 @@ function recordSessionUpdate(conversation, state, notification, timestamp = isoN
++@@ -5771,10 +5940,20 @@ function recordSessionUpdate(conversation, state, notification, timestamp = isoN
+  	trimConversationForRuntime(conversation);
+  	return acpx;
+  }
+@@ -502,7 +597,7 @@
+  	updateConversationTimestamp(conversation, timestamp);
+  	trimConversationForRuntime(conversation);
+  	return true;
+-@@ -6435,6 +6609,27 @@ async function withConnectedSession(options) {
++@@ -6435,6 +6614,27 @@ async function withConnectedSession(options) {
+  //#region src/runtime/engine/prompt-turn.ts
+  const SESSION_REPLY_IDLE_MS = 1e3;
+  const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
+@@ -530,7 +625,7 @@
+  async function runPromptTurn(params) {
+  	try {
+  		const promptPromise = params.client.prompt(params.sessionId, params.prompt, params.onPromptRequestStarted, params.onElicitation);
+-@@ -6444,7 +6639,22 @@ async function runPromptTurn(params) {
++@@ -6444,7 +6644,22 @@ async function runPromptTurn(params) {
+  			idleMs: SESSION_REPLY_IDLE_MS,
+  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
+  		}).catch(() => {});

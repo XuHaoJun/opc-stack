@@ -184,6 +184,15 @@ run buzz
 [ "$rc" -eq 1 ] || fail "multi-tag HEAD should still report, got $rc: $(cat "$fixture/out")"
 assert_grep "multi-tag pick" '^buzz +desktop-v0\.5\.14 +desktop-v0\.5\.18 +4' "$fixture/out"
 assert_grep "multi-tag disclosure" 'more than one tag' "$fixture/out"
+# A prerelease-prefixed alias may point at the same release commit. It must
+# not become the family authority or manufacture frontdoor pin drift.
+printf 'rc.15-v2026.8.19\nv2026.8.19\n' > "$data/hermes.pin"
+run hermes
+[ "$rc" -eq 0 ] || fail "stable HEAD alias should win over prerelease prefix, got $rc: $(cat "$fixture/out")"
+assert_grep "stable alias authority" '^hermes +v2026\.8\.19 +v2026\.8\.19 +- ' "$fixture/out"
+refute_grep "no false alias drift" 'frontdoor image bakes its own checkout' "$fixture/out"
+printf 'v2026.8.19\n' > "$data/hermes.pin"
+
 printf 'desktop-v0.5.14\n' > "$data/buzz.pin"
 
 # ── unreachable origin: partial report, exit 2 ───────────────────────────────

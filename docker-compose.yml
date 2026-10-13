@@ -671,6 +671,8 @@ services:
         nix-seed: "service:nix-seed"
       args:
         NIX_SEED_IMAGE: ${IMAGE_PREFIX:-opc}/nix-seed:local
+        PAPERCLIP_BUILD_VERSION: v2026.1012.0
+        PAPERCLIP_BUILD_COMMIT: bba6a45f0d364cfd962ac59b3bdf2426a8222adb
     image: ${IMAGE_PREFIX:-opc}/paperclip:local
     init: true
     restart: unless-stopped

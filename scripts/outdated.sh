@@ -201,6 +201,11 @@ for proj in "${SELECTED[@]}"; do
       ver="${split##*$'\t'}"
       tag_stable=0
       [ "$tag" = "$prefix$ver" ] && tag_stable=1
+      # Upstream can retain rc.N-v<version> aliases on a stable release
+      # commit. A prerelease marker in the prefix is not stable authority.
+      if [[ "${prefix,,}" =~ (^|[./_-])(alpha|beta|rc|canary|nightly|preview)([./_-]|$) ]]; then
+        tag_stable=0
+      fi
       if [ -z "$pin_tag" ] || [ "$tag_stable" -gt "$pin_stable" ] || {
         [ "$tag_stable" -eq "$pin_stable" ] && ver_gt "$ver" "$pin_ver" "$proj"
       }; then

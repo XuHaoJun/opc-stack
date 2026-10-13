@@ -9,8 +9,8 @@ Source of truth for `upgrade-opc-stack` skill checks. Keep in sync when
 |---|---|---|
 | buzz | `buzz-pgdata` `buzz-redisdata` `buzz-miniodata` `buzz-git` `frontdoor-hermes` `opc-keys` | `buzz-nix` `buzz-omp` `frontdoor-nix` `frontdoor-omp` |
 | hermes | `hermes-data` `hermes-profiles` `frontdoor-hermes` | `hermes-nix` `hermes-omp` |
-| paperclip | `paperclip-data` | `paperclip-nix` |
-| tencentdb | `tencentdb-core-data` `tencentdb-hub-data` `tencentdb-proxy-data` | — |
+| paperclip | `paperclip-data` `opc-prototypes` `opc-prototyper-home` `opc-keys` | `paperclip-mise` |
+| tencentdb | `tencentdb-core-data` `tencentdb-core-config` `tencentdb-hub-data` `tencentdb-proxy-data` | — |
 
 Rationale: `*-nix` stores are caches (seeded at boot, self-heal, wipable via
 `docker volume rm`); `*-omp` is omp client state. Hermes includes
@@ -18,15 +18,22 @@ Rationale: `*-nix` stores are caches (seeded at boot, self-heal, wipable via
 baked Hermes ACP runtime. `opc-keys` is relay identity — irreplaceable, tiny,
 cheap insurance on every buzz upgrade.
 
-Services that must be STOPPED for a consistent backup (volume owners +
-dependents; `docker compose stop` also stops dependencies):
+Services that must be STOPPED for a consistent backup (all declared writers,
+including shared keys, dashboard homes and nested prototype workloads):
 
 | Component | Services |
 |---|---|
-| buzz | `buzz-db buzz-redis buzz-minio buzz-minio-init buzz-keys buzz buzz-bootstrap frontdoor` |
+| buzz | `buzz-db buzz-redis buzz-minio buzz-minio-init buzz-keys buzz buzz-bootstrap frontdoor hermes-dashboard paperclip-bootstrap tencentdb-bootstrap devenv-expert-leases` |
 | hermes | `hermes hermes-dashboard frontdoor` |
-| paperclip | `paperclip` |
+| paperclip | `paperclip paperclip-bootstrap podenv host-sync-claude buzz-keys tencentdb-bootstrap devenv-expert-leases` |
 | tencentdb | `tencentdb-core tencentdb-bootstrap tencentdb-hub tencentdb-proxy` |
+
+The upgrade engine resumes collateral runtime services (`hermes-dashboard`
+for Buzz, `podenv` for Paperclip). Restore first verifies every checksum,
+stops these writers, then replaces—not overlays—the volume contents.
+Restore matching old overlays and build configuration before rebuilding old
+source through `scripts/upgrade.sh`; a direct Compose rebuild can stamp the
+wrong source revision.
 
 ## 2. Tag schemes & delta classification
 

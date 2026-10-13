@@ -91,6 +91,10 @@ checkout "multiplex is on" "GATEWAY_MULTIPLEX_PROFILES=1" \
 # `export ` prefix, quotes or an inline comment — all of which the writer
 # handles and the dashboard can introduce — would have made the gate read a
 # different value from the gateway.
+check "default route serves 200 with the default profile's own key" \
+    docker compose exec -T hermes sh -c 'test -n "$API_SERVER_KEY" && test "$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $API_SERVER_KEY" http://127.0.0.1:8642/v1/models)" = 200'
+check "default route REJECTS the expert profile's key" \
+    docker compose exec -T hermes sh -c "k=\$(opc-env-value.sh /opt/data/profiles/$PROFILE/.env API_SERVER_KEY); test -n \"\$k\" && test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$k\" http://127.0.0.1:8642/v1/models)\" = 401"
 check "profile route serves 200 with the PROFILE's own key" \
     docker compose exec -T hermes sh -c "k=\$(opc-env-value.sh /opt/data/profiles/$PROFILE/.env API_SERVER_KEY); test -n \"\$k\" && test \"\$(curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$k\" http://127.0.0.1:8642/p/$PROFILE/v1/models)\" = 200"
 check "profile route REJECTS the default profile's key" \

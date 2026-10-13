@@ -30,4 +30,4 @@ export HOME="${HERMES_HOME:-/opt/data}"
 # the volume is shared across images and the kernel compares the number.
 : "${NIXAGENTS_GID:=3000}"
 exec setpriv --reuid="$HERMES_UID" --regid="$HERMES_GID" --groups "$NIXAGENTS_GID" \
-    /opt/hermes-venv/bin/hermes "$@"
+    /opt/hermes-src/.venv/bin/hermes "$@"

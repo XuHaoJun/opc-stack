@@ -52,6 +52,8 @@ is the bug the map fixes.
 1. **Sanity** — `.env` exists; `docker compose ps` reachable (if docker is
    unavailable, substitute compose-file inspection and note it); submodule at
    a known tag (`git -C upstream/<proj> describe --tags --always`).
+   Record the pre-change parent commit and running image IDs too: rollback
+   needs matching old overlays, not just the old upstream tag.
 2. **Risk assessment** — run the probes, do not perform them from memory:
    ```bash
    scripts/upgrade-preflight.sh <proj> <tag>
@@ -73,6 +75,9 @@ is the bug the map fixes.
    component STOPPED. For Hermes this includes `hermes-data`,
    `hermes-profiles`, and `frontdoor-hermes`, and stops `hermes`,
    `hermes-dashboard`, and `frontdoor`.
+   Keep the old overlay/Compose revision and private `.env` with the backup;
+   protect its parent directory with mode 0700. Shared-volume writers and
+   collateral runtimes are included in the bundled stop lists.
 5. **Upgrade** — `scripts/upgrade.sh <proj> <tag>` (the Hermes path also
    aligns the frontdoor's baked Hermes tag; do not edit `upstream/` directly).
    It re-runs preflight itself and refuses to proceed while findings are
@@ -92,23 +97,18 @@ is the bug the map fixes.
    Health is necessary and not sufficient: every silent upgrade failure this
    stack has hit left `connectivity.sh` green.
 7. **GATE B — on verification failure:** present the failure to the user and
-   OFFER rollback; do NOT auto-rollback. For Hermes, restore the old Hermes
-   tag and matching `patches/buzz/Dockerfile` frontdoor pin, restore all three
-   Hermes-related volumes while services are stopped, rebuild `frontdoor`
-   and `hermes`, then recreate `frontdoor hermes hermes-dashboard` and
-   re-verify:
-   ```bash
-   git -C upstream/hermes checkout <old>
-   sed -i -E 's|(git clone --depth 1 --branch )v[0-9.]+|\1<old>|' patches/buzz/Dockerfile
-   git add upstream/hermes patches/buzz/Dockerfile
-   scripts/prepare.sh
-   bash .claude/skills/upgrade-opc-stack/scripts/restore-volumes.sh hermes backups/<backup-dir>
-   docker compose build frontdoor hermes
-   docker compose up -d --force-recreate frontdoor hermes hermes-dashboard
-   tests/connectivity.sh
-   ```
-   For other components, restore = checkout old tag (record the gitlink),
-   restore volumes from the backup, rebuild, re-verify.
+   OFFER rollback; do NOT auto-rollback. After approval, use the current
+   restore helper to verify checksums, stop every writer and replace volume
+   contents. For Hermes, restore `hermes-data`, `hermes-profiles`, and
+   `frontdoor-hermes` together.
+   Restore the matching old `patches/` and Compose build configuration from
+   the recorded pre-change revision before building old source. A clone-pin
+   edit alone is insufficient across a Python/PM build-system change.
+   Rebuild through `scripts/upgrade.sh <proj> <old>` so Paperclip's version
+   and commit stamps match the selected source; do not use the stale direct
+   Compose-build instructions. The engine also aligns the frontdoor Hermes
+   pin and resumes the runtime services stopped for the backup. Then run
+   connectivity and component smoke checks again.
 8. **Finish** — report outcome, backup location, and the upgrade record
    (submodule pointer commit). Keep the backup dir until the new version has
    run clean for a while; prune old ones deliberately.

@@ -38,7 +38,7 @@ declare -A SUBMODULE=(
 declare -A PATCH_INPUTS=(
   [buzz]="Cargo.toml crates web admin-web package.json pnpm-lock.yaml pnpm-workspace.yaml patches migrations"
   [hermes]="pyproject.toml uv.lock package.json web ui-tui apps/shared plugins docker scripts"
-  [paperclip]="package.json pnpm-lock.yaml scripts/docker-entrypoint.sh server ui packages/db"
+  [paperclip]="package.json pnpm-lock.yaml patches scripts/docker-entrypoint.sh server ui packages/db"
   [tencentdb]="MemoryCore MemoryProxy MemoryPanel MemoryKnowledge deploy/panel-knowledge-combined"
 )
 # The upstream files our patched Dockerfiles/entrypoints were ADAPTED FROM.
@@ -207,6 +207,27 @@ buzz)
   ;;
 
 paperclip)
+  # Every build overlay is independent: dependency lock, local omp runtime,
+  # and task-bound MCP advertisement. Probe each even without SQL changes.
+  tmp="$(mktemp -d)"
+  if git -C "$UP" archive "$TAG" | tar -x -C "$tmp"; then
+    for overlay in server-runtime-dependencies-lock omp-acpx-runtime-env task-bound-runtime-mcp acpx-terminal-env; do
+      pf="patches/paperclip/patches/$overlay.patch"
+      if [ ! -f "$pf" ]; then
+        finding "overlay patch missing: $pf"
+        continue
+      fi
+      pf_abs="$PWD/$pf"
+      if (cd "$tmp" && patch -p1 --fuzz=0 --dry-run --force < "$pf_abs" >/dev/null 2>&1); then
+        note "$overlay overlay patch applies cleanly at $TAG"
+      else
+        finding "$overlay overlay patch does NOT apply at $TAG — regenerate it, or the build stops"
+      fi
+    done
+  else
+    finding "cannot archive $TAG to probe Paperclip build overlays"
+  fi
+  rm -rf "$tmp"
   # Count .sql only. The directory also holds drizzle's meta/ snapshots, so an
   # unfiltered count reads high (18 "added" for 11 actual migrations) and the
   # number is used for judgement.
@@ -301,6 +322,31 @@ tencentdb)
   else
     finding "overlay patch missing: $pf"
   fi
+  # Every image also applies an independent session-header overlay. A clean
+  # schema patch alone cannot clear the Core, Proxy, or Knowledge builds.
+  for context in MemoryCore MemoryProxy MemoryKnowledge; do
+    if [ "$context" = MemoryKnowledge ]; then
+      pf="patches/tencentdb-agent-memory/patches/knowledge-opencode-session-headers.patch"
+    else
+      pf="patches/tencentdb-agent-memory/$context/patches/opencode-session-headers.patch"
+    fi
+    if [ ! -f "$pf" ]; then
+      finding "overlay patch missing: $pf"
+      continue
+    fi
+    pf_abs="$PWD/$pf"
+    tmp="$(mktemp -d)"
+    if git -C "$UP" archive "$TAG" "$context" 2>/dev/null | tar -x -C "$tmp"; then
+      if (cd "$tmp/$context" && patch -p1 --fuzz=0 --dry-run --force < "$pf_abs" >/dev/null 2>&1); then
+        note "$context session-header overlay patch applies cleanly at $TAG"
+      else
+        finding "$context session-header overlay patch does NOT apply at $TAG — regenerate it, or the build stops"
+      fi
+    else
+      finding "$context is gone at $TAG — the session-header overlay has no target"
+    fi
+    rm -rf "$tmp"
+  done
   if ! git -C "$UP" ls-tree -d --name-only "$TAG" -- deploy/panel-knowledge-combined | grep -q .; then
     finding "deploy/panel-knowledge-combined/ gone at $TAG — the hub image is built from it (upstream MemoryKnowledge/Dockerfile is broken)"
   fi

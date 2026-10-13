@@ -1,0 +1,21 @@
+--- a/server/src/services/heartbeat.ts
++++ b/server/src/services/heartbeat.ts
+@@ -25012,7 +25012,11 @@
+-            const runtimeTools = createAdapterRuntimeToolAccess({
+-              agentId: agent.id,
+-              companyId: agent.companyId,
+-              runId: run.id,
+-              responsibleUserId: run.responsibleUserId,
+-            });
+-            if (!runtimeTools) {
++            // Connection-intent access is task-bound. Advertising it on an
++            // unscoped run makes eager ACP MCP initialization fail with HTTP 422.
++            const runtimeTools = issueRef
++              ? createAdapterRuntimeToolAccess({
++                  agentId: agent.id,
++                  companyId: agent.companyId,
++                  runId: run.id,
++                  responsibleUserId: run.responsibleUserId,
++                })
++              : undefined;
++            if (issueRef && !runtimeTools) {

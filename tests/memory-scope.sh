@@ -28,7 +28,7 @@ GATE_AGENT="agt-memscope-gate"
 TMPDIR="$(mktemp -d)"
 # Safety net: check 8/11 stop/restart the core. Whatever happens below, the
 # core must be back and temp files gone when the gate exits.
-trap 'rm -rf "$TMPDIR"; docker compose start tencentdb-core >/dev/null 2>&1 || true' EXIT
+trap 'rm -rf "$TMPDIR"; docker compose exec -T frontdoor rm -f /tmp/memscope-driver.py /tmp/opc-memory-ingress-redaction.py >/dev/null 2>&1 || true; docker compose start tencentdb-core >/dev/null 2>&1 || true' EXIT
 
 # Resolve the trusted writer exactly the way compose does:
 # MEMORY_TRUSTED_WRITERS:-BUZZ_ACP_AGENT_OWNER (docker-compose.yml, frontdoor).
@@ -567,7 +567,7 @@ def cmd_acp_reply(a):
 
     async def go():
         proc = await asyncio.create_subprocess_exec(
-            "/opt/hermes-venv/bin/hermes", "acp",
+            "/opt/hermes-src/.venv/bin/hermes", "acp",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL)
         try:
@@ -664,6 +664,9 @@ main()
 MEMSCOPE_DRIVER_EOF
 docker compose cp "$DRIVER_SRC" frontdoor:/tmp/memscope-driver.py >/dev/null \
   || { echo "FAIL  driver copy into frontdoor failed"; exit 1; }
+docker compose cp tests/fixtures/hermes-memory-ingress-redaction.py \
+  frontdoor:/tmp/opc-memory-ingress-redaction.py >/dev/null \
+  || { echo "FAIL  redaction fixture copy into frontdoor failed"; exit 1; }
 
 # run_driver <agent> <user> <cmd> <json> [snapshot-ttl-seconds]
 # A transport crash degrades to a marker, never to `set -e`: every check then
@@ -673,7 +676,7 @@ run_driver() {
     -e MEMORY_TENCENTDB_AGENT_ID="$1" -e MEMORY_TENCENTDB_USER_ID="$2" \
     ${5:+-e} ${5:+MEMORY_TENCENTDB_SNAPSHOT_TTL_SECONDS="$5"} \
     -e PROBE_OWNER="$OWNER_PUB" \
-    frontdoor /opt/hermes-venv/bin/python3 /tmp/memscope-driver.py "$3" "$4" \
+    frontdoor /opt/hermes-src/.venv/bin/python3 /tmp/memscope-driver.py "$3" "$4" \
     || printf 'DRIVER_TRANSPORT_FAIL=1\n'
 }
 # cid <service> — container id resolved through Compose, so this gate also
@@ -693,13 +696,19 @@ else
   fail "two plugin copies byte-identical"
 fi
 if docker compose exec -T frontdoor sh -c 'grep -q "memory_ingress" /opt/hermes/memory_tencentdb/__init__.py && grep -q "memory_ingress" /opt/data/plugins/memory_tencentdb/__init__.py' \
-  && docker compose exec -T -u 10000 -e HOME=/opt/data frontdoor /opt/hermes-venv/bin/python3 -c \
+  && docker compose exec -T -u 10000 -e HOME=/opt/data frontdoor /opt/hermes-src/.venv/bin/python3 -c \
     'import sys,inspect; sys.path.insert(0,"/opt/data/plugins"); from memory_tencentdb import MemoryTencentdbProvider; assert "memory_ingress" in inspect.signature(MemoryTencentdbProvider.sync_turn).parameters' \
   && grep -q "hermes-acp-memory-ingress.patch" patches/buzz/Dockerfile \
   && grep -q "fuzz=0" patches/buzz/Dockerfile; then
   pass "running frontdoor image carries the memory_ingress path (baked + synced + sidecar patch)"
 else
   fail "running frontdoor image carries the memory_ingress path (baked + synced + sidecar patch)"
+fi
+if docker compose exec -T -u 10000 -e HOME=/opt/data \
+  frontdoor /opt/hermes-src/.venv/bin/python3 /tmp/opc-memory-ingress-redaction.py; then
+  pass "provider egress redacts metadata while preserving provenance"
+else
+  fail "provider egress redacts metadata while preserving provenance"
 fi
 if grep -q '_META_NAMESPACE = "buzz"' "$P/ingress.py" \
   && grep -q '_META_KEY = "memoryEvents"' "$P/ingress.py" \

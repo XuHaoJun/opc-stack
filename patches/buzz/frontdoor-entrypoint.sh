@@ -23,7 +23,7 @@ set -eu
 # file rejoins the ladder at the rung it was actually written for. Bumping it
 # would assert that an old file is current and skip every migration it still
 # needs. Do not touch it.
-OPC_CONFIG_VERSION=46
+OPC_CONFIG_VERSION=50
 OPC_CONFIG_VERSION_LEGACY=34
 
 . /usr/local/bin/opc-nix-seed.sh
@@ -212,6 +212,8 @@ if [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<YAML
 _config_version: ${OPC_CONFIG_VERSION}
+security:
+  allow_lazy_installs: false
 agent:
   disabled_toolsets:
     - kanban

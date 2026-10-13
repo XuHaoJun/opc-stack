@@ -251,26 +251,58 @@ CMD ["/usr/local/bin/buzz-relay"]
 # v2026.8.13 while the clone had moved to v2026.8.19).
 # Installed from git rather than PyPI because the published hermes-agent
 # package lags the release tags.
+# Build-only bootstrap: Bookworm's Python 3.11.2 lacks tarfile's safe filter
+# API. Mount this newer interpreter for provisioning, never copy it to runtime.
+FROM python:3.14.7-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56 AS hermes-pm-bootstrap
+
 FROM opc-relay AS opc-frontdoor
 
 # Hermes ACP sidecar patch (memory ingress): applied with --fuzz=0 so an upstream
 # move of the hunk context stops the build instead of silently drifting.
 COPY opc/patches/hermes-acp-memory-ingress.patch /tmp/
 
+# The mounted bootstrap interpreter only provisions PM. Runtime Python and
+# tool versions come exclusively from the release's sha-verified PM lock.
+ENV HERMES_RUNTIME_DIR=/opt/hermes-src/tools \
+    CC=gcc CXX=g++
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv python3-pip git patch \
+    && apt-get install -y --no-install-recommends python3 git patch gcc g++ make libffi-dev libatomic1 util-linux \
     && rm -rf /var/lib/apt/lists/* \
-    && python3 -m venv /opt/hermes-venv \
-    && git clone --depth 1 --branch v2026.9.24 \
+    && git clone --depth 1 --branch v0.21.7 \
         https://github.com/NousResearch/hermes-agent.git /opt/hermes-src \
     && (cd /opt/hermes-src && patch -p1 --fuzz=0 --no-backup-if-mismatch \
-        < /tmp/hermes-acp-memory-ingress.patch) \
-    && /opt/hermes-venv/bin/pip install --no-cache-dir -e "/opt/hermes-src[acp]" \
-    && rm -rf /root/.cache/pip
+        < /tmp/hermes-acp-memory-ingress.patch)
+WORKDIR /opt/hermes-src
+RUN --mount=type=bind,from=hermes-pm-bootstrap,source=/usr/local,target=/usr/local,ro \
+    LD_LIBRARY_PATH=/usr/local/lib /usr/local/bin/python3 -c 'from pm import ensure; [ensure(name, explicit=True) for name in ("uv", "npm")]'
+# The mount is gone before linking PM-owned runtime binaries into /usr/local.
+RUN /usr/bin/python3 -c 'from pathlib import Path; from pm import installed_package; [Path("/usr/local/bin", command).symlink_to(installed_package(package).binary) for command, package in (("python3", "python"), ("node", "node"), ("npm", "npm"))]' \
+    && python3 -c 'import shutil; from pathlib import Path; from pm import env_for; Path("/usr/local/bin/npx").symlink_to(shutil.which("npx", path=env_for("npm", base_env={})["PATH"]))' \
+    && python3 -m pm.build_env --source /opt/hermes-src --python /usr/local/bin/python3 \
+        --out /opt/hermes-src/.venv --sealed --record-selection --extra acp \
+    && /opt/hermes-src/.venv/bin/python -c 'import sysconfig; from pathlib import Path; binding = Path(sysconfig.get_path("purelib")) / "hermes-agent.pth"; binding.write_text("/opt/hermes-src\n", encoding="utf-8"); binding.chmod(0o444)' \
+    && python3 -c 'from pathlib import Path; from pm import stage_manager_runtime; from scripts.bundles.payload import seal_pm_runtime; root = Path("/opt/hermes-src"); python = Path("/usr/local/bin/python3").resolve(); stage_manager_runtime(python=python, destination=root / "pm-runtime", project=root / "pm"); seal_pm_runtime(root, python)' \
+    && python3 scripts/write_install_stamp.py --output /opt/hermes-src/install-stamp.json \
+        --commit "$(git rev-parse HEAD)" --base-version 0.21.7 --display-version 0.21.7 \
+        --distance 0 --source opc --distribution docker --update-mechanism external --runtime-dir tools \
+    && python3 -c 'import json; from pathlib import Path; root = Path("/opt/hermes-src"); path = root / "install-stamp.json"; stamp = json.loads(path.read_text()); stamp["pmRuntime"] = str(root / "pm-runtime"); path.write_text(json.dumps(stamp) + "\n"); (root / ".install_method").write_text("docker\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/frontdoor","version":"0.21.7","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)' \
+    && chmod 0644 /opt/hermes-src/tools/facts.json \
+    && rm -f /opt/hermes-src/.venv/.lock /opt/hermes-src/pm-runtime/.lock
 
-ENV PATH="/opt/hermes-venv/bin:${PATH}" \
-    HERMES_HOME=/opt/data
-RUN mkdir -p /opt/data
+ENV PATH="/opt/hermes-src/.venv/bin:${PATH}" \
+    HERMES_HOME=/opt/data \
+    HERMES_WRITE_SAFE_ROOT=/opt/data \
+    HERMES_PYTHON=/opt/hermes-src/.venv/bin/python \
+    HERMES_DISABLE_LAZY_INSTALLS=1 \
+    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /var/lib/buzz
+# Exercise the sealed source binding from the actual launch directory and UID,
+# not the checkout (which would hide a missing .pth through sys.path[0]).
+RUN mkdir -p /opt/data && chown 10000:10000 /opt/data \
+    && setpriv --reuid=10000 --regid=10000 --clear-groups env HOME=/opt/data \
+        /opt/hermes-src/.venv/bin/python -c 'import os, sys, hermes_cli, acp_adapter.server; assert os.getuid() == 10000; assert sys.version_info[:2] == (3, 14)' \
+    && setpriv --reuid=10000 --regid=10000 --clear-groups env HOME=/opt/data \
+        /opt/hermes-src/.venv/bin/hermes --version
 
 # memory_tencentdb MemoryProvider (TencentDB Knowledge Plane, PRD v10.1) —
 # seeded into $HERMES_HOME/plugins/ at boot by frontdoor-entrypoint.sh.

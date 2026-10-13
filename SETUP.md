@@ -114,10 +114,68 @@ The raw engine, for scripted/CI use:
 - ⚠ Patches were written against the pinned tag — a major upgrade may need
   patch edits. Review `git -C upstream/<proj> log --oneline <old>..<new>`
   before rebuilding if in doubt.
-- Component → services mapping: `buzz` → buzz-keys/buzz/buzz-bootstrap/frontdoor ·
-  `hermes` → frontdoor/hermes/hermes-dashboard · `paperclip` → paperclip ·
-  `tencentdb` → tencentdb-core/bootstrap/hub/proxy.
+- Component → services mapping: `buzz` → buzz-keys/buzz/buzz-bootstrap/frontdoor/hermes-dashboard ·
+  `hermes` → frontdoor/hermes/hermes-dashboard · `paperclip` → paperclip/paperclip-bootstrap/podenv ·
+  `tencentdb` → tencentdb-core/bootstrap/hub/proxy. Dashboard and podenv are
+  resumed because consistent backups stop their shared-volume writers too.
 - To see available tags: `git -C upstream/<proj> ls-remote --tags origin`.
+
+The stopped-volume snapshot includes Paperclip's prototype repositories,
+prototyper home and shared keys, and TencentDB's persistent core config—not
+only the main databases. `tests/upgrade-volume-restore.sh` exercises the real
+helpers on disposable volumes: rollback restores original contents and removes
+files created after the snapshot. Never restore over running writers.
+Keep the matching old `patches/` and Compose build configuration with the
+backup. Restore them before rebuilding old source through `scripts/upgrade.sh`,
+which supplies the selected Paperclip tag and commit to all build products.
+
+For the October stable cutover (`desktop-v0.5.28`, `v0.21.7`,
+`v2026.1012.0`, `v2.0.2`):
+
+- Build corrected images before downtime. Hermes now needs PM-managed Python
+  3.14, prepared frontend products and config version 50 on both surfaces.
+  Buzz/Hermes overlays are coupled: after backing up all old state, align both
+  submodule pins before running `prepare.sh`; do not prepare the new config
+  seeds against the old Hermes pin.
+- Hermes multiplex now scopes the default profile as well as experts. The
+  gateway entrypoint maintains its private `.env`: the listener key follows
+  Compose rotation/revocation; missing provider credentials are seeded once
+  and existing dashboard edits are preserved. The dashboard never writes
+  these gateway credentials into the separate frontdoor home. When rotating
+  a provider key, update any existing profile-specific key in the dashboard.
+- Drain every old Paperclip server/worker before its SQLite restore-lock
+  protocol takes over. Only after writers stop may leftover legacy
+  `locks/directory-merge/<hash>.lock/` directories be moved aside. Never move
+  or delete the new `.lock.sqlite` files while writers can run.
+- The Paperclip tag omits two declared server dependencies from its lock
+  importer. The local zero-fuzz lock overlay restores the resolved graph;
+  frozen installation remains mandatory.
+- Paperclip's ACPX host environment is now closed. The local omp adapter
+  explicitly retains its shared mise/Nix/Git roots, development lease settings,
+  public preview address and provider credentials; remote targets inherit no
+  ambient host capability. Existing explicit adapter values still win.
+- Connection-intent MCP access is task-bound. Unscoped manual runs do not
+  advertise that unavailable capability; assigned-task runs keep the same
+  authenticated connection/project MCP paths and authorization guards.
+- Both shipped ACPX versions (local 0.12.0 and provider-pack 0.13.1) need the
+  scoped-terminal overlay. Terminals must inherit the prepared run environment,
+  not the server environment, and apply explicit request overrides afterward.
+  Keep the matching package-patch hashes in the frozen lock and preserve both
+  corrected patch files through the provider-pack build. Run
+  `tests/paperclip-acp-terminal.sh`: it uses real terminal callbacks and API
+  authentication without model calls, checks both versions, then deletes only
+  its marked zero-cost fixtures. This is not remote deployment verification.
+- omp 18.1.15 native Python Eval deliberately filters its kernel environment.
+  Running CLI subprocesses there does not inherit `PAPERCLIP_*`, `DEVENV_*`,
+  Nix/Git configuration or Podman connection settings. Use the native `bash`
+  tool / ACP terminal for lease and authenticated runtime commands. Do not
+  widen Eval's secret boundary to make that different execution path pass.
+- TencentDB preflight checks all four overlays independently. Keep the
+  current SQLite/local backend and env-directed model routing. The new
+  model-group table is recreated on metadata-store initialization; do not
+  depend on that feature's restart persistence without correcting upstream.
+- Health is insufficient: run migration gates, real ACP/inference, persisted
+  memory write/recall, and prototype preview restoration after cutover.
 
 When upgrading Buzz across `desktop-v0.5.25`, migration 0049 adds a
 `thread_metadata` index. On an existing, populated database, build it

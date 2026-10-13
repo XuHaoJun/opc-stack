@@ -290,9 +290,9 @@
  import zlib from "node:zlib";
  import dayjs from "dayjs";
  import { TdaiCore } from "../core/tdai-core.js";
-@@ -26,6 +26,7 @@
- import type { GatewayConfig } from "./config.js";
+@@ -29,6 +29,7 @@
  import { applyMetadataEnvFromGatewayConfig } from "./metadata-env.js";
+ import { applyTaskSourceEnvFromGatewayConfig } from "./task-source-env.js";
  import { initDataDirectories } from "../utils/pipeline-factory.js";
 +import { buildOpenCodeHeaders } from "../utils/opencode-session.js";
  import { SessionFilter } from "../utils/session-filter.js";

@@ -1,10 +1,6 @@
-# OPC stack image for TencentDB-Agent-Memory MemoryProxy (v2.0.0) — adapted
+# OPC stack image for TencentDB-Agent-Memory MemoryProxy (v2.0.2) — adapted
 # from the upstream MemoryProxy/Dockerfile.
-# Changes vs upstream:
-#   1. cost-guard is a private file: dependency whose submodule is absent from
-#      the public v2.0.0 tag — bake the official stub (passthrough fallback)
-#      and an empty lockfile instead, mirroring deploy/dockerhub/publish.sh.
-#   2. Entrypoint generates /data/config.yaml from env vars on first boot.
+# OPC entrypoint reconciles /data/config.yaml from env vars on every boot.
 
 # syntax=docker/dockerfile:1
 
@@ -23,38 +19,7 @@ WORKDIR /app
 
 RUN npm install -g npm@11 --no-audit --no-fund
 
-COPY package.json ./
-
-# cost-guard stub (identical to deploy/dockerhub/publish.sh make_cost_guard_stub).
-RUN mkdir -p packages/cost-guard/src \
-    && printf '%s\n' \
-        '{' \
-        '  "name": "@context-proxy/cost-guard",' \
-        '  "version": "0.0.0-stub",' \
-        '  "description": "Placeholder for the optional cost-guard extension. The proxy falls back to passthrough routing when the real module is absent.",' \
-        '  "type": "module",' \
-        '  "main": "src/index.js",' \
-        '  "exports": { ".": "./src/index.js" },' \
-        '  "private": true' \
-        '}' \
-        > packages/cost-guard/package.json \
-    && printf '%s\n' \
-        '// Placeholder for the optional @context-proxy/cost-guard extension.' \
-        '// src/guard-adapter.ts imports this package dynamically and degrades to' \
-        '// passthrough routing when the real implementation is unavailable.' \
-        'export const CostGuard = undefined;' \
-        'export const setAnalyzerDebug = undefined;' \
-        'export const resolveAgentProfile = undefined;' \
-        > packages/cost-guard/src/index.js \
-    && printf '%s\n' \
-        '{' \
-        '  "name": "context-proxy",' \
-        '  "version": "0.0.0",' \
-        '  "lockfileVersion": 3,' \
-        '  "requires": true,' \
-        '  "packages": {}' \
-        '}' \
-        > package-lock.json
+COPY package.json package-lock.json ./
 
 RUN --mount=type=cache,id=proxy-npm-cache,target=/root/.npm \
     npm install \

@@ -24,11 +24,11 @@ PNAME="${COMPOSE_PROJECT_NAME:-opc}"
 BKDIR="$(cd "$BKDIR" && pwd)"
 
 declare -A STOP_SERVICES=(
-  [buzz]="buzz-db buzz-redis buzz-minio buzz-minio-init buzz-keys buzz buzz-bootstrap frontdoor"
+  [buzz]="buzz-db buzz-redis buzz-minio buzz-minio-init buzz-keys buzz buzz-bootstrap frontdoor hermes-dashboard paperclip-bootstrap tencentdb-bootstrap devenv-expert-leases"
   # Hermes restores replace the shared profile/frontdoor homes as well as the
   # gateway data volume, so every writer must be stopped first.
   [hermes]="hermes hermes-dashboard frontdoor"
-  [paperclip]="paperclip"
+  [paperclip]="paperclip paperclip-bootstrap podenv host-sync-claude buzz-keys tencentdb-bootstrap devenv-expert-leases"
   [tencentdb]="tencentdb-core tencentdb-bootstrap tencentdb-hub tencentdb-proxy"
 )
 
@@ -58,10 +58,14 @@ for v in $VOLS; do
   full="${PNAME}_${v}"
   docker volume inspect "$full" >/dev/null 2>&1 || { echo "  (creating missing volume $full)"; docker volume create "$full" >/dev/null; }
   echo "  restore $v"
-  docker run --rm -v "$full":/data -v "$BKDIR":/backup alpine:3 tar xzf "/backup/${v}.tar.gz" -C /data
+  # Overlay extraction leaves files created by the newer version behind.
+  # After checksum validation and stopping every writer, replace the tree.
+  docker run --rm -v "$full":/data -v "$BKDIR":/backup alpine:3 \
+    sh -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar xzf "$1" -C /data' \
+    sh "/backup/${v}.tar.gz"
 done
 
 echo "restore: done — volumes replaced with backup contents"
-echo "next: rebuild + start the old tag, e.g.:"
-echo "  git -C upstream/${PROJ} checkout <old-tag>  (or: scripts/upgrade.sh ${PROJ} <old-tag>)"
-echo "  scripts/prepare.sh && docker compose up -d --build ${STOP_SERVICES[$PROJ]}"
+echo "next: restore the matching old patches/ and compose build configuration first,"
+echo "then rebuild + start through the metadata-aware, gated engine:"
+echo "  scripts/upgrade.sh ${PROJ} <old-tag>"
