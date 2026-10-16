@@ -522,7 +522,7 @@ nixpkgs packages: it is installed into the seed image and copied into the
 volume, so review the `nix` and `live-nix` rows independently.
 
 `omp` (Oh My Pi) — the Paperclip executor agent runtime — is mise-managed:
-the entrypoint installs the prebuilt `github:can1357/oh-my-pi@18.1.15` into each
+the entrypoint installs the prebuilt `github:can1357/oh-my-pi@18.11.1` into each
 `*-mise` volume on first boot (and re-adds it if missing). The nix derivation
 can't build in image environments (bun EPERM), so omp is not part of the nix
 seed. It runs as the `Fullstack Engineer` agent via the claude_local adapter
@@ -530,14 +530,17 @@ with `agentCommand: "omp acp --yolo"`.
 
 The entrypoint check is **install-if-missing, not reconcile** — bumping the pin
 in `patches/*/opc-mise-seed.sh` only affects volumes that are still empty, so an
-already-running stack has to be upgraded by hand. Zero rebuild, all four
-containers (each has its own `*-mise` volume):
+already-running stack has to be upgraded explicitly. Zero rebuild: upgrade all
+five running surfaces. Buzz, frontdoor, Hermes, and Paperclip each persist
+`/opt/mise` in a named volume. Hermes dashboard currently does not: its mise
+install lives in the container layer, so repeat the command after recreating
+that container until its image has been rebuilt with the new bootstrap pin.
 
 ```bash
-for c in buzz frontdoor hermes paperclip; do
-  docker compose exec -u root "$c" mise use -g github:can1357/oh-my-pi@18.1.15
+for c in buzz frontdoor hermes hermes-dashboard paperclip; do
+  docker compose exec -T -u root "$c" mise use -g github:can1357/oh-my-pi@18.11.1
 done
-for c in buzz frontdoor hermes paperclip; do
+for c in buzz frontdoor hermes hermes-dashboard paperclip; do
   echo -n "$c: "; docker compose exec -T "$c" omp --version
 done
 ```
@@ -545,6 +548,11 @@ done
 Use `mise use -g` rather than `mise install` — only `use` rewrites the pin in
 `/opt/mise/config/config.toml`, so the version survives the next boot instead of
 being shadowed by the old global.
+
+This changes the version selected for new omp invocations; it does not restart
+an already-running agent. Keep the old mise install until verification is
+complete. To roll back this cutover, select
+`github:can1357/oh-my-pi@18.1.15` with the same `mise use -g` command.
 
 Search: `nix search nixpkgs <name>`. Wipe a store: `docker volume rm opc_hermes-nix`.
 

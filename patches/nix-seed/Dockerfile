@@ -12,8 +12,8 @@
 #
 # omp is NOT here — its bun2nix derivation fails to build in image builds
 # (bun isolated-linker EPERM, 334 packages; llm-agents.nix at any rev).
-# omp ships via mise: `mise use -g github:can1357/oh-my-pi@18.1.15` (prebuilt
-# GitHub release, ~170MB) in opc-mise-seed.sh.
+# omp ships via mise: `mise use -g github:can1357/oh-my-pi@18.11.1` (prebuilt
+# GitHub release, ~250MB) in opc-mise-seed.sh.
 #
 # Build via compose service `nix-seed` (context ./patches/nix-seed) or:
 #   docker build -t opc/nix-seed:local -f patches/nix-seed/Dockerfile patches/nix-seed
