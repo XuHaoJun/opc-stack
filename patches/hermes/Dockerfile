@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.19
-# OPC Hermes v0.21.7: upstream PM/runtime/products with OPC persistent tools and identities.
+# OPC Hermes v0.22.2: upstream PM/runtime/products with OPC persistent tools and identities.
 ARG NIX_SEED_IMAGE=opc/nix-seed:local
 ARG BUZZ_IMAGE=opc/frontdoor:local
 FROM ${NIX_SEED_IMAGE} AS nix-seed
@@ -286,8 +286,10 @@ FROM runtime_base AS python_deps
 # Source binding is created after the source copy below.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
+# Seed the runtime's UV cache from the prepared environment, as upstream does.
 RUN python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
     --out /opt/hermes/.venv --no-install-project --sealed --record-selection \
+    --cache /opt/hermes/uv-cache \
     --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
     --extra azure-identity --extra matrix --extra google-chat
 
@@ -388,14 +390,14 @@ RUN mkdir -p /opt/hermes/bin && \
 # run as the default hermes user (UID 10000).
 
 # ---------- Image provenance + install stamp ----------
-ARG HERMES_GIT_SHA=71d34bad1045610252eda02ee79549436896e784
+ARG HERMES_GIT_SHA=d923a5eb487a17c0a68801bba9ef0f56c81040a8
 RUN python3 scripts/write_install_stamp.py --output /opt/hermes/install-stamp.json \
-    --commit "${HERMES_GIT_SHA}" --base-version 0.21.7 --display-version 0.21.7 \
+    --commit "${HERMES_GIT_SHA}" --base-version 0.22.2 --display-version 0.22.2 \
     --distance 0 --source opc --distribution docker --update-mechanism external \
     --runtime-dir tools
 # The stamp is code-scoped; the immutable-image marker is outside both the
 # install tree and mutable home. Neither can be clobbered by a home mount.
-RUN python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/hermes","version":"0.21.7","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)'
+RUN python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/hermes","version":"0.22.2","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)'
 
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.

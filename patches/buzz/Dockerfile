@@ -268,7 +268,7 @@ ENV HERMES_RUNTIME_DIR=/opt/hermes-src/tools \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 git patch gcc g++ make libffi-dev libatomic1 util-linux \
     && rm -rf /var/lib/apt/lists/* \
-    && git clone --depth 1 --branch v0.21.7 \
+    && git clone --depth 1 --branch v0.22.2 \
         https://github.com/NousResearch/hermes-agent.git /opt/hermes-src \
     && (cd /opt/hermes-src && patch -p1 --fuzz=0 --no-backup-if-mismatch \
         < /tmp/hermes-acp-memory-ingress.patch)
@@ -283,9 +283,9 @@ RUN /usr/bin/python3 -c 'from pathlib import Path; from pm import installed_pack
     && /opt/hermes-src/.venv/bin/python -c 'import sysconfig; from pathlib import Path; binding = Path(sysconfig.get_path("purelib")) / "hermes-agent.pth"; binding.write_text("/opt/hermes-src\n", encoding="utf-8"); binding.chmod(0o444)' \
     && python3 -c 'from pathlib import Path; from pm import stage_manager_runtime; from scripts.bundles.payload import seal_pm_runtime; root = Path("/opt/hermes-src"); python = Path("/usr/local/bin/python3").resolve(); stage_manager_runtime(python=python, destination=root / "pm-runtime", project=root / "pm"); seal_pm_runtime(root, python)' \
     && python3 scripts/write_install_stamp.py --output /opt/hermes-src/install-stamp.json \
-        --commit "$(git rev-parse HEAD)" --base-version 0.21.7 --display-version 0.21.7 \
+        --commit "$(git rev-parse HEAD)" --base-version 0.22.2 --display-version 0.22.2 \
         --distance 0 --source opc --distribution docker --update-mechanism external --runtime-dir tools \
-    && python3 -c 'import json; from pathlib import Path; root = Path("/opt/hermes-src"); path = root / "install-stamp.json"; stamp = json.loads(path.read_text()); stamp["pmRuntime"] = str(root / "pm-runtime"); path.write_text(json.dumps(stamp) + "\n"); (root / ".install_method").write_text("docker\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/frontdoor","version":"0.21.7","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)' \
+    && python3 -c 'import json; from pathlib import Path; root = Path("/opt/hermes-src"); path = root / "install-stamp.json"; stamp = json.loads(path.read_text()); stamp["pmRuntime"] = str(root / "pm-runtime"); path.write_text(json.dumps(stamp) + "\n"); (root / ".install_method").write_text("docker\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/frontdoor","version":"0.22.2","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)' \
     && chmod 0644 /opt/hermes-src/tools/facts.json \
     && rm -f /opt/hermes-src/.venv/.lock /opt/hermes-src/pm-runtime/.lock
 

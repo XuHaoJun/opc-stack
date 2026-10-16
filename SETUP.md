@@ -129,6 +129,15 @@ Keep the matching old `patches/` and Compose build configuration with the
 backup. Restore them before rebuilding old source through `scripts/upgrade.sh`,
 which supplies the selected Paperclip tag and commit to all build products.
 
+For Hermes `v0.21.7` → `v0.22.2`, upgrade both runtime surfaces through
+the skill above (`scripts/upgrade.sh hermes v0.22.2` is its deployment engine).
+Config remains at version 50; no `.env` changes or manual state migration are
+needed. The Hermes image carries upstream's `/opt/hermes/uv-cache` seed, and
+both gateway/dashboard and frontdoor images stamp the selected release and
+commit. Back up `hermes-data`, `hermes-profiles`, and `frontdoor-hermes`
+together before deployment. Verify real ACP and gateway tool execution, not
+only health endpoints: this release changes terminal PATH ordering.
+
 For the October stable cutover (`desktop-v0.5.28`, `v0.21.7`,
 `v2026.1012.0`, `v2.0.2`):
 
