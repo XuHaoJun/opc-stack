@@ -9,54 +9,77 @@
 +def preserve_prompt_block_meta(prompt: list[PromptBlock]) -> list[dict[str, Any]]:
 +    """Carry per-block ACP provenance without reconstructing boundaries from text."""
 +    return [dict(meta) for block in prompt if (meta := getattr(block, "field_meta", None))]
---- a/acp_adapter/server.py
-+++ b/acp_adapter/server.py
-@@ -26,7 +26,9 @@
+--- a/acp_adapter/gateway_media.py
++++ b/acp_adapter/gateway_media.py
+@@ -98,7 +98,7 @@
+     return "\n".join(texts), attachments
  
- from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, detect_provider
- from acp_adapter.commands import SlashCommandsMixin, _estimate_tokens
--from acp_adapter.content import PromptBlock, _content_blocks_to_openai_user_content, _extract_text
-+from acp_adapter.content import (
-+    PromptBlock, _content_blocks_to_openai_user_content, _extract_text, preserve_prompt_block_meta,
-+)
- from acp_adapter.events import (
-     AssistantMessageIdAllocator, _build_plan_update_from_todo_result, _send_update, flush_open_tool_calls,
-     make_message_cb, make_step_cb, make_thinking_cb, make_tool_progress_cb,
-@@ -754,6 +756,7 @@
-     def _run_agent_turn(
-         self, *, state: SessionState, session_id: str, user_text: str, user_content: Any, conn: Any,
-         loop: asyncio.AbstractEventLoop, approval_cb: Any, edit_approval_requester: Any,
-+        memory_ingress: list[dict[str, Any]] | None = None,
-     ) -> dict:
-         """Executor-thread body of one turn, run inside ``contextvars.copy_context()`` so
-         ContextVar writes are isolated from concurrent sessions.
-@@ -810,6 +813,7 @@
-                 return agent.run_conversation(
-                     user_message=user_content, conversation_history=state.history, task_id=session_id,
-                     persist_user_message=user_text or "[Image attachment]",
-+                    memory_ingress=memory_ingress,
-                 )
-             except Exception as e:
-                 logger.exception("Agent error in session %s", session_id)
-@@ -824,6 +828,7 @@
  
-         user_text = _extract_text(prompt).strip()
-         user_content = _content_blocks_to_openai_user_content(prompt)
+-def submit_fingerprint(session_id, content):
++def submit_fingerprint(session_id, content, *, memory_ingress=None):
+     """Identity of one logical prompt as the editor sent it (text, image ``data:`` bytes, remote image
+     URLs), taken before staging: a retry of the same prompt matches without re-fetching a remote image,
+     whose second download could fail or return other bytes and so change what is submitted."""
+@@ -108,4 +108,9 @@
+         kind, value = ('text', part) if isinstance(part, str) else \
+             ('text', part['text']) if part.get('type') == 'text' else ('image', part['image_url']['url'])
+         digest.update(kind.encode() + len(value).to_bytes(8, 'big') + value.encode())
++    if memory_ingress:
++        import json
++        # Identical rendered prompts from different Buzz events are distinct admissions.
++        metadata = json.dumps(memory_ingress, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
++        digest.update(b'memory_ingress' + metadata.encode())
+     return session_id, digest.hexdigest()
+--- a/acp_adapter/gateway_server.py
++++ b/acp_adapter/gateway_server.py
+@@ -635,7 +635,7 @@
+         if prepared is None:
+             return PromptResponse(stop_reason='cancelled')
+         retry_key, input_id, staged = prepared
+-        text, attachments = staged
++        text, attachments, memory_ingress = staged
+         answered, text = await self._run_slash(held_id, session_id, text) if not attachments else (False, text)
+         if answered:
+             return PromptResponse(stop_reason='end_turn')
+@@ -644,6 +644,8 @@
+         submit = {'text': text}
+         if attachments:
+             submit['attachments'] = attachments
++        if memory_ingress:
++            submit['memory_ingress'] = memory_ingress
+         self._submitting.add(session_id)
+         try:
+             # Inside the try: a failed reconnect is as ambiguous for a retained identity as a lost ack.
+@@ -744,12 +746,13 @@
+         return True, None
+ 
+     async def _prepare_submit(self, session_id, prompt):
+-        """``(retry_key, input_id, (text, attachments))`` for one ACP prompt, or None when the editor's Stop
++        """``(retry_key, input_id, (text, attachments, memory_ingress))`` for one ACP prompt, or None when the editor's Stop
+         arrived while it was staged."""
+-        from acp_adapter.content import _content_blocks_to_openai_user_content
++        from acp_adapter.content import _content_blocks_to_openai_user_content, preserve_prompt_block_meta
+         from acp_adapter.gateway_media import stage_user_content, submit_fingerprint
+         content = _content_blocks_to_openai_user_content(prompt)
+-        retry_key = submit_fingerprint(session_id, content)
 +        memory_ingress = preserve_prompt_block_meta(prompt)
-         text_only_prompt = all(isinstance(block, TextContentBlock) for block in prompt)
-         if not user_text and not (isinstance(user_content, list) and user_content):
-             return PromptResponse(stop_reason="end_turn")
-@@ -860,6 +865,7 @@
-                 return self._run_agent_turn(
-                     state=state, session_id=session_id, user_text=user_text, user_content=user_content, conn=conn,
-                     loop=loop, approval_cb=cbs.approval_cb, edit_approval_requester=cbs.edit_approval_requester,
-+                    memory_ingress=memory_ingress,
-                 )
-             finally:
-                 # Still on the executor thread: ``_send_update`` blocks on the loop, so flushing
++        retry_key = submit_fingerprint(session_id, content, memory_ingress=memory_ingress)
+         # Only this session's very next prompt may be the editor's retry of an un-acked submit; any
+         # prompt (slash work included) retires the retained identity, so a later repeat is new work.
+         retained = self._unacked.pop(session_id, None)
+@@ -761,7 +764,8 @@
+         # submit itself, and the prompt then ends without being sent.
+         self._submitting.add(session_id)
+         try:
+-            staged = await stage_user_content(content, self._home)
++            text, attachments = await stage_user_content(content, self._home)
++            staged = (text, attachments, memory_ingress)
+         finally:
+             self._submitting.discard(session_id)
+         if session_id in self._pending_cancels:
 --- a/agent/conversation_loop.py
 +++ b/agent/conversation_loop.py
-@@ -1560,6 +1560,7 @@
+@@ -1636,6 +1636,7 @@
      moa_config: Optional[dict[str, Any]] = None,
      title_user_message: Optional[str] = None,
      prelude: Optional[Prelude] = None,
@@ -64,7 +87,7 @@
  ) -> dict[str, Any]:
      """Run a complete conversation with tool calling until completion; returns the result dict.
  
-@@ -1575,6 +1576,9 @@
+@@ -1651,6 +1652,9 @@
          user_message, moa_config, persist_user_message = _decode_inline_moa_turn(
              user_message, persist_user_message
          )
@@ -74,7 +97,7 @@
  
      # The gateway caches agents across turns; compression state is per-turn, or a stale
      # in-place boundary would make a later uncompressed result look compacted.
-@@ -1722,6 +1726,7 @@
+@@ -1798,6 +1802,7 @@
      turn_author: Optional[dict[str, Any]] = None,
      title_user_message: Optional[str] = None,
      prelude: Optional[Prelude] = None,
@@ -82,7 +105,7 @@
  ) -> dict[str, Any]:
      """Run one turn (see ``_run_conversation_turn``) and export the current-turn boundary.
  
-@@ -1756,8 +1761,10 @@
+@@ -1832,8 +1837,10 @@
                  turn_author=turn_author,
                  title_user_message=title_user_message,
                  prelude=prelude,
@@ -95,7 +118,7 @@
      if isinstance(result, dict):
 --- a/agent/memory_manager.py
 +++ b/agent/memory_manager.py
-@@ -598,12 +598,13 @@
+@@ -440,12 +440,13 @@
  
      def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "",
                   messages: Optional[list[dict[str, Any]]] = None,
@@ -111,9 +134,9 @@
  
          Everything forwarded is provider egress: turn strings AND the ``messages`` transcript slice
          (tool outputs included) go through ``_redact_for_provider`` so secrets are never archived
-@@ -613,9 +614,31 @@
+@@ -455,9 +456,31 @@
          clean_user_content = self._strip_skill_scaffolding(user_content) if providers else None
-         if not clean_user_content:
+         if not clean_user_content or not self._owner_allows("sync_turn"):
              return
 -        clean_user_content, assistant_content, redacted_messages = _redact_for_provider(
 -            clean_user_content, assistant_content, messages)
@@ -166,7 +189,7 @@
                      )
 --- a/run_agent.py
 +++ b/run_agent.py
-@@ -897,6 +897,9 @@
+@@ -902,6 +902,9 @@
          is almost certainly a retry of the same intent, and a prefetch keyed on the interrupted turn would
          fire against stale context. See #15218.
          """
@@ -176,7 +199,7 @@
          if interrupted or not (self._memory_manager and final_response and original_user_message):
              return
          # Flatten multimodal parts to text (newline-joined for memory).
-@@ -910,6 +913,8 @@
+@@ -915,6 +918,8 @@
              turn_author = getattr(self, "_turn_author", None)
              if turn_author is not None:
                  sync_kwargs["turn_author"] = turn_author
@@ -185,3 +208,83 @@
              self._memory_manager.sync_all(user_text, response_text, **sync_kwargs)
              # Sibling of the build_turn_context() prefetch gate: don't key recall on zero-signal prompts.
              if not is_trivial_prompt(user_text):
+--- a/gateway/session_cli_turn.py
++++ b/gateway/session_cli_turn.py
+@@ -12,7 +12,7 @@
+ 
+ from hermes_state_runtime import RuntimeStoreError
+ 
+-_SUBMIT_FIELDS = ('turn_author', 'api_text', 'model_override', 'clarify_batch')
++_SUBMIT_FIELDS = ('turn_author', 'api_text', 'model_override', 'clarify_batch', 'memory_ingress')
+ _API_TEXT_LIMIT = 1_000_000
+ _cli_turn: ContextVar[tuple | None] = ContextVar('cli_turn', default=None)
+ 
+@@ -59,6 +59,16 @@
+         # request (main's batch panel: classic CLI, Ink TUI). Viewers that never set it (an ACP
+         # editor, a raw WebSocket client) answer per-question cards.
+         committed['clarify_batch'] = True
++    ingress = params.get('memory_ingress')
++    if ingress is not None:
++        if not isinstance(ingress, list) or any(not isinstance(meta, dict) for meta in ingress):
++            raise RuntimeStoreError('invalid_params')
++        # Snapshot the admitted payload; a caller cannot mutate queued provenance later.
++        import json
++        try:
++            committed['memory_ingress'] = json.loads(json.dumps(ingress, allow_nan=False))
++        except (TypeError, ValueError, OverflowError) as exc:
++            raise RuntimeStoreError('invalid_params') from exc
+     return {'cli_turn_v1': committed} if committed else {}
+ 
+ 
+--- a/gateway/session_controls.py
++++ b/gateway/session_controls.py
+@@ -753,9 +753,13 @@
+             raise RuntimeStoreError('permission_denied')
+         forbidden = set(params) - {'session_id', 'text', 'submission_id', 'input_id', 'queued', 'attachments', 'finite', 'unattended',
+                                    'surface', 'voice_context', 'interrupted', 'voice_turn', 'display_kind', 'title_preview',
+-                                   'turn_author', 'api_text', 'model_override', 'clarify_batch'}
++                                   'turn_author', 'api_text', 'model_override', 'clarify_batch', 'memory_ingress'}
+         if forbidden:
+             raise RuntimeStoreError('invalid_params')
++        if params.get('memory_ingress') is not None and not self.native_owner:
++            # Only the verified same-user native transport may carry Buzz provenance.
++            # A public bearer/WebSocket caller cannot assert trusted event authorship.
++            raise RuntimeStoreError('permission_denied')
+         request_id = params.get('submission_id') or params.get('input_id')
+         if not isinstance(request_id, str) or not request_id:
+             raise RuntimeStoreError('invalid_params')
+--- a/gateway/session_authority.py
++++ b/gateway/session_authority.py
+@@ -658,7 +658,8 @@
+         self._require_admission_open(queue_only=queue_only)
+         if (request.intent != 'queue' or not {'text'} <= set(request.payload) <= {
+                 'text', 'attachments', 'finite', 'unattended', 'surface', 'voice_context', 'interrupted',
+-                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch'}
++                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch',
++                'memory_ingress'}
+                 or not isinstance(request.payload['text'], str)):
+             raise RuntimeStoreError('invalid_params')
+         from gateway.session_ingress_media import admit_attachments
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -965,6 +965,9 @@
+                 kwargs["turn_author"] = (api.get('turn_author') if api is not None else
+                     admission_author.get() or {"id": ctx.source.user_id or None, "name": ctx.source.user_name or None,
+                                                "is_bot": bool(getattr(ctx.source, "is_bot", False))})
++            if _accepts_keyword(agent.run_conversation, "memory_ingress"):
++                from gateway.session_cli_turn import cli_turn
++                kwargs["memory_ingress"] = cli_turn(ctx.inbound_message_id).get("memory_ingress")
+             if ctx.title_user_message is not None:
+                 kwargs["title_user_message"] = ctx.title_user_message
+             if persist_user_message_override is not None:
+--- a/tui_gateway/contracts/canonical_sessions.py
++++ b/tui_gateway/contracts/canonical_sessions.py
+@@ -228,6 +228,8 @@
+     # The submitter answers the clarify tool's whole batch in one ``clarify`` server request (main's
+     # batch panel); without it the turn's viewers get one ``clarify.request`` card per question.
+     clarify_batch: bool = False
++    # OPC Buzz structural provenance, accepted only over same-user native bootstrap.
++    memory_ingress: list[dict[str, JsonValue]] | None = None
+ 
+ 
+ class CanonicalVoiceStopped(Result):

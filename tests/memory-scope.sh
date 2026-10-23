@@ -28,7 +28,7 @@ GATE_AGENT="agt-memscope-gate"
 TMPDIR="$(mktemp -d)"
 # Safety net: check 8/11 stop/restart the core. Whatever happens below, the
 # core must be back and temp files gone when the gate exits.
-trap 'rm -rf "$TMPDIR"; docker compose exec -T frontdoor rm -f /tmp/memscope-driver.py /tmp/opc-memory-ingress-redaction.py >/dev/null 2>&1 || true; docker compose start tencentdb-core >/dev/null 2>&1 || true' EXIT
+trap 'rm -rf "$TMPDIR"; docker compose exec -T frontdoor rm -f /tmp/memscope-driver.py /tmp/opc-memory-ingress-redaction.py /tmp/opc-gateway-memory-ingress.py >/dev/null 2>&1 || true; docker compose start tencentdb-core >/dev/null 2>&1 || true' EXIT
 
 # Resolve the trusted writer exactly the way compose does:
 # MEMORY_TRUSTED_WRITERS:-BUZZ_ACP_AGENT_OWNER (docker-compose.yml, frontdoor).
@@ -467,54 +467,11 @@ def cmd_cold_span(a):
 
 
 def cmd_acp_e2e(a):
-    # Execute the DEPLOYED ACP prompt path at runtime: real prompt() with two
-    # fabricated text blocks — one carrying `_meta.buzz.memoryEvents`, one plain —
-    # a stubbed provider boundary (state.agent.run_conversation records instead of
-    # calling the LLM), and no client connection. If the sidecar patch regresses
-    # (the `_meta` passthrough removed, or the threading dropped) the stub receives
-    # the wrong shape here. Both directions are asserted: the annotated block's
-    # metadata must arrive, the plain block must contribute nothing.
-    import asyncio
-    from types import SimpleNamespace
-    canary = a["canary"]
-    captured = {}
-
-    def fake_run_conversation(*, user_message=None, conversation_history=None,
-                              task_id=None, **kw):
-        captured["user_message"] = user_message
-        captured["memory_ingress"] = kw.get("memory_ingress", "MISSING")
-        return {"final_response": "stub", "messages": []}
-
-    from acp.schema import TextContentBlock
-    from acp_adapter.server import HermesACPAgent
-    from acp_adapter.session import SessionManager, SessionState
-
-    meta = mkmeta(mkevent(canary, OWNER, "evt-acpe2e"))
-
-    async def go():
-        agent_ns = SimpleNamespace(run_conversation=fake_run_conversation,
-                                   session_id=None)
-        mgr = SessionManager()
-        sid = "memscope-acpe2e"
-        # Injected directly: no agent factory, no session DB, no network.
-        mgr._sessions[sid] = SessionState(session_id=sid, agent=agent_ns,
-                                          cwd="/tmp")
-        srv = HermesACPAgent(session_manager=mgr)
-        srv._conn = None
-        await srv.prompt(prompt=[
-            TextContentBlock(type="text", text="plain block " + canary),
-            TextContentBlock(type="text", text=canary, field_meta=meta),
-        ], session_id=sid)
-
-    asyncio.run(go())
-    mi = captured.get("memory_ingress", "MISSING")
-    events = []
-    if isinstance(mi, list):
-        for item in mi:
-            events.extend((item or {}).get("buzz", {}).get("memoryEvents", []) or [])
-    out(E2E_INGRESS_N=(len(mi) if isinstance(mi, list) else "MISSING"),
-        E2E_META_OK=([e.get("content") for e in events] == [canary]),
-        E2E_USER_OK=(canary in str(captured.get("user_message", ""))))
+    # Reusable native ACP + real SQLite authority regression. Its temporary
+    # profile cannot mutate the deployed daemon's sessions or memory.
+    import subprocess
+    subprocess.run([sys.executable, "/tmp/opc-gateway-memory-ingress.py"],
+                   check=True)
 
 
 def cmd_acp_reply(a):
@@ -667,6 +624,9 @@ docker compose cp "$DRIVER_SRC" frontdoor:/tmp/memscope-driver.py >/dev/null \
 docker compose cp tests/fixtures/hermes-memory-ingress-redaction.py \
   frontdoor:/tmp/opc-memory-ingress-redaction.py >/dev/null \
   || { echo "FAIL  redaction fixture copy into frontdoor failed"; exit 1; }
+docker compose cp tests/fixtures/hermes-gateway-memory-ingress.py \
+  frontdoor:/tmp/opc-gateway-memory-ingress.py >/dev/null \
+  || { echo "FAIL  native ingress fixture copy into frontdoor failed"; exit 1; }
 
 # run_driver <agent> <user> <cmd> <json> [snapshot-ttl-seconds]
 # A transport crash degrades to a marker, never to `set -e`: every check then
@@ -778,20 +738,17 @@ if [ "$(kv "$ENV_OUT" MODE)" = "projected" ] && [ "$(kv "$ENV_OUT" OWNER_IN_ALLO
 else
   fail "frontdoor lane runs projected capture with the owner allowlisted"
 fi
-# The direct sync_turn calls in checks 1-5 inject memory_ingress after the ACP
-# boundary, so they cannot see the forwarder break. This executes the DEPLOYED
-# prompt() at runtime instead: two fabricated text blocks — one carrying
-# `_meta.buzz.memoryEvents`, one plain — run through the real extract/join path
-# with the provider boundary stubbed. The stub must receive exactly ONE payload
-# (the annotated block's) and the model text must still carry the canary. A
-# regressed sidecar (passthrough removed, threading dropped) shows up here.
-# Hermetic: no LLM, no session DB, no memory.
+# Direct provider calls cannot detect a broken active ACP admission path.
+# Exercise GatewayACPAgent, real AuthorityConnection/SessionAuthority and
+# TurnRunner's invocation against the deployed source, with only conversation
+# execution replaced by a real ingress.project consumer. No LLM or network;
+# admissions persist in an isolated temporary SQLite profile.
 E2E_OUT="$(run_driver "$GATE_AGENT" "$GATE_USER" acp_e2e "{\"canary\":\"memscope acp e2e canary $RUN\"}")"
 if [ "$(kv "$E2E_OUT" E2E_INGRESS_N)" = "1" ] && [ "$(kv "$E2E_OUT" E2E_META_OK)" = "1" ] \
   && [ "$(kv "$E2E_OUT" E2E_USER_OK)" = "1" ]; then
-  pass "ACP prompt path forwards only the annotated block's _meta, at runtime"
+  pass "native ACP admission persists metadata and projects only eligible events"
 else
-  fail "ACP prompt path forwards only the annotated block's _meta, at runtime"
+  fail "native ACP admission persists metadata and projects only eligible events"
 fi
 SHARD_BEFORE="$(run_driver "$GATE_AGENT" "$GATE_USER" shard_info '{}')"
 LINES_BEFORE="$(kv "$SHARD_BEFORE" LINES)"

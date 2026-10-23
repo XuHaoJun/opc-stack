@@ -276,8 +276,8 @@ hermes)
   # ACP sidecar patch (memory ingress): the buzz frontdoor image applies
   # patches/buzz/patches/hermes-acp-memory-ingress.patch with --fuzz=0, so any
   # drift in these anchors stops the build. Each failure is a finding, not a warning.
-  if ! git -C "$UP" show "$TAG:acp_adapter/server.py" 2>/dev/null | grep -q "_content_blocks_to_openai_user_content"; then
-    finding "acp_adapter/server.py no longer calls _content_blocks_to_openai_user_content at $TAG — the sidecar patch's call-site anchor is gone, regenerate it"
+  if ! git -C "$UP" show "$TAG:acp_adapter/gateway_server.py" 2>/dev/null | grep 'class GatewayACPAgent' >/dev/null; then
+    finding "native acp_adapter.gateway_server.GatewayACPAgent is gone at $TAG — regenerate the active sidecar patch"
   fi
   if ! git -C "$UP" show "$TAG:acp_adapter/content.py" 2>/dev/null | grep -q '"\\n".join(text_parts)'; then
     finding "acp_adapter/content.py no longer joins with \"\\\\n\".join(text_parts) at $TAG — the sidecar patch's hunk context moved, regenerate it"
@@ -286,7 +286,12 @@ hermes)
   if [ -f "$pf" ]; then
     pf_abs="$PWD/$pf"
     tmp="$(mktemp -d)"
-    if git -C "$UP" archive "$TAG" acp_adapter/content.py acp_adapter/server.py agent/conversation_loop.py agent/memory_manager.py agent/turn_facade.py run_agent.py 2>/dev/null | tar -x -C "$tmp"; then
+    if git -C "$UP" archive "$TAG" \
+      acp_adapter/content.py acp_adapter/gateway_server.py acp_adapter/gateway_media.py \
+      agent/conversation_loop.py agent/memory_manager.py agent/turn_facade.py run_agent.py \
+      gateway/session_cli_turn.py gateway/session_controls.py gateway/session_authority.py \
+      gateway/run_turn_runner.py tui_gateway/contracts/canonical_sessions.py \
+      2>/dev/null | tar -x -C "$tmp"; then
       if (cd "$tmp" && patch -p1 --fuzz=0 --dry-run --force < "$pf_abs" >/dev/null 2>&1); then
         note "ACP sidecar patch applies cleanly at $TAG"
       else
@@ -294,6 +299,37 @@ hermes)
       fi
     else
       finding "sidecar patch targets are gone at $TAG — the patch has no target any more"
+    fi
+    rm -rf "$tmp"
+  else
+    finding "overlay patch missing: $pf"
+  fi
+  pf="patches/buzz/patches/hermes-native-shared-home.patch"
+  if [ -f "$pf" ]; then
+    pf_abs="$PWD/$pf"
+    tmp="$(mktemp -d)"
+    if git -C "$UP" archive "$TAG" gateway/run_runtime.py \
+      hermes_cli/gateway_runtime.py hermes_cli/gateway_client.py \
+      tui_gateway/owner_forward.py gateway/session_a2a.py 2>/dev/null | tar -x -C "$tmp" \
+      && (cd "$tmp" && patch -p1 --fuzz=0 --dry-run --force < "$pf_abs" >/dev/null 2>&1); then
+      note "shared-home native transport patch applies cleanly at $TAG"
+    else
+      finding "shared-home native transport patch does NOT apply at $TAG — native dashboard attachment would break"
+    fi
+    rm -rf "$tmp"
+  else
+    finding "overlay patch missing: $pf"
+  fi
+  pf="patches/buzz/patches/hermes-native-tui.patch"
+  if [ -f "$pf" ]; then
+    pf_abs="$PWD/$pf"
+    tmp="$(mktemp -d)"
+    if git -C "$UP" archive "$TAG" ui-tui/scripts/gateway_bootstrap.py \
+      ui-tui/src/localGatewayBootstrap.ts ui-tui/src/gatewayClient.ts 2>/dev/null | tar -x -C "$tmp" \
+      && (cd "$tmp" && patch -p1 --fuzz=0 --dry-run --force < "$pf_abs" >/dev/null 2>&1); then
+      note "native TUI transport patch applies cleanly at $TAG"
+    else
+      finding "native TUI transport patch does NOT apply at $TAG — dashboard Chat would not attach"
     fi
     rm -rf "$tmp"
   else

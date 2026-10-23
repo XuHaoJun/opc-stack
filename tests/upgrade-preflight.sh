@@ -159,13 +159,20 @@ done
 # The ACP sidecar patch (patches/buzz/patches/hermes-acp-memory-ingress.patch) is
 # applied to a hermes checkout whose tag scripts/upgrade.sh realigns to this one, so
 # the preflight dry-runs it here. Every path it archives has to exist at the tag.
-mkdir -p "$h/acp_adapter" "$h/agent"
+mkdir -p "$h/acp_adapter" "$h/agent" "$h/gateway" "$h/tui_gateway/contracts" "$h/ui-tui/src" "$h/ui-tui/scripts"
 cat > "$h/acp_adapter/content.py" <<'EOF'
 def blocks_to_text(text_parts):
     return "\n".join(text_parts)
 EOF
-printf 'def _content_blocks_to_openai_user_content(): pass\n' > "$h/acp_adapter/server.py"
-for f in agent/conversation_loop.py agent/memory_manager.py agent/turn_facade.py run_agent.py; do
+printf 'class GatewayACPAgent: pass\n' > "$h/acp_adapter/gateway_server.py"
+# A large source catches early grep exits misreported as a missing anchor under pipefail.
+for _i in $(seq 1 6000); do printf '# native gateway source padding\n' >> "$h/acp_adapter/gateway_server.py"; done
+for f in acp_adapter/gateway_media.py agent/conversation_loop.py agent/memory_manager.py \
+  agent/turn_facade.py run_agent.py gateway/session_cli_turn.py gateway/session_controls.py \
+  gateway/session_authority.py gateway/run_turn_runner.py gateway/run_runtime.py \
+  hermes_cli/gateway_runtime.py hermes_cli/gateway_client.py tui_gateway/contracts/canonical_sessions.py \
+  tui_gateway/owner_forward.py gateway/session_a2a.py ui-tui/scripts/gateway_bootstrap.py \
+  ui-tui/src/localGatewayBootstrap.ts ui-tui/src/gatewayClient.ts; do
     printf 'x\n' > "$h/$f"
 done
 mkdir -p "$fx/patches/buzz/patches"
@@ -176,6 +183,20 @@ cat > "$fx/patches/buzz/patches/hermes-acp-memory-ingress.patch" <<'EOF'
  def blocks_to_text(text_parts):
 +    # memory ingress: carry _meta alongside the joined text
      return "\n".join(text_parts)
+EOF
+cat > "$fx/patches/buzz/patches/hermes-native-shared-home.patch" <<'EOF'
+--- a/gateway/run_runtime.py
++++ b/gateway/run_runtime.py
+@@ -1 +1,2 @@
+ x
++shared native transport
+EOF
+cat > "$fx/patches/buzz/patches/hermes-native-tui.patch" <<'EOF'
+--- a/ui-tui/src/gatewayClient.ts
++++ b/ui-tui/src/gatewayClient.ts
+@@ -1 +1,2 @@
+ x
++native socket dispatcher
 EOF
 git_tag "$h" v2026.1.1
 printf 'OPC_CONFIG_VERSION=40\n' > "$fx/patches/hermes/hermes-entrypoint.sh"

@@ -257,9 +257,8 @@ FROM python:3.14.7-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33
 
 FROM opc-relay AS opc-frontdoor
 
-# Hermes ACP sidecar patch (memory ingress): applied with --fuzz=0 so an upstream
-# move of the hunk context stops the build instead of silently drifting.
-COPY opc/patches/hermes-acp-memory-ingress.patch /tmp/
+# Hermes runtime overlays: strict application makes upstream drift a build error.
+COPY opc/patches/hermes-acp-memory-ingress.patch opc/patches/hermes-native-shared-home.patch opc/patches/hermes-native-tui.patch /tmp/
 
 # The mounted bootstrap interpreter only provisions PM. Runtime Python and
 # tool versions come exclusively from the release's sha-verified PM lock.
@@ -268,10 +267,12 @@ ENV HERMES_RUNTIME_DIR=/opt/hermes-src/tools \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 git patch gcc g++ make libffi-dev libatomic1 util-linux \
     && rm -rf /var/lib/apt/lists/* \
-    && git clone --depth 1 --branch v0.22.2 \
+    && git clone --depth 1 --branch v0.22.5 \
         https://github.com/NousResearch/hermes-agent.git /opt/hermes-src \
-    && (cd /opt/hermes-src && patch -p1 --fuzz=0 --no-backup-if-mismatch \
-        < /tmp/hermes-acp-memory-ingress.patch)
+    && (cd /opt/hermes-src \
+        && patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/hermes-acp-memory-ingress.patch \
+        && patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/hermes-native-shared-home.patch \
+        && patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/hermes-native-tui.patch)
 WORKDIR /opt/hermes-src
 RUN --mount=type=bind,from=hermes-pm-bootstrap,source=/usr/local,target=/usr/local,ro \
     LD_LIBRARY_PATH=/usr/local/lib /usr/local/bin/python3 -c 'from pm import ensure; [ensure(name, explicit=True) for name in ("uv", "npm")]'
@@ -283,9 +284,9 @@ RUN /usr/bin/python3 -c 'from pathlib import Path; from pm import installed_pack
     && /opt/hermes-src/.venv/bin/python -c 'import sysconfig; from pathlib import Path; binding = Path(sysconfig.get_path("purelib")) / "hermes-agent.pth"; binding.write_text("/opt/hermes-src\n", encoding="utf-8"); binding.chmod(0o444)' \
     && python3 -c 'from pathlib import Path; from pm import stage_manager_runtime; from scripts.bundles.payload import seal_pm_runtime; root = Path("/opt/hermes-src"); python = Path("/usr/local/bin/python3").resolve(); stage_manager_runtime(python=python, destination=root / "pm-runtime", project=root / "pm"); seal_pm_runtime(root, python)' \
     && python3 scripts/write_install_stamp.py --output /opt/hermes-src/install-stamp.json \
-        --commit "$(git rev-parse HEAD)" --base-version 0.22.2 --display-version 0.22.2 \
+        --commit "$(git rev-parse HEAD)" --base-version 0.22.5 --display-version 0.22.5 \
         --distance 0 --source opc --distribution docker --update-mechanism external --runtime-dir tools \
-    && python3 -c 'import json; from pathlib import Path; root = Path("/opt/hermes-src"); path = root / "install-stamp.json"; stamp = json.loads(path.read_text()); stamp["pmRuntime"] = str(root / "pm-runtime"); path.write_text(json.dumps(stamp) + "\n"); (root / ".install_method").write_text("docker\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/frontdoor","version":"0.22.2","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)' \
+    && python3 -c 'import json; from pathlib import Path; root = Path("/opt/hermes-src"); path = root / "install-stamp.json"; stamp = json.loads(path.read_text()); stamp["pmRuntime"] = str(root / "pm-runtime"); path.write_text(json.dumps(stamp) + "\n"); (root / ".install_method").write_text("docker\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/frontdoor","version":"0.22.5","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)' \
     && chmod 0644 /opt/hermes-src/tools/facts.json \
     && rm -f /opt/hermes-src/.venv/.lock /opt/hermes-src/pm-runtime/.lock
 
@@ -294,6 +295,7 @@ ENV PATH="/opt/hermes-src/.venv/bin:${PATH}" \
     HERMES_WRITE_SAFE_ROOT=/opt/data \
     HERMES_PYTHON=/opt/hermes-src/.venv/bin/python \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
+    OPC_HERMES_SHARED_NATIVE=1 \
     PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /var/lib/buzz
 # Exercise the sealed source binding from the actual launch directory and UID,

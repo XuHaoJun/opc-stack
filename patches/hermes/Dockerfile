@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.19
-# OPC Hermes v0.22.2: upstream PM/runtime/products with OPC persistent tools and identities.
+# OPC Hermes v0.22.5: upstream PM/runtime/products with OPC persistent tools and identities.
 ARG NIX_SEED_IMAGE=opc/nix-seed:local
 ARG BUZZ_IMAGE=opc/frontdoor:local
 FROM ${NIX_SEED_IMAGE} AS nix-seed
@@ -10,7 +10,7 @@ FROM ${BUZZ_IMAGE} AS buzz-cli
 # See #70480 and https://sqlite.org/wal.html#walresetbug.
 # Pinned by the multi-arch index digest: uv and node already come from pm's
 # sha-verified lock, and a tag alone would let the base drift under them.
-FROM debian:13.4@sha256:e2d08da6f42ef4b09b165d55528a12727aeed8240dc9edf888e3ec07e10ef9da AS sqlite_build
+FROM debian:trixie-20261020@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 AS sqlite_build
 ARG SQLITE_AUTOCONF_VERSION=3530400
 ARG SQLITE_SHA256=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
 RUN apt-get -o Acquire::Retries=3 update && \
@@ -49,7 +49,7 @@ RUN apt-get -o Acquire::Retries=3 update && \
     make install
 
 # Same digest as sqlite_build: the built libsqlite must match this libc.
-FROM debian:13.4@sha256:e2d08da6f42ef4b09b165d55528a12727aeed8240dc9edf888e3ec07e10ef9da AS runtime_base
+FROM debian:trixie-20261020@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 AS runtime_base
 
 # Disable Python stdout buffering to ensure logs are printed immediately.
 # Do not write .pyc files at runtime: /opt/hermes is immutable in the
@@ -81,7 +81,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools
 # names (see .hermes/plans/termux-removal-commit-spec.md).
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-    ca-certificates curl iputils-ping python3 python-is-python3 gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git openssh-client docker-cli xz-utils \
+    ca-certificates curl iputils-ping python3 python-is-python3 gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git patch openssh-client docker-cli xz-utils \
     libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 && \
     rm -rf /var/lib/apt/lists/*
 
@@ -308,13 +308,15 @@ COPY web/package.json web/
 COPY ui-tui/package.json ui-tui/
 COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 COPY apps/shared/ apps/shared/
-COPY scripts/build/node-deps.mjs scripts/build/node-deps.mjs
+COPY scripts/build/node-deps.mjs scripts/build/electron-runtime.mjs scripts/build/
 ENV npm_config_install_links=false
 RUN node scripts/build/node-deps.mjs --source /opt/hermes --workspace ui-tui --workspace web
 
 COPY pyproject.toml uv.lock ./
 COPY web/ web/
 COPY ui-tui/ ui-tui/
+COPY --from=buzz-cli /tmp/hermes-native-tui.patch /tmp/hermes-native-tui.patch
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/hermes-native-tui.patch
 COPY scripts/build/*.mjs scripts/build/
 COPY scripts/generate-icons.mjs scripts/generate_icons.py scripts/
 COPY assets/ assets/
@@ -365,6 +367,11 @@ RUN mkdir -p /tmp/hermes-runtime && chmod 0700 /tmp/hermes-runtime
 # gives the non-root hermes user read + traverse but no write; root retains
 # write so the build steps below don't need chmod u+w dances.
 COPY --link --chmod=a+rX,go-w --exclude=opc . .
+# One copy of each overlay, already used by the matching frontdoor build.
+COPY --from=buzz-cli /tmp/hermes-acp-memory-ingress.patch /tmp/hermes-native-shared-home.patch /tmp/hermes-native-tui.patch /tmp/
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/hermes-acp-memory-ingress.patch && \
+    patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/hermes-native-shared-home.patch && \
+    patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/hermes-native-tui.patch
 
 # The shared assembler binds the prepared environment and frontend products.
 RUN /opt/hermes/.venv/bin/python -m docker.build_agent
@@ -390,14 +397,14 @@ RUN mkdir -p /opt/hermes/bin && \
 # run as the default hermes user (UID 10000).
 
 # ---------- Image provenance + install stamp ----------
-ARG HERMES_GIT_SHA=d923a5eb487a17c0a68801bba9ef0f56c81040a8
+ARG HERMES_GIT_SHA=bf0203a794a07aac3ff764972ab9087baa4e4f4e
 RUN python3 scripts/write_install_stamp.py --output /opt/hermes/install-stamp.json \
-    --commit "${HERMES_GIT_SHA}" --base-version 0.22.2 --display-version 0.22.2 \
+    --commit "${HERMES_GIT_SHA}" --base-version 0.22.5 --display-version 0.22.5 \
     --distance 0 --source opc --distribution docker --update-mechanism external \
     --runtime-dir tools
 # The stamp is code-scoped; the immutable-image marker is outside both the
 # install tree and mutable home. Neither can be clobbered by a home mount.
-RUN python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/hermes","version":"0.22.2","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)'
+RUN python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/hermes","version":"0.22.5","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)'
 
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.
@@ -445,6 +452,7 @@ ENV HERMES_HOME=/opt/data
 ENV HERMES_WRITE_SAFE_ROOT=/opt/data
 # Preserve OPC's sealed-runtime policy on existing editable volume configs too.
 ENV HERMES_DISABLE_LAZY_INSTALLS=1
+ENV OPC_HERMES_SHARED_NATIVE=1
 
 # Xfce, dbus and the display-allocation lock need one; containers have no logind
 # to create /run/user/<uid>. The default fallback ($HOME/.cache) is the /opt/data

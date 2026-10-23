@@ -129,14 +129,67 @@ Keep the matching old `patches/` and Compose build configuration with the
 backup. Restore them before rebuilding old source through `scripts/upgrade.sh`,
 which supplies the selected Paperclip tag and commit to all build products.
 
-For Hermes `v0.21.7` → `v0.22.2`, upgrade both runtime surfaces through
-the skill above (`scripts/upgrade.sh hermes v0.22.2` is its deployment engine).
-Config remains at version 50; no `.env` changes or manual state migration are
-needed. The Hermes image carries upstream's `/opt/hermes/uv-cache` seed, and
-both gateway/dashboard and frontdoor images stamp the selected release and
-commit. Back up `hermes-data`, `hermes-profiles`, and `frontdoor-hermes`
-together before deployment. Verify real ACP and gateway tool execution, not
-only health endpoints: this release changes terminal PATH ordering.
+For Hermes `v0.22.2` → `v0.22.5`, upgrade both runtime surfaces through
+the skill above (`scripts/upgrade.sh hermes v0.22.5` is its deployment engine).
+Config advances from 50 to 51, removing the retired
+`cron.bot_chat_delivery_timeout_seconds`; no `.env` change or manual state
+migration is needed. Session schema 32 adds durable admission/execution receipts.
+Back up `hermes-data`, `hermes-profiles`, and `frontdoor-hermes` together:
+an old image alone is not a safe downgrade after new runtime history is written.
+Restore all three volumes and their matching old deployment configuration.
+
+ACP now submits to a persistent profile gateway instead of executing inside the
+short-lived ACP process. The memory overlay carries `_meta.buzz.memoryEvents`
+through durable admissions, metadata-sensitive retry identity, and per-admission
+execution scope. Unannotated turns cannot inherit previous provenance; public
+WebSocket callers cannot supply the native-only ingress field.
+
+Dashboard and owner containers retain separate network namespaces. The
+`hermes-native-shared-home.patch` overlay publishes a private, same-UID
+`gateway.api.sock` in each served home, relaying only to that owner's local API.
+Expert homes also expose the existing owner's control handlers/ticket store
+through their own private control socket. Native ticket authentication is
+unchanged; no public port, shared network namespace, or extra home mount is added.
+`hermes-native-tui.patch` teaches Ink Chat the same transport and is applied
+before frontend bundling as well as to runtime source. All three Hermes overlays
+live under `patches/buzz/patches/` and are applied strictly to both images.
+
+Verify `tests/migrations.sh hermes`, `tests/connectivity.sh`,
+`tests/scientist.sh`, and `tests/memory-scope.sh`, then open dashboard Chat for
+both default and expert profiles. The scientist gate exercises real native
+ticket redemption/session mutations from the dashboard container, rejects
+unticketed connections, and checks shutdown with an attached idle relay.
+Both images retain the selected release/commit stamps and the gateway image's
+upstream `/opt/hermes/uv-cache` seed.
+
+Existing scoped provider credentials remain authoritative. An expired key in a
+profile's `.env` can therefore survive a Compose key rotation. Only if the default
+gateway and Scientist are intended to share the stack key, explicitly refresh
+their scoped bindings below; otherwise rotate their own keys in the dashboard.
+This does not change the entrypoint's preserve-existing-credentials policy.
+
+```bash
+docker compose exec -T -u 10000 hermes /opt/hermes/.venv/bin/python - <<'PY'
+import os
+values = {name: os.environ[name] for name in ("OPENAI_API_KEY", "OPENCODE_API_KEY")}
+assert all(values.values()), "Configure the stack provider key first"
+from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+from hermes_cli.config import save_env_value_secure
+bindings = {
+    "/opt/data": ("OPENAI_API_KEY", "OPENCODE_API_KEY"),
+    "/opt/data/profiles/agt-scientist": ("OPENAI_API_KEY",),
+}
+for home, names in bindings.items():
+    token = set_hermes_home_override(home)
+    try:
+        for name in names:
+            assert save_env_value_secure(name, values[name])["success"]
+    finally:
+        reset_hermes_home_override(token)
+print("Selected scoped provider credentials refreshed; no secrets printed")
+PY
+docker compose restart hermes
+```
 
 For the October stable cutover (`desktop-v0.5.28`, `v0.21.7`,
 `v2026.1012.0`, `v2.0.2`):

@@ -400,6 +400,10 @@ checkout "dashboard container argv resolves to dashboard role" "True" \
 
 check "dashboard ${HERMES_DASHBOARD_PORT:-9119} responds" \
     sh -c 'code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${HERMES_DASHBOARD_PORT:-9119}/"); [ "$code" = "200" ] || [ "$code" = "401" ] || [ "$code" = "302" ]'
+check "dashboard manages native sessions for default and scientist across container namespaces" \
+    sh -c 'docker compose exec -T -u 10000 frontdoor /opt/hermes-src/.venv/bin/python -c "from hermes_cli.gateway_runtime import ensure_gateway_runtime; result = ensure_gateway_runtime(\"/opt/data\", idle_exit=True); assert result.state == \"ready\", result" && docker compose exec -T -u 10000 hermes-dashboard /opt/hermes/.venv/bin/python - < tests/fixtures/hermes-native-shared-home.py'
+check "native gateway shutdown closes attached idle relay connections" \
+    sh -c 'docker compose exec -T -u 10000 hermes-dashboard /opt/hermes/.venv/bin/python - < tests/fixtures/hermes-native-relay.py'
 if docker compose logs --since 10m hermes-dashboard 2>&1 | grep -q "Resource busy"; then
     fail "dashboard has no flock storm (found 'Resource busy')"
 else

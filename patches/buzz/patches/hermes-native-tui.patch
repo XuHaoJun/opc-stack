@@ -1,0 +1,91 @@
+--- a/ui-tui/scripts/gateway_bootstrap.py
++++ b/ui-tui/scripts/gateway_bootstrap.py
+@@ -100,7 +100,7 @@
+         raise RuntimeError("gateway private bootstrap rejected")
+     from hermes_cli.gateway_client import gateway_ws_target
+     url, protocols = gateway_ws_target(endpoint, grant["ticket"])
+-    return {"url": url, "protocols": protocols,
++    return {"url": url, "protocols": protocols, "api_socket": endpoint.api_socket,
+             "profile_id": endpoint.profile_id, "instance_id": endpoint.instance_id}
+ 
+ 
+--- a/ui-tui/src/localGatewayBootstrap.ts
++++ b/ui-tui/src/localGatewayBootstrap.ts
+@@ -27,7 +27,7 @@
+   return process.platform === 'win32' ? 'python' : 'python3'
+ }
+ 
+-export interface LocalGatewayGrant { url: string; protocols: string[]; profile_id: string; instance_id: string }
++export interface LocalGatewayGrant { url: string; protocols: string[]; profile_id: string; instance_id: string; api_socket?: string | null }
+ 
+ /** gateway_bootstrap.py's verdict for an interpreter that cannot load Hermes or its dependencies. */
+ // execFile's error text is `Command failed: …` followed by the child's stderr, hence the line match.
+--- a/ui-tui/src/gatewayClient.ts
++++ b/ui-tui/src/gatewayClient.ts
+@@ -1,4 +1,5 @@
+ import { EventEmitter } from 'node:events'
++import { lstatSync } from 'node:fs'
+ 
+ import type { GatewayEvent } from '@hermes/shared/gateway-events'
+ import {
+@@ -10,7 +11,7 @@
+   wireFrameText
+ } from '@hermes/shared/json-rpc-channel'
+ import { reconnectBackoffDelayMs } from '@hermes/shared/reconnect-backoff'
+-import { WebSocket as UndiciWebSocket } from 'undici'
++import { Agent, WebSocket as UndiciWebSocket } from 'undici'
+ 
+ import {
+   canonicalEvent,
+@@ -562,7 +563,7 @@
+       // Main's /logs opened with the sidecar's spawn line; the shared owner's equivalent is the attach.
+       this.lifecycle(`[lifecycle] attached shared gateway ${start ? 'start' : recover ? 'recover' : 'discover'} ` +
+         `url=${redactUrl(grant.url)} profile=${grant.profile_id} instance=${grant.instance_id}`)
+-      this.startAttachedGateway(grant.url, grant.protocols)
++      this.startAttachedGateway(grant.url, grant.protocols, grant.api_socket ?? undefined)
+     }).catch(error => {
+       if (this.disposed || generation !== this.localGeneration) { return }
+       this.bootstrapError = error instanceof Error ? error : new Error(String(error))
+@@ -597,7 +598,7 @@
+     return true
+   }
+ 
+-  private startAttachedGateway(attachUrl: string, protocols?: string[]) {
++  private startAttachedGateway(attachUrl: string, protocols?: string[], apiSocket?: string) {
+     const safeAttachUrl = redactUrl(attachUrl)
+     this.startReadyTimer('websocket', safeAttachUrl)
+ 
+@@ -612,9 +613,24 @@
+ 
+       return
+     }
++    let dispatcher: Agent | undefined
+ 
+     try {
+-      const ws = new WebSocketCtor(attachUrl, protocols)
++      if (apiSocket) {
++        // Bootstrap already validated the private home; refuse a replaced/non-private socket.
++        const info = lstatSync(apiSocket)
++        if (!info.isSocket() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) {
++          throw new Error('Unsafe shared-home native socket')
++        }
++        dispatcher = new Agent({ connect: { socketPath: apiSocket } })
++      }
++      const ws = (dispatcher
++        ? new UndiciWebSocket(attachUrl, { protocols, dispatcher })
++        : new WebSocketCtor(attachUrl, protocols)) as unknown as WebSocket
++      if (dispatcher) {
++        const ownedDispatcher = dispatcher
++        ws.addEventListener('close', () => { void ownedDispatcher.destroy() }, { once: true })
++      }
+       let settled = false
+ 
+       this.ws = ws
+@@ -710,6 +726,7 @@
+         this.publish({ type: 'gateway.stderr', payload: { line } })
+       })
+     } catch (err) {
++      void dispatcher?.destroy()
+       this.pushLog(`[startup] failed to connect websocket gateway ${safeAttachUrl} (constructor error)`)
+       this.handleTransportExit(1, t('libText.gateway.websocketStartupFailed'))
+     }

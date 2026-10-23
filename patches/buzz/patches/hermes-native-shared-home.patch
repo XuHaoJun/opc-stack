@@ -1,0 +1,576 @@
+--- /dev/null
++++ b/gateway/opc_shared_native.py
+@@ -0,0 +1,249 @@
++"""Opt-in shared-home Unix transports for the existing native session authority.
++
++Only transport is shared: control handlers, ticket minting/redemption and the native
++HTTP/WebSocket security policy remain those of the ordinary gateway bootstrap.
++"""
++from __future__ import annotations
++
++import asyncio
++import contextlib
++import ipaddress
++import os
++from pathlib import Path
++import socket
++import stat
++import struct
++from urllib.parse import urlsplit
++
++from gateway.control_socket import GatewayControlServer
++from gateway.runtime_ownership import process_ownership
++
++_CHUNK_BYTES = 64 * 1024
++
++
++def _require_home(home: Path) -> None:
++    from hermes_cli.gateway_runtime_discovery import home_mode_unsafe
++    info = home.lstat()
++    if (not process_ownership.owns(home) or home.absolute() != home.resolve()
++            or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
++            or home_mode_unsafe(info, home)):
++        raise PermissionError(f'shared native transport requires owned private profile home: {home}')
++
++
++def _remove_socket(path: Path, identity) -> None:
++    with contextlib.suppress(OSError):
++        info = path.lstat()
++        if (info.st_dev, info.st_ino) == identity:
++            path.unlink()
++
++
++def _prepare_socket(path: Path) -> None:
++    # Ownership of gateway.lock was checked first; only our UID's stale socket
++    # may be replaced, never a symlink or an unrelated file.
++    try:
++        info = path.lstat()
++    except FileNotFoundError:
++        return
++    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
++        raise PermissionError(f'unsafe shared native socket: {path}')
++    _remove_socket(path, (info.st_dev, info.st_ino))
++
++
++class _SecondaryControl(GatewayControlServer):
++    """An extra transport for the root control authority, not a new ticket store."""
++
++    def __init__(self, home, root):
++        super().__init__(home)
++        self._handlers = root._handlers
++        self.private_handlers = root.private_handlers
++        self.ticket_store = root.ticket_store
++        self._connections = set()
++
++    async def _handle_connection(self, reader, writer):
++        task = asyncio.current_task()
++        self._connections.add(task)
++        try:
++            await super()._handle_connection(reader, writer)
++        finally:
++            self._connections.discard(task)
++
++    async def stop(self):
++        # Stop accepting before cancelling peers; Server.wait_closed waits for them.
++        if self._server is not None:
++            self._server.close()
++        tasks = list(self._connections)
++        for task in tasks:
++            task.cancel()
++        if tasks:
++            await asyncio.gather(*tasks, return_exceptions=True)
++        # This listener borrows the root store; never revoke the owner's tickets.
++        self.ticket_store = None
++        await super().stop()
++
++
++class _ProfileTransport:
++    def __init__(self, home, target):
++        self.home = home
++        self.path = home / 'gateway.api.sock'
++        self.target = target
++        self.identity = None
++        self.server = None
++        self.control = None
++        self.tasks = set()
++
++    async def start(self, root):
++        _require_home(self.home)
++        _prepare_socket(self.path)
++        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        try:
++            # No await between restrictive creation and chmod; umask never leaks
++            # into another coroutine, and the socket is private from its creation.
++            old_umask = os.umask(0o177)
++            try:
++                listener.bind(str(self.path))
++            finally:
++                os.umask(old_umask)
++            info = self.path.lstat()
++            self.identity = (info.st_dev, info.st_ino)
++            os.chmod(self.path, 0o600)
++            listener.setblocking(False)
++            self.server = await asyncio.start_unix_server(self._accept, sock=listener)
++        except BaseException:
++            listener.close()
++            raise
++        if self.home != root._home:
++            # A temp-dir fallback isn't visible across the isolated containers.
++            control_path = self.home / 'gateway.sock'
++            if len(str(control_path).encode()) > 100:
++                raise ValueError('shared native control socket path exceeds Unix path limit')
++            _require_home(self.home)
++            _prepare_socket(control_path)
++            self.control = _SecondaryControl(self.home, root)
++            if not await self.control.start():
++                raise RuntimeError(f'shared native control listener unavailable: {self.home}')
++
++    def _accept(self, reader, writer):
++        task = asyncio.create_task(self._relay(reader, writer))
++        self.tasks.add(task)
++        task.add_done_callback(self.tasks.discard)
++
++    async def _relay(self, reader, writer):
++        upstream = None
++        pumps = []
++        try:
++            peer = writer.get_extra_info('socket')
++            credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i'))
++            _pid, uid, _gid = struct.unpack('3i', credentials)
++            if uid != os.getuid():
++                return
++            upstream_reader, upstream = await asyncio.open_connection(*self.target)
++
++            async def copy(source, destination):
++                while data := await source.read(_CHUNK_BYTES):
++                    destination.write(data)
++                    await destination.drain()
++
++            pumps = [asyncio.create_task(copy(reader, upstream)),
++                     asyncio.create_task(copy(upstream_reader, writer))]
++            # EOF or failure in either direction ends this single native connection.
++            await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
++        except (OSError, ConnectionError):
++            pass
++        finally:
++            for task in pumps:
++                task.cancel()
++            if pumps:
++                await asyncio.gather(*pumps, return_exceptions=True)
++            for stream in (writer, upstream):
++                if stream is not None:
++                    stream.close()
++            for stream in (writer, upstream):
++                if stream is not None:
++                    with contextlib.suppress(OSError, ConnectionError):
++                        await stream.wait_closed()
++
++    async def stop(self):
++        if self.server is not None:
++            self.server.close()
++        tasks = list(self.tasks)
++        for task in tasks:
++            task.cancel()
++        if tasks:
++            await asyncio.gather(*tasks, return_exceptions=True)
++        if self.server is not None:
++            await self.server.wait_closed()
++            self.server = None
++        if self.control is not None:
++            await self.control.stop()
++            self.control = None
++        _remove_socket(self.path, self.identity)
++        self.identity = None
++
++
++class _SharedNative:
++    def __init__(self, runner):
++        self.runner = runner
++        self.transports = {}
++        self.lock = asyncio.Lock()
++
++    async def sync(self):
++        async with self.lock:
++            root = self.runner.session_control_server
++            origin = urlsplit(self.runner.session_api.api_origin)
++            # Resolve no caller-controlled hostnames, and never forward to an
++            # arbitrary target. Each relay is pinned to this runner's bound API.
++            if (origin.scheme != 'http' or origin.username is not None
++                    or origin.password is not None or origin.path not in ('', '/')
++                    or origin.query or origin.fragment or origin.port is None
++                    or not ipaddress.ip_address(origin.hostname).is_loopback):
++                raise ValueError('shared native API origin must be a literal loopback HTTP endpoint')
++            target = (origin.hostname, origin.port)
++            homes = {Path(a.profile_id).resolve() for a in self.runner.session_authorities.serving()}
++            for home in list(self.transports):
++                if home not in homes:
++                    await self.transports.pop(home).stop()
++            created = []
++            try:
++                for home in sorted(homes):
++                    _require_home(home)
++                    if home in self.transports:
++                        if self.transports[home].target != target:
++                            raise RuntimeError('shared native API endpoint changed while serving')
++                        continue
++                    transport = _ProfileTransport(home, target)
++                    # Register before awaiting so partial startup is always torn down.
++                    created.append(transport)
++                    await transport.start(root)
++                    self.transports[home] = transport
++            except BaseException:
++                for transport in reversed(created):
++                    self.transports.pop(transport.home, None)
++                    await transport.stop()
++                raise
++
++    async def stop(self):
++        async with self.lock:
++            transports, self.transports = self.transports, {}
++            for transport in transports.values():
++                await transport.stop()
++
++
++async def sync_shared_native(runner):
++    """Reconcile private transports with the currently serving, reserved homes."""
++    if os.environ.get('OPC_HERMES_SHARED_NATIVE') != '1':
++        return
++    if os.name != 'posix' or not hasattr(socket, 'SO_PEERCRED'):
++        raise RuntimeError('shared native transport requires Unix SO_PEERCRED')
++    if getattr(runner, 'session_api', None) is None:
++        return
++    manager = getattr(runner, '_opc_shared_native', None)
++    if manager is None:
++        manager = runner._opc_shared_native = _SharedNative(runner)
++    await manager.sync()
++
++
++async def stop_shared_native(runner):
++    """Close all listeners and cancel relays before the native API is stopped."""
++    manager = getattr(runner, '_opc_shared_native', None)
++    if manager is not None:
++        await manager.stop()
+--- a/gateway/run_runtime.py
++++ b/gateway/run_runtime.py
+@@ -386,6 +386,7 @@
+     from gateway.session_hosted_service import _ensure_hosted_service, start_ready_hosted_services
+     from gateway.session_local_recovery import recover_local_sessions
+     from gateway.platforms.webhook_ingress import recover_webhook_finalizations
++    from gateway.opc_shared_native import sync_shared_native
+     home = await asyncio.to_thread(Path(home).resolve)
+     registry = runner.session_authorities
+     existing = registry.for_home(home)
+@@ -408,11 +409,14 @@
+             _recover_published_api_turns(runner, authority)
+         if getattr(runner, 'session_control_server', None) is not None:
+             await _ensure_hosted_service(runner, authority)
++        _publish_served_set(runner)
++        await sync_shared_native(runner)
+     except BaseException:
+         if await _retire_profile_authority(authority):
+             registry.remove(home)
++        _publish_served_set(runner)
++        await sync_shared_native(runner)
+         raise
+-    _publish_served_set(runner)
+     start_ready_hosted_services(runner)
+     return authority
+ 
+@@ -461,15 +465,19 @@
+     False when one of its turns outlived the Stop deadline (keep the reservation); True otherwise,
+     including for a profile this process never served."""
+     home = await asyncio.to_thread(Path(home).resolve)
++    from gateway.opc_shared_native import sync_shared_native
+     registry = runner.session_authorities
+     authority = registry.for_home(home)
+     if authority is None:
+         return True
+     retired = await _retire_profile_authority(authority)
+     if not retired:
++        _publish_served_set(runner)
++        await sync_shared_native(runner)
+         return False
+     registry.remove(home)
+     _publish_served_set(runner)
++    await sync_shared_native(runner)
+     return retired
+ 
+ 
+@@ -496,10 +504,16 @@
+ 
+ async def start_gateway_runtime_api(runner):
+     from gateway.run_api import start_gateway_api
++    from gateway.opc_shared_native import sync_shared_native, stop_shared_native
+     runner.session_api = await start_gateway_api(runner)
+     runner.session_runtime_descriptor['api_origin'] = runner.session_api.api_origin
+-    for authority in _authorities(runner):
+-        await _recover_profile_bot_mailbox(runner, authority)
++    try:
++        for authority in _authorities(runner):
++            await _recover_profile_bot_mailbox(runner, authority)
++        await sync_shared_native(runner)
++    except BaseException:
++        await stop_shared_native(runner)
++        raise
+ 
+ 
+ async def _recover_profile_bot_mailbox(runner, authority):
+@@ -663,6 +677,8 @@
+             logging.getLogger(__name__).warning('ACP sessions of %s not ended at shutdown',
+                                                 getattr(authority, 'profile_id', '?'), exc_info=True)
+     from gateway.run_api import stop_gateway_api
++    from gateway.opc_shared_native import stop_shared_native
++    await stop_shared_native(runner)
+     store = getattr(runner, 'session_ticket_store', None)
+     if store is not None:
+         store.revoke()
+--- a/hermes_cli/gateway_runtime.py
++++ b/hermes_cli/gateway_runtime.py
+@@ -6,6 +6,7 @@
+ import ipaddress
+ import math
+ import os
++import stat
+ from pathlib import Path
+ from typing import TYPE_CHECKING, Literal
+ from urllib.parse import urlsplit
+@@ -36,6 +37,8 @@
+     # A gateway that outlived ``hermes update`` keeps serving old code, so an attaching client
+     # compares this with its own checkout and restarts the owner instead of re-attaching it.
+     code_sha: str | None = None
++    # Opt-in shared-home transport; the advertised loopback origin still governs the handshake.
++    api_socket: str | None = None
+ 
+ 
+ @dataclass(frozen=True)
+@@ -93,6 +96,18 @@
+     except (FileNotFoundError, OSError, DiscoveryError):
+         return home
+     return target.parent
++
++
++def _shared_native_api_socket(home: Path) -> Path:
++    """Validate the selected profile's fixed, same-user native API relay path."""
++    from hermes_cli.gateway_runtime_discovery import DiscoveryError, _private_node
++    _private_node(home, kind="directory", home=True)
++    path = home / "gateway.api.sock"
++    node = _private_node(path, kind="socket")
++    if stat.S_IMODE(node.st_mode) != 0o600:
++        raise DiscoveryError("unsafe_control_permissions",
++                             f"{path} must have mode 0600")
++    return path
+ 
+ 
+ def _endpoint(payload: dict, home: Path, control_home: Path | None = None) -> GatewayDiscovery:
+@@ -143,12 +158,28 @@
+     supervisor = payload.get("supervisor")
+     if supervisor not in {"none", "systemd", "launchd", "windows", "external"}:
+         return GatewayDiscovery("inaccessible", reason_code="invalid_supervisor")
++    api_socket = None
++    if os.name != "nt" and os.environ.get("OPC_HERMES_SHARED_NATIVE") == "1":
++        from hermes_cli.gateway_runtime_discovery import DiscoveryError
++        try:
++            api_socket = str(_shared_native_api_socket(home))
++        except FileNotFoundError:
++            # A live control owner without its relay is not an absent owner: never spawn another.
++            return GatewayDiscovery("inaccessible", reason_code="shared_native_unavailable",
++                                    detail="Gateway shared-home API socket is not ready")
++        except DiscoveryError as exc:
++            return GatewayDiscovery("inaccessible", reason_code=exc.reason,
++                                    detail=exc.bounded_detail(500))
++        except OSError:
++            return GatewayDiscovery("inaccessible", reason_code="shared_native_unavailable",
++                                    detail="Gateway shared-home API socket cannot be accessed")
+     return GatewayDiscovery("draining" if restart_wait else "ready", GatewayEndpoint(
+         profile_id=matches[0]["profile_id"], instance_id=instance,
+         authority_epoch=epoch, runtime_protocol=1, api_origin=origin,
+         supervisor=supervisor, capabilities=frozenset(capabilities),
+         control_home=str(control_home) if control_home is not None else None,
+         code_sha=code_sha if isinstance(code_sha := payload.get("code_sha"), str) and code_sha else None,
++        api_socket=api_socket,
+     ), reason_code=RESTART_WAIT_REASON if restart_wait else None)
+ 
+ 
+--- a/hermes_cli/gateway_client.py
++++ b/hermes_cli/gateway_client.py
+@@ -7,6 +7,7 @@
+ import json
+ import os
+ from pathlib import Path
++import socket
+ import time
+ 
+ # The owner's protocol name; session_contract is dependency-free (no config/plugins load).
+@@ -258,8 +259,40 @@
+     return grant["ticket"]
+ 
+ 
++async def _connect_shared_native(home: Path, api_socket: str) -> socket.socket:
++    """Connect only to the selected home's private relay and authenticate its kernel peer."""
++    from hermes_cli.gateway_runtime import _shared_native_api_socket
++    from hermes_cli.gateway_runtime_discovery import DiscoveryError, socket_peer_uid
++    try:
++        path = _shared_native_api_socket(home)
++    except DiscoveryError as exc:
++        raise GatewayClientError("Gateway shared-home API socket is unsafe") from exc
++    if str(path) != api_socket:
++        raise GatewayClientError("Gateway shared-home API socket does not match the selected profile")
++    before = path.lstat()
++    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++    try:
++        peer.setblocking(False)
++        async with asyncio.timeout(5):
++            await asyncio.get_running_loop().sock_connect(peer, str(path))
++        # Path validation alone cannot authenticate a listener swapped between lstat and connect.
++        if socket_peer_uid(peer) != os.getuid():
++            raise GatewayClientError("Gateway shared-home API peer is not the current user")
++        _shared_native_api_socket(home)
++        after = path.lstat()
++        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
++            raise GatewayClientError("Gateway shared-home API socket changed; retry launch")
++        return peer
++    except DiscoveryError as exc:
++        peer.close()
++        raise GatewayClientError("Gateway shared-home API socket is unsafe") from exc
++    except BaseException:
++        peer.close()
++        raise
++
++
+ @asynccontextmanager
+-async def connect_gateway(endpoint=None, subject=None):
++async def connect_gateway(endpoint=None, subject=None, *, profile_home=None):
+     """Attach to this home's owner. ``endpoint``: an already-discovered ready owner to dial as-is
+     (maintenance that must never start a gateway); default ensures one, starting it if needed.
+     ``subject``: mint the ticket for this principal (the caller's authenticated dashboard user)
+@@ -272,8 +305,13 @@
+     remote = "" if endpoint is not None else os.environ.get("HERMES_TUI_GATEWAY_URL", "").strip()
+     protocols = None
+     if endpoint is not None:
+-        ticket = await asyncio.to_thread(_session_ticket, gateway_profile_home(get_hermes_home()), endpoint,
+-                                         subject=subject)
++        home = Path(profile_home) if profile_home is not None else \
++            Path(endpoint.api_socket).parent if getattr(endpoint, "api_socket", None) else \
++            gateway_profile_home(get_hermes_home())
++        if subject is None:
++            ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
++        else:
++            ticket = await asyncio.to_thread(_session_ticket, home, endpoint, subject=subject)
+         url, protocols = gateway_ws_target(endpoint, ticket)
+     elif remote:
+         parsed = urlsplit(remote)
+@@ -297,12 +335,20 @@
+         endpoint = result.endpoint
+         ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
+         url, protocols = gateway_ws_target(endpoint, ticket)
++    peer = None
+     try:
+         # The gateway is a loopback (or explicitly named) peer, never something to route through the
+         # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
+         # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
+-        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024,
+-                           proxy=None) as ws:
++        if endpoint is not None and getattr(endpoint, "api_socket", None) is not None:
++            from websockets.asyncio.client import unix_connect
++            peer = await _connect_shared_native(home, endpoint.api_socket)
++            connector = unix_connect(uri=url, sock=peer, subprotocols=protocols, open_timeout=10,
++                                     max_size=8 * 1024 * 1024, proxy=None)
++        else:
++            connector = connect(url, subprotocols=protocols, open_timeout=10,
++                                max_size=8 * 1024 * 1024, proxy=None)
++        async with connector as ws:
+             if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
+                 raise GatewayClientError("Gateway protocol mismatch; update/restart required")
+             async with GatewayClient(ws) as client:
+@@ -311,3 +357,7 @@
+         raise
+     except (OSError, TimeoutError) as exc:
+         raise GatewayClientError("Gateway connection failed; no local fallback") from exc
++    finally:
++        # Also covers cancellation and handshake failures before websockets takes ownership.
++        if peer is not None:
++            peer.close()
+--- a/tui_gateway/owner_forward.py
++++ b/tui_gateway/owner_forward.py
+@@ -78,17 +78,11 @@
+ @contextlib.asynccontextmanager
+ async def connect_owner(home: Path, endpoint):
+     """A ``GatewayClient`` on ``endpoint``, the ready gateway serving ``home``."""
+-    from hermes_cli.gateway_client import GATEWAY_WS_PROTOCOL, GatewayClient, _session_ticket, gateway_ws_target
+-    from websockets.asyncio.client import connect
+-
+-    ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
+-    url, protocols = gateway_ws_target(endpoint, ticket)
+-    # Loopback owner dial: never through HTTP(S)_PROXY (websockets>=14 honours it by default).
+-    async with connect(url, subprotocols=protocols, open_timeout=10, proxy=None) as ws:
+-        if ws.subprotocol != GATEWAY_WS_PROTOCOL:
+-            raise OwnerUnavailable("the gateway answered with another protocol")
+-        async with GatewayClient(ws) as client:
+-            yield client
++    from hermes_cli.gateway_client import connect_gateway
++
++    # Pin the selected owner even when the caller's current profile is different.
++    async with connect_gateway(endpoint=endpoint, profile_home=home) as client:
++        yield client
+ 
+ 
+ def forwardable(refusal: Any, session: dict, text: Any, params: dict) -> bool:
+--- a/gateway/session_a2a.py
++++ b/gateway/session_a2a.py
+@@ -144,39 +144,29 @@
+ 
+ async def forward_to_owner(home, *, agent, tenant, peer, context_id, input_id, text, timeout):
+     """Transport-only caller; a timeout never cancels or re-identifies accepted work."""
+-    from hermes_cli.gateway_client import (GATEWAY_WS_PROTOCOL, GatewayClient, GatewayClientError,
+-        _session_ticket, gateway_ws_target)
++    from hermes_cli.gateway_client import GatewayClientError, connect_gateway
+     from hermes_cli.gateway_runtime import ensure_gateway_runtime
+-    from websockets.asyncio.client import connect
+     home = await asyncio.to_thread(Path(home).resolve)
+     async with asyncio.timeout(timeout):
+         ready = await asyncio.to_thread(ensure_gateway_runtime, home)
+         if ready.state != 'ready' or ready.endpoint is None:
+             raise GatewayClientError(f'gateway_{ready.state}:{ready.reason_code or "not_ready"}')
+-        ticket = await asyncio.to_thread(_session_ticket, home, ready.endpoint)
+-        url, protocols = gateway_ws_target(ready.endpoint, ticket)
+-        # Loopback authority dial: never through HTTP(S)_PROXY (websockets>=14 honours it by default).
+-        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024,
+-                           proxy=None) as ws:
+-            if ws.subprotocol != GATEWAY_WS_PROTOCOL:
+-                raise GatewayClientError('gateway_protocol_mismatch')
+-            async with GatewayClient(ws) as client:
+-                params = dict(agent=agent, tenant=tenant, peer=peer, context_id=context_id, input_id=input_id, text=text)
+-                backoff = .25
+-                while True:
+-                    receipt = await client.rpc('a2a.forward', **params)
+-                    if receipt['status'] == 'unknown':
+-                        raise GatewayClientError('unknown_execution')
+-                    if receipt['status'] == 'terminal':
+-                        return receipt
+-                    # The forward subscribed this socket to the session: wait for the admission's
+-                    # completion frame, re-reading the exact durable receipt on a backed-off
+-                    # safety tick (a frame lost to a replay gap) instead of a fixed 100 ms poll.
+-                    try:
+-                        async with asyncio.timeout(backoff):
+-                            await _completion(client, receipt['admission_id'])
+-                    except TimeoutError:
+-                        backoff = min(backoff * 2, 5.0)
++        async with connect_gateway(endpoint=ready.endpoint, profile_home=home) as client:
++            params = dict(agent=agent, tenant=tenant, peer=peer, context_id=context_id, input_id=input_id, text=text)
++            backoff = .25
++            while True:
++                receipt = await client.rpc('a2a.forward', **params)
++                if receipt['status'] == 'unknown':
++                    raise GatewayClientError('unknown_execution')
++                if receipt['status'] == 'terminal':
++                    return receipt
++                # Wait for this admission's completion projection; a replay gap re-reads
++                # the same durable receipt without re-identifying accepted work.
++                try:
++                    async with asyncio.timeout(backoff):
++                        await _completion(client, receipt['admission_id'])
++                except TimeoutError:
++                    backoff = min(backoff * 2, 5.0)
+ 
+ 
+ async def _completion(client, admission_id):
