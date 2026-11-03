@@ -198,6 +198,24 @@ def _agent_track_of(agent: dict, core_ids: set[str]) -> str:
     return "core" if str(agent["id"]) in core_ids else "lab"
 
 
+def _holds(raw) -> set[str]:
+    """lifecycleHolds as a set, tolerant of list or JSON-string shapes."""
+    import json
+
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = [raw]
+    return {str(item) for item in (raw or [])}
+
+
+def _holds_match(recorded: set[str], current: set[str]) -> bool:
+    # `manual` is the hold our own pause adds. Compare everything else, so a
+    # human's extra hold (or a cleared one) still blocks the resume.
+    return recorded == (current - {"manual"})
+
+
 def _wait_settled(pc, agent_id: str, want_paused: bool, tries: int = 20) -> dict:
     import time
 
@@ -280,9 +298,9 @@ def apply_allocation(
             for agent in agents:
                 ledger = store.ledger_get(str(agent["id"]))
                 if ledger and not ledger.get("released_at") and str(agent.get("status")) == "paused":
-                    current_holds = str(agent.get("lifecycleHolds") or [])
-                    recorded = ledger.get("original_holds_json") or ""
-                    if recorded and current_holds != recorded:
+                    current_holds = _holds(agent.get("lifecycleHolds"))
+                    recorded = _holds(ledger.get("original_holds_json"))
+                    if current_holds and not _holds_match(recorded, current_holds):
                         # Someone (a human) changed the holds while we held the
                         # lock. Resuming would silently clear their pause.
                         changed.append(f"refused:{agent['id']}")
