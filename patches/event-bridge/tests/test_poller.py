@@ -97,6 +97,26 @@ class PollerTest(unittest.TestCase):
         delivery = self.store.delivery_for_issue("i1")
         self.assertEqual(delivery["state"], "pending")
 
+    def test_terminal_issue_created_after_bootstrap_is_an_event_not_history(self):
+        # The live gap this closes: an issue created and completed between two
+        # ticks was first observed terminal, and the baseline rule swallowed it.
+        # Baseline silence is for history, not for work that happened after the
+        # bridge started watching.
+        self.p.bootstrap()
+        self.store.set_cursor("2026-11-04T02:00:00Z")
+        self.pc.issues = [
+            _issue(
+                "i5",
+                identifier="OPC-5",
+                status="done",
+                updated="2026-11-04T02:05:00Z",
+                completedAt="2026-11-04T02:05:00Z",
+                createdAt="2026-11-04T02:04:00Z",
+            )
+        ]
+
+        self.assertEqual(self.p.tick(), 1)
+
     def test_reopened_and_recompleted_ticket_emits_a_second_event(self):
         t1, t2, t3 = (
             "2026-11-04T00:00:00Z",

@@ -200,12 +200,33 @@ class Poller:
             }
 
         event_type = events.classify_issue(previous_for_classify, issue)
+        if event_type is None and previous is None:
+            # First observation of an already-terminal issue. That is history
+            # (silent) only if it predates the bridge; an issue created and
+            # completed between two ticks is a real transition we must report,
+            # or a fast ticket would vanish from the loop forever.
+            event_type = self._late_terminal_type(issue)
         emitted = 0
         if event_type is not None:
             emitted += int(self.store.enqueue_event(self._issue_event(issue, event_type, now), now))
 
         self.store.upsert_issue_state(dict(issue))
         return emitted
+
+    def _late_terminal_type(self, issue: Mapping[str, Any]) -> str | None:
+        status = str(issue.get("status") or "")
+        event_type = {
+            "done": events.ISSUE_COMPLETED,
+            "blocked": events.ISSUE_BLOCKED,
+            "cancelled": events.ISSUE_CANCELLED,
+        }.get(status)
+        if event_type is None:
+            return None
+        watermark = self.store.bootstrap_at()
+        if watermark is None:
+            return None
+        seen_at = str(issue.get("createdAt") or issue.get("updatedAt") or "")
+        return event_type if seen_at and seen_at > watermark else None
 
     def _observe_runs(self, now: float) -> int:
         """A run that failed leaves the issue open; that is its own event.

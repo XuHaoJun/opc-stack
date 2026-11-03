@@ -916,7 +916,10 @@ services:
       OPC_DB_PATH: /var/lib/opc-bridge/bridge.db
       OPC_API_KEY_FILE: /keys/opc-control.key
       OPC_API_LISTEN: 0.0.0.0:8645
-      BUZZ_RELAY_URL: ws://buzz:3000
+      # Same host the agent uses: the relay's community is bound to the host in
+      # this URL (NIP-42 signs it), so `buzz:3000` resolves to a host with no
+      # community and every post 404s.
+      BUZZ_RELAY_URL: ${BUZZ_RELAY_URL:-ws://localhost:3000}
       BUZZ_KEYS_DIR: /keys
       OPC_NOTIFIER_NSEC: /keys/paperclip.nsec
       OPC_NOTIFIER_PUB: /keys/paperclip.pub

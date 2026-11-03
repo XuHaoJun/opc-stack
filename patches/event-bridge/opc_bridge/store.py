@@ -249,6 +249,13 @@ class Store:
             ).fetchone()
         return None if row is None or not row["updated_since"] else str(row["updated_since"])
 
+    def bootstrap_at(self) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT bootstrapped_at FROM cursor WHERE id = 1"
+            ).fetchone()
+        return None if row is None or not row["bootstrapped_at"] else str(row["bootstrapped_at"])
+
     def set_cursor(self, updated_since: str, bootstrapped_at: str | None = None) -> None:
         with self._lock:
             self._db.execute(

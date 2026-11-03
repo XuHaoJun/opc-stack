@@ -90,6 +90,19 @@ check "tencentdb panel  :${TENCENTDB_PANEL_PORT:-8125}/" http_ok "http://127.0.0
 check "tencentdb knowl. :${TENCENTDB_KNOWLEDGE_PORT:-8424}/docs" http_ok "http://127.0.0.1:${TENCENTDB_KNOWLEDGE_PORT:-8424}/docs" 200 302
 check "tencentdb proxy  :${TENCENTDB_PROXY_PORT:-8096}/" http_ok "http://127.0.0.1:${TENCENTDB_PROXY_PORT:-8096}/" 200 401 403 404
 
+# event bridge: liveness is internal-only (no published port), so ask it from
+# inside the container. `degraded` is still HTTP 200 — the assertion is the
+# status field, not the code, because a missing control key must not look like
+# a dead service.
+check "event-bridge health (ok)" \
+  docker compose exec -T event-bridge python3 -c "import json,urllib.request,sys; b=json.load(urllib.request.urlopen('http://127.0.0.1:8645/v1/health')); sys.exit(0 if b.get('status')=='ok' else 1)"
+check "event-bridge read API rejects a missing key (401)" \
+  docker compose exec -T event-bridge python3 -c "import urllib.request,urllib.error,sys
+try:
+    urllib.request.urlopen('http://127.0.0.1:8645/v1/events', timeout=5); sys.exit(1)
+except urllib.error.HTTPError as e:
+    sys.exit(0 if e.code == 401 else 1)"
+
 echo "── internal links ──"
 # frontdoor (buzz-acp sidecar) must reach the relay with the agent's key —
 # same invocation the register loop uses; exit 0 = relay reachable + agent OK.
