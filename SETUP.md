@@ -575,7 +575,7 @@ nixpkgs packages: it is installed into the seed image and copied into the
 volume, so review the `nix` and `live-nix` rows independently.
 
 `omp` (Oh My Pi) — the Paperclip executor agent runtime — is mise-managed:
-the entrypoint installs the prebuilt `github:can1357/oh-my-pi@18.11.1` into each
+the entrypoint installs the prebuilt `github:can1357/oh-my-pi@18.16.0` into each
 `*-mise` volume on first boot (and re-adds it if missing). The nix derivation
 can't build in image environments (bun EPERM), so omp is not part of the nix
 seed. It runs as the `Fullstack Engineer` agent via the claude_local adapter
@@ -591,7 +591,7 @@ that container until its image has been rebuilt with the new bootstrap pin.
 
 ```bash
 for c in buzz frontdoor hermes hermes-dashboard paperclip; do
-  docker compose exec -T -u root "$c" mise use -g github:can1357/oh-my-pi@18.11.1
+  docker compose exec -T -u root "$c" mise use -g github:can1357/oh-my-pi@18.16.0
 done
 for c in buzz frontdoor hermes hermes-dashboard paperclip; do
   echo -n "$c: "; docker compose exec -T "$c" omp --version
@@ -605,7 +605,7 @@ being shadowed by the old global.
 This changes the version selected for new omp invocations; it does not restart
 an already-running agent. Keep the old mise install until verification is
 complete. To roll back this cutover, select
-`github:can1357/oh-my-pi@18.1.15` with the same `mise use -g` command.
+`github:can1357/oh-my-pi@18.11.1` with the same `mise use -g` command.
 
 Search: `nix search nixpkgs <name>`. Wipe a store: `docker volume rm opc_hermes-nix`.
 
