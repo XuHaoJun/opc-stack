@@ -1,0 +1,133 @@
+diff --git a/crates/buzz-cli/src/commands/messages.rs b/crates/buzz-cli/src/commands/messages.rs
+index f80f928d3..d0f81913a 100644
+--- a/crates/buzz-cli/src/commands/messages.rs
++++ b/crates/buzz-cli/src/commands/messages.rs
+@@ -1,5 +1,5 @@
+ use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
+-use nostr::PublicKey;
++use nostr::{PublicKey, Tag};
+ use uuid::Uuid;
+ 
+ use crate::client::{normalize_events, normalize_write_response, BuzzClient};
+@@ -606,6 +606,7 @@ pub struct SendMessageParams {
+     pub broadcast: bool,
+     pub files: Vec<String>,
+     pub mentions: Vec<String>,
++    pub tags: Vec<String>,
+ }
+ 
+ pub async fn cmd_send_message(
+@@ -680,7 +681,7 @@ pub async fn cmd_send_message(
+ 
+     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
+ 
+-    let builder = match p.kind {
++    let mut builder = match p.kind {
+         Some(45001) => {
+             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
+                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
+@@ -742,6 +743,10 @@ pub async fn cmd_send_message(
+         }
+     };
+ 
++    if !p.tags.is_empty() {
++        builder = builder.tags(parse_extra_tags(&p.tags)?);
++    }
++
+     let event = client.sign_event(builder)?;
+     let emitted_mentions = event_mention_pubkeys(&event);
+     let resp = client.submit_event(event).await?;
+@@ -945,6 +950,7 @@ pub async fn dispatch(
+             broadcast,
+             files,
+             mentions,
++            tags,
+         } => {
+             cmd_send_message(
+                 client,
+@@ -956,6 +962,7 @@ pub async fn dispatch(
+                     broadcast,
+                     files,
+                     mentions,
++                    tags,
+                 },
+             )
+             .await
+@@ -1717,6 +1724,7 @@ mod tests {
+             broadcast: false,
+             files: vec![],
+             mentions: vec![],
++            tags: vec![],
+         }
+     }
+ 
+@@ -1889,3 +1897,54 @@ mod tests {
+         );
+     }
+ }
++
++/// Parse `--tag KEY=VALUE` arguments into event tags.
++///
++/// Keys are restricted to the shape machine consumers use, and the routing tags
++/// (`h` channel, `e` thread, `p` mentions, `a`/`k` references, `t`/`broadcast`)
++/// are refused: a caller must not be able to redirect delivery by stamping one.
++fn parse_extra_tags(raw: &[String]) -> Result<Vec<Tag>, CliError> {
++    const RESERVED: [&str; 7] = ["h", "e", "p", "a", "k", "t", "broadcast"];
++    let mut tags = Vec::with_capacity(raw.len());
++    for item in raw {
++        let (key, value) = item.split_once('=').ok_or_else(|| {
++            CliError::Usage(format!("--tag expects KEY=VALUE, got {item:?}"))
++        })?;
++        let valid_key = !key.is_empty()
++            && key.len() <= 32
++            && key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
++        if !valid_key || RESERVED.contains(&key) {
++            return Err(CliError::Usage(format!(
++                "--tag key {key:?} is invalid or reserved (allowed: [a-z0-9-]{{1,32}})"
++            )));
++        }
++        if value.trim().is_empty() {
++            return Err(CliError::Usage(format!("--tag {key} has an empty value")));
++        }
++        let tag = Tag::parse([key.to_string(), value.to_string()])
++            .map_err(|e| CliError::Usage(format!("--tag {key}: {e}")))?;
++        tags.push(tag);
++    }
++    Ok(tags)
++}
++
++#[cfg(test)]
++mod opc_tag_tests {
++    use super::parse_extra_tags;
++
++    #[test]
++    fn parses_key_value_pairs_in_order() {
++        let tags = parse_extra_tags(&["opc-event=evt_1".to_string(), "opc-track=lab".to_string()])
++            .expect("valid tags");
++        assert_eq!(tags.len(), 2);
++        assert_eq!(tags[0].as_slice(), ["opc-event".to_string(), "evt_1".to_string()]);
++        assert_eq!(tags[1].as_slice(), ["opc-track".to_string(), "lab".to_string()]);
++    }
++
++    #[test]
++    fn rejects_reserved_and_malformed_keys() {
++        for raw in ["h=abc", "p=abc", "broadcast=1", "OpC=1", "=v", "key=", "no-equals", "k e y=v"] {
++            assert!(parse_extra_tags(&[raw.to_string()]).is_err(), "{raw} must be rejected");
++        }
++    }
++}
+diff --git a/crates/buzz-cli/src/lib.rs b/crates/buzz-cli/src/lib.rs
+index c2f6b7e08..ed44bfee7 100644
+--- a/crates/buzz-cli/src/lib.rs
++++ b/crates/buzz-cli/src/lib.rs
+@@ -434,6 +434,10 @@ pub enum MessagesCmd {
+         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+         #[arg(long = "mention")]
+         mentions: Vec<String>,
++        /// Extra event tag as KEY=VALUE (repeatable). Key: [a-z0-9-]{1,32}.
++        /// Structural provenance for machine consumers (e.g. the OPC event bridge).
++        #[arg(long = "tag", value_name = "KEY=VALUE")]
++        tags: Vec<String>,
+     },
+     /// Send a code diff / patch to a channel
+     SendDiff {

@@ -1,0 +1,316 @@
+diff --git a/crates/buzz-acp/src/lib.rs b/crates/buzz-acp/src/lib.rs
+index ac387817f..d7a1a39bb 100644
+--- a/crates/buzz-acp/src/lib.rs
++++ b/crates/buzz-acp/src/lib.rs
+@@ -11,6 +11,7 @@ mod engram_fetch;
+ mod filter;
+ mod isolated_execution;
+ mod observer;
++mod opc_event_gate;
+ mod pool;
+ mod pool_lifecycle;
+ mod prompt_framing;
+@@ -3565,6 +3566,23 @@ async fn run_harness(
+                                 continue;
+                             }
+ 
++                            // OPC system-event gate: authenticated, de-duplicated
++                            // system events only, and no agent-to-agent turns.
++                            // It has to be here rather than in the prompt: this
++                            // decides whether a turn happens at all.
++                            match opc_event_gate::check(&buzz_event.event) {
++                                opc_event_gate::Decision::Admit => {}
++                                opc_event_gate::Decision::Drop(reason) => {
++                                    tracing::info!(
++                                        channel_id = %buzz_event.channel_id,
++                                        sender = %buzz_event.event.pubkey.to_hex(),
++                                        reason,
++                                        "opc event gate — dropping event"
++                                    );
++                                    continue;
++                                }
++                            }
++
+                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
+                             let is_shutdown = is_owner_control_command(
+                                 &buzz_event.event,
+diff --git a/crates/buzz-acp/src/opc_event_gate.rs b/crates/buzz-acp/src/opc_event_gate.rs
+new file mode 100644
+index 000000000..b7d25473e
+--- /dev/null
++++ b/crates/buzz-acp/src/opc_event_gate.rs
+@@ -0,0 +1,274 @@
++//! Deterministic inbound gate for OPC system events.
++//!
++//! The front door runs with `respond-to=anyone` and no mention filter, so every
++//! kind:9 in a member channel becomes a turn — including another agent's
++//! chatter, and including a replayed copy of a system event after the bridge
++//! crashed between "relay accepted" and "recorded". Prompt instructions cannot
++//! fix either: both are decisions about *whether a turn happens*.
++//!
++//! Two rules, both client-side (the relay cannot express "not from author X"):
++//!
++//! 1. A kind:9 carrying `opc-event` (configurable) is admitted only from a
++//!    listed author, at most once per event id. Everything else tagged is a
++//!    forgery or a replay and is dropped.
++//! 2. Untagged kind:9 from a listed agent author is dropped, which is what
++//!    stops two agents from answering each other forever. Human messages are
++//!    untouched.
++//!
++//! The gate is inert unless `BUZZ_ACP_OPC_EVENT_TAG` is set, so an operator can
++//! turn it off without a rebuild. Configuration is read from the environment
++//! (not the CLI) on purpose: this is deployment policy the stack seeds, and
++//! keeping it out of the arg surface keeps the patch small and auditable.
++
++use std::collections::{HashSet, VecDeque};
++use std::fs;
++use std::io::Write;
++use std::path::PathBuf;
++use std::sync::{Mutex, OnceLock};
++
++use nostr::Event;
++
++const DEFAULT_TAG: &str = "opc-event";
++const SEEN_LIMIT: usize = 5000;
++
++#[derive(Debug, PartialEq, Eq)]
++pub enum Decision {
++    Admit,
++    Drop(&'static str),
++}
++
++pub struct SeenSet {
++    ids: VecDeque<String>,
++    set: HashSet<String>,
++    path: Option<PathBuf>,
++    limit: usize,
++}
++
++impl SeenSet {
++    pub fn new(path: Option<PathBuf>) -> Self {
++        let mut set = HashSet::new();
++        let mut ids = VecDeque::new();
++        if let Some(ref p) = path {
++            if let Ok(text) = fs::read_to_string(p) {
++                let start = text.lines().count().saturating_sub(SEEN_LIMIT);
++                for line in text.lines().skip(start) {
++                    let id = line.trim();
++                    if !id.is_empty() && set.insert(id.to_string()) {
++                        ids.push_back(id.to_string());
++                    }
++                }
++            }
++        }
++        Self { ids, set, path, limit: SEEN_LIMIT }
++    }
++
++    pub fn contains(&self, id: &str) -> bool {
++        self.set.contains(id)
++    }
++
++    /// Remember an id. Best effort: a write failure logs and keeps the
++    /// in-memory record, because losing dedupe is worse than a noisy disk.
++    pub fn insert(&mut self, id: &str) {
++        if !self.set.insert(id.to_string()) {
++            return;
++        }
++        self.ids.push_back(id.to_string());
++        while self.ids.len() > self.limit {
++            if let Some(old) = self.ids.pop_front() {
++                self.set.remove(&old);
++            }
++        }
++        if let Some(ref path) = self.path {
++            if let Some(parent) = path.parent() {
++                let _ = fs::create_dir_all(parent);
++            }
++            if self.ids.len() > self.limit / 2 {
++                let tmp = path.with_extension("tmp");
++                let body = self.ids.iter().cloned().collect::<Vec<_>>().join("\n") + "\n";
++                if fs::write(&tmp, body).and_then(|_| fs::rename(&tmp, path)).is_err() {
++                    tracing::warn!(path = %path.display(), "could not compact the opc-event seen set");
++                }
++            } else if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
++                if writeln!(file, "{id}").is_err() {
++                    tracing::warn!(path = %path.display(), "could not append to the opc-event seen set");
++                }
++            }
++        }
++    }
++}
++
++pub struct Gate {
++    tag: String,
++    authors: HashSet<String>,
++    ignore_agent_authors: bool,
++    agent_authors: HashSet<String>,
++    seen: SeenSet,
++}
++
++fn env_csv(name: &str) -> HashSet<String> {
++    std::env::var(name)
++        .unwrap_or_default()
++        .split(',')
++        .map(|v| v.trim().to_ascii_lowercase())
++        .filter(|v| !v.is_empty())
++        .collect()
++}
++
++fn env_bool(name: &str, default: bool) -> bool {
++    match std::env::var(name) {
++        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
++            "1" | "true" | "yes" | "on" => true,
++            "0" | "false" | "no" | "off" => false,
++            _ => default,
++        },
++        Err(_) => default,
++    }
++}
++
++impl Gate {
++    /// `None` when the gate is not configured — the harness then behaves
++    /// exactly as before this patch.
++    pub fn from_env() -> Option<Self> {
++        let tag = std::env::var("BUZZ_ACP_OPC_EVENT_TAG").ok()?;
++        let tag = match tag.trim() {
++            "" => DEFAULT_TAG.to_string(),
++            other => other.to_string(),
++        };
++        let seen_path = std::env::var("BUZZ_ACP_OPC_SEEN_FILE")
++            .ok()
++            .map(|v| v.trim().to_string())
++            .filter(|v| !v.is_empty())
++            .map(PathBuf::from);
++        Some(Self {
++            tag,
++            authors: env_csv("BUZZ_ACP_OPC_EVENT_AUTHORS"),
++            ignore_agent_authors: env_bool("BUZZ_ACP_IGNORE_AGENT_AUTHORS", true),
++            agent_authors: env_csv("BUZZ_ACP_AGENT_AUTHORS"),
++            seen: SeenSet::new(seen_path),
++        })
++    }
++
++    fn disabled() -> Self {
++        Self {
++            tag: String::new(),
++            authors: HashSet::new(),
++            ignore_agent_authors: false,
++            agent_authors: HashSet::new(),
++            seen: SeenSet::new(None),
++        }
++    }
++
++    pub fn check(&mut self, event: &Event) -> Decision {
++        if self.tag.is_empty() {
++            return Decision::Admit;
++        }
++
++        let author = event.pubkey.to_hex().to_ascii_lowercase();
++        if let Some(event_id) = tagged_event_id(event, &self.tag) {
++            if !self.authors.contains(&author) {
++                return Decision::Drop("opc-event from an unlisted author");
++            }
++            if self.seen.contains(&event_id) {
++                return Decision::Drop("duplicate opc-event");
++            }
++            self.seen.insert(&event_id);
++            return Decision::Admit;
++        }
++
++        if self.ignore_agent_authors && self.agent_authors.contains(&author) {
++            return Decision::Drop("agent-authored chatter");
++        }
++
++        Decision::Admit
++    }
++}
++
++fn tagged_event_id(event: &Event, tag_name: &str) -> Option<String> {
++    event.tags.iter().find_map(|tag| {
++        let parts = tag.as_slice();
++        if parts.first().map(String::as_str) == Some(tag_name) {
++            parts.get(1).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
++        } else {
++            None
++        }
++    })
++}
++
++static GATE: OnceLock<Mutex<Gate>> = OnceLock::new();
++
++/// Called from the dispatch loop, before an event can be queued as a turn.
++pub fn check(event: &Event) -> Decision {
++    let gate = GATE.get_or_init(|| {
++        Mutex::new(Gate::from_env().unwrap_or_else(|| {
++            tracing::debug!("opc event gate disabled (BUZZ_ACP_OPC_EVENT_TAG unset)");
++            Gate::disabled()
++        }))
++    });
++    match gate.lock() {
++        Ok(mut guard) => guard.check(event),
++        Err(poisoned) => poisoned.into_inner().check(event),
++    }
++}
++
++#[cfg(test)]
++mod opc_event_gate_tests {
++    use super::*;
++    use nostr::{EventBuilder, Keys, Kind, Tag};
++
++    fn event(tags: &[&[&str]]) -> Event {
++        let tags = tags
++            .iter()
++            .map(|parts| Tag::parse(parts.iter().map(|p| p.to_string())).expect("tag"))
++            .collect::<Vec<_>>();
++        EventBuilder::new(Kind::Custom(9), "hello")
++            .tags(tags)
++            .sign_with_keys(&Keys::generate())
++            .expect("sign")
++    }
++
++    fn gate(author: &str) -> Gate {
++        let mut g = Gate::disabled();
++        g.tag = DEFAULT_TAG.to_string();
++        g.authors = [author.to_string()].into_iter().collect();
++        g.ignore_agent_authors = true;
++        g.agent_authors = [author.to_string()].into_iter().collect();
++        g
++    }
++
++    #[test]
++    fn tagged_event_from_listed_author_is_admitted_once() {
++        let ev = event(&[&["opc-event", "evt_1"]]);
++        let author = ev.pubkey.to_hex();
++        let mut g = gate(&author);
++
++        assert_eq!(g.check(&ev), Decision::Admit);
++        assert_eq!(g.check(&ev), Decision::Drop("duplicate opc-event"));
++    }
++
++    #[test]
++    fn tagged_event_from_a_stranger_is_dropped() {
++        let ev = event(&[&["opc-event", "evt_2"]]);
++        let mut g = gate("deadbeef");
++
++        assert_eq!(g.check(&ev), Decision::Drop("opc-event from an unlisted author"));
++    }
++
++    #[test]
++    fn untagged_agent_chatter_is_dropped_but_human_messages_are_not() {
++        let ev = event(&[]);
++        let author = ev.pubkey.to_hex();
++        let mut g = gate(&author);
++        assert_eq!(g.check(&ev), Decision::Drop("agent-authored chatter"));
++
++        let human = event(&[]);
++        assert_eq!(g.check(&human), Decision::Admit);
++    }
++
++    #[test]
++    fn a_disabled_gate_admits_everything() {
++        let ev = event(&[&["opc-event", "evt_3"]]);
++        let mut g = Gate::disabled();
++        assert_eq!(g.check(&ev), Decision::Admit);
++        assert_eq!(g.check(&ev), Decision::Admit);
++    }
++}

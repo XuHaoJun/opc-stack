@@ -88,6 +88,27 @@ RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/opc-memory-ingress-meta.pa
         || { cat /tmp/ingress-tests.log; exit 1; }) \
     && grep -Eq "test result: ok\. [1-9][0-9]* passed" /tmp/ingress-tests.log \
     && grep -q '"memoryEvents"' target/opc-memory-ingress-dump.json
+# OPC event gate: two patches, one build-time gate each.
+#
+#  * opc-event-tag-cli   — `buzz messages send --tag K=V`, so the event bridge can
+#    stamp verifiable provenance (the CLI hardcodes its tag set otherwise).
+#  * opc-event-gate     — buzz-acp admits a tagged system event only from a
+#    configured author and only once per event id, and ignores untagged chat from
+#    listed agent identities. Both decisions are about whether a turn happens, so
+#    they cannot live in a prompt.
+#
+# Same contract as the memory-ingress patch above: `--fuzz=0` so upstream drift
+# stops the build, and the unit tests run here because `cargo test <filter>`
+# exits 0 when the filter matches nothing — a stale "0 tests, ok" must not ship.
+COPY opc/patches/opc-event-tag-cli.patch opc/patches/opc-event-gate.patch /tmp/
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/opc-event-tag-cli.patch \
+    && patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/opc-event-gate.patch \
+    && (cargo test --release --locked -p buzz-cli opc_tag_tests > /tmp/opc-tag-tests.log 2>&1 \
+        || { cat /tmp/opc-tag-tests.log; exit 1; }) \
+    && grep -Eq "test result: ok\. [1-9][0-9]* passed" /tmp/opc-tag-tests.log \
+    && (cargo test --release --locked -p buzz-acp opc_event_gate_tests > /tmp/opc-gate-tests.log 2>&1 \
+        || { cat /tmp/opc-gate-tests.log; exit 1; }) \
+    && grep -Eq "test result: ok\. [1-9][0-9]* passed" /tmp/opc-gate-tests.log
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay \
