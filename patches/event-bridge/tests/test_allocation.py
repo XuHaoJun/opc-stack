@@ -1,0 +1,107 @@
+"""Allocation and pause tests.
+
+The hard lock is the operator's "Lab 0%" switch, so the tests pin: only the
+locked track is touched, the lock is re-asserted after a restart, and a resume
+refuses when somebody else changed the holds in the meantime.
+"""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from opc_bridge import config, control, store
+
+NOW = "2026-11-04T02:00:00Z"
+
+
+class FakeAgentApi:
+    def __init__(self):
+        self.rows = [
+            {"id": "a-core", "name": "Fullstack Engineer", "role": "engineer", "status": "idle", "lifecycleState": "ready", "lifecycleHolds": []},
+            {"id": "a-proto", "name": "Prototyper", "role": "general", "status": "idle", "lifecycleState": "ready", "lifecycleHolds": []},
+            {"id": "a-sci", "name": "Scientist", "role": "general", "status": "idle", "lifecycleState": "ready", "lifecycleHolds": []},
+        ]
+        self.patches = []
+
+    def agents(self):
+        return list(self.rows)
+
+    def agent(self, agent_id):
+        return next(a for a in self.rows if a["id"] == agent_id)
+
+    def patch_agent(self, agent_id, body):
+        self.patches.append((agent_id, body))
+        row = self.agent(agent_id)
+        if "status" in body:
+            row["status"] = "paused" if body["status"] == "paused" else "idle"
+            row["lifecycleState"] = "paused" if body["status"] == "paused" else "ready"
+        if "runtimeConfig" in body:
+            row["maxConcurrentRuns"] = body["runtimeConfig"]["heartbeat"]["maxConcurrentRuns"]
+        return row
+
+
+class AllocationTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cfg = config.load({"OPC_DB_PATH": str(Path(tmp.name) / "a.db")})
+        self.store = store.Store(self.cfg.db_path)
+        self.addCleanup(self.store.close)
+        self.pc = FakeAgentApi()
+
+    def apply(self, core, lab, adaptive=False):
+        return control.apply_allocation(
+            self.cfg, self.store, self.pc, core, lab, "ops:test", None, NOW, adaptive=adaptive
+        )
+
+    def test_slot_plan(self):
+        self.assertEqual(control.slot_plan(70, 30, 6, 2), {"core": 4, "lab_per_agent": 1})
+        self.assertEqual(control.slot_plan(100, 0, 6, 2)["lab_per_agent"], 0)
+
+    def test_zero_share_pauses_only_that_track(self):
+        result = self.apply(100, 0)
+        self.assertTrue(result["applied"])
+        self.assertEqual(self.pc.agent("a-core")["status"], "idle")
+        self.assertEqual(self.pc.agent("a-proto")["status"], "paused")
+        self.assertEqual(self.pc.agent("a-sci")["status"], "paused")
+        self.assertEqual(self.store.track_state("lab")["state"], "paused")
+
+    def test_resume_restores_only_ledgered_agents(self):
+        self.apply(100, 0)
+        self.apply(70, 30)
+        self.assertEqual(self.pc.agent("a-proto")["status"], "idle")
+        self.assertTrue(self.store.ledger_get("a-proto")["released_at"])
+
+    def test_resume_refuses_when_a_human_changed_the_holds(self):
+        self.apply(100, 0)
+        self.pc.agent("a-sci")["lifecycleHolds"] = ["manual", "user-hold"]
+        result = self.apply(70, 30)
+        self.assertIn("refused:a-sci", result["changed"])
+        self.assertEqual(self.pc.agent("a-sci")["status"], "paused")
+
+    def test_reconcile_reasserts_an_open_lock(self):
+        self.apply(100, 0)
+        self.pc.agent("a-proto")["status"] = "idle"
+        self.pc.agent("a-proto")["lifecycleState"] = "ready"
+        result = control.reconcile_lock(self.cfg, self.store, self.pc, NOW)
+        self.assertIn("a-proto", result["paused"])
+        self.assertEqual(self.pc.agent("a-proto")["status"], "paused")
+
+    def test_adaptive_does_not_override_an_operator_allocation(self):
+        self.apply(100, 0)
+        result = self.apply(90, 10, adaptive=True)
+        self.assertFalse(result["applied"])
+        self.assertEqual(self.pc.agent("a-proto")["status"], "paused")
+
+    def test_allocation_must_sum_to_one_hundred(self):
+        with self.assertRaises(control.PolicyError):
+            self.apply(70, 20)
+
+    def test_unknown_selector_is_an_error(self):
+        cfg = config.load({"OPC_DB_PATH": str(self.store.path), "OPC_TRACK_LAB_AGENTS": "name:Nobody"})
+        with self.assertRaises(control.PolicyError):
+            control.apply_allocation(cfg, self.store, self.pc, 70, 30, "ops:test", None, NOW)
+
+
+if __name__ == "__main__":
+    unittest.main()

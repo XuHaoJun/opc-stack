@@ -153,3 +153,179 @@ def _json_list(value: Any) -> str:
     import json
 
     return json.dumps(list(value or []))
+
+
+# ── tracks, allocation and pause ─────────────────────────────────────────
+class ForceStopError(Exception):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"force stop failed: {reason}")
+
+
+def resolve_track_agents(pc, selectors: tuple[str, ...]) -> list[dict]:
+    """Exact selectors only (`role:engineer`, `name:Prototyper`).
+
+    Zero or multiple matches is a policy error: guessing which agent belongs to
+    a track is how a lock ends up protecting the wrong workers.
+    """
+    agents = pc.agents()
+    matched: list[dict] = []
+    for selector in selectors:
+        kind, _, value = selector.partition(":")
+        if kind not in ("role", "name") or not value:
+            raise PolicyError(f"bad agent selector {selector!r}")
+        hits = [a for a in agents if str(a.get(kind)) == value]
+        if not hits:
+            raise PolicyError(f"no agent matches {selector}")
+        if len(hits) > 1:
+            raise PolicyError(f"multiple agents match {selector}")
+        matched.append(hits[0])
+    ids = {str(a["id"]) for a in matched}
+    return [a for a in matched if str(a["id"]) in ids]
+
+
+def slot_plan(core: int, lab: int, budget: int, lab_agents: int) -> dict[str, int]:
+    """Slots for a non-zero split. Exact only at zero; this is approximate."""
+    if budget <= 0:
+        raise PolicyError("slot budget must be positive")
+    core_slots = max(1, round(budget * core / 100)) if core > 0 else 0
+    lab_slots = budget - core_slots
+    per_agent = max(1, lab_slots // lab_agents) if (lab_slots > 0 and lab_agents) else 0
+    return {"core": core_slots, "lab_per_agent": per_agent}
+
+
+def _agent_track_of(agent: dict, core_ids: set[str]) -> str:
+    return "core" if str(agent["id"]) in core_ids else "lab"
+
+
+def _wait_settled(pc, agent_id: str, want_paused: bool, tries: int = 20) -> dict:
+    import time
+
+    agent = pc.agent(agent_id)
+    for _ in range(tries):
+        state = str(agent.get("lifecycleState") or "")
+        status = str(agent.get("status") or "")
+        if want_paused and (status == "paused" or state == "paused"):
+            return agent
+        if not want_paused and status in ("idle", "active") and state not in ("pausing", "paused"):
+            return agent
+        time.sleep(0.25)
+        agent = pc.agent(agent_id)
+    return agent
+
+
+def apply_allocation(
+    cfg,
+    store,
+    pc,
+    core: int,
+    lab: int,
+    actor: str,
+    source_event_id: str | None,
+    now_iso: str,
+    adaptive: bool = False,
+) -> dict:
+    import json
+
+    if not (0 <= core <= 100 and 0 <= lab <= 100) or core + lab != 100:
+        raise PolicyError("allocation must be 0..100 and sum to 100")
+
+    priority = policy.PRIORITY["adaptive"] if adaptive else policy.PRIORITY["operator"]
+    if adaptive and store.active_policies(now_iso):
+        operator_rows = [
+            row
+            for row in store.active_policies(now_iso)
+            if int(row["priority"]) == policy.PRIORITY["operator"]
+            and row["key"] in ("allocation.core", "allocation.lab")
+        ]
+        if operator_rows:
+            return {"applied": False, "reason": "operator override wins"}
+
+    for key, value in (("allocation.core", core), ("allocation.lab", lab)):
+        store.insert_policy(
+            {
+                "id": str(uuid.uuid4()),
+                "scope_kind": "company",
+                "scope_id": cfg.company_id or "default",
+                "key": key,
+                "value_json": json.dumps(value),
+                "priority": priority,
+                "created_by": actor,
+                "reason": "allocation",
+                "source_event_id": source_event_id,
+                "created_at": now_iso,
+            }
+        )
+
+    core_agents = resolve_track_agents(pc, cfg.core_selectors)
+    lab_agents = resolve_track_agents(pc, cfg.lab_selectors)
+    core_ids = {str(a["id"]) for a in core_agents}
+    changed: list[str] = []
+
+    for track, agents, share in (("core", core_agents, core), ("lab", lab_agents, lab)):
+        if share == 0:
+            for agent in agents:
+                if str(agent.get("status")) == "paused":
+                    continue
+                store.ledger_put(
+                    str(agent["id"]), track, str(agent.get("status")),
+                    str(agent.get("lifecycleState")), str(agent.get("lifecycleHolds") or []),
+                    source_event_id, now_iso,
+                )
+                pc.patch_agent(str(agent["id"]), {"status": "paused"})
+                _wait_settled(pc, str(agent["id"]), want_paused=True)
+                changed.append(str(agent["id"]))
+            store.set_track_state(track, "paused", "paused", actor, "allocation 0", source_event_id, now_iso)
+        else:
+            for agent in agents:
+                ledger = store.ledger_get(str(agent["id"]))
+                if ledger and not ledger.get("released_at") and str(agent.get("status")) == "paused":
+                    current_holds = str(agent.get("lifecycleHolds") or [])
+                    recorded = ledger.get("original_holds_json") or ""
+                    if recorded and current_holds != recorded:
+                        # Someone (a human) changed the holds while we held the
+                        # lock. Resuming would silently clear their pause.
+                        changed.append(f"refused:{agent['id']}")
+                        continue
+                    pc.patch_agent(str(agent["id"]), {"status": "idle"})
+                    _wait_settled(pc, str(agent["id"]), want_paused=False)
+                    store.ledger_release(str(agent["id"]), now_iso)
+                    changed.append(str(agent["id"]))
+            plan = slot_plan(core, lab, cfg.slot_budget, len(lab_agents))
+            slots = plan["core"] if track == "core" else plan["lab_per_agent"]
+            for agent in agents:
+                metadata = dict(agent.get("metadata") or {})
+                metadata["opcBridgeAllocation"] = {"maxConcurrentRuns": slots}
+                pc.patch_agent(
+                    str(agent["id"]),
+                    {
+                        "runtimeConfig": {"heartbeat": {"maxConcurrentRuns": slots}},
+                        "metadata": metadata,
+                    },
+                )
+            store.set_track_state(track, "running", "running", actor, "allocation", source_event_id, now_iso)
+
+    store.audit(actor, "allocation_applied", f"core={core} lab={lab}", {"changed": changed}, source_event_id)
+    return {"applied": True, "core": core, "lab": lab, "changed": changed}
+
+
+def reconcile_lock(cfg, store, pc, now_iso: str) -> dict:
+    """Re-assert the persisted lock after a restart.
+
+    Only agents this service paused and has not released are touched; an agent
+    paused by a human stays paused and is never resumed by us.
+    """
+    result = {"paused": [], "skipped": []}
+    for ledger in store.ledger_all():
+        if ledger.get("released_at"):
+            continue
+        agent = pc.agent(str(ledger["agent_id"]))
+        if str(agent.get("status")) == "paused":
+            result["skipped"].append(str(ledger["agent_id"]))
+            continue
+        pc.patch_agent(str(ledger["agent_id"]), {"status": "paused"})
+        _wait_settled(pc, str(ledger["agent_id"]), want_paused=True)
+        result["paused"].append(str(ledger["agent_id"]))
+    if result["paused"]:
+        store.audit("bridge", "lock_reasserted", None, result)
+    return result

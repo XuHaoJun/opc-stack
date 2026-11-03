@@ -614,3 +614,45 @@ class Store:
                 (track, desired, state, actor, reason, source_event_id, at),
             )
             self._db.commit()
+
+    # ── agent pause ledger ───────────────────────────────────────────────
+    def ledger_put(self, agent_id: str, track: str, status: str, lifecycle: str, holds: str, event_id: str | None, at: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO agent_pause_ledger(agent_id, track, original_status,"
+                " original_lifecycle_state, original_holds_json, paused_at, paused_by_event)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(agent_id) DO UPDATE SET track=excluded.track,"
+                " original_status=excluded.original_status,"
+                " original_lifecycle_state=excluded.original_lifecycle_state,"
+                " original_holds_json=excluded.original_holds_json,"
+                " paused_at=excluded.paused_at, paused_by_event=excluded.paused_by_event,"
+                " released_at=NULL",
+                (agent_id, track, status, lifecycle, holds, at, event_id),
+            )
+            self._db.commit()
+
+    def ledger_get(self, agent_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM agent_pause_ledger WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def ledger_all(self, track: str | None = None) -> list[dict]:
+        with self._lock:
+            if track is None:
+                rows = self._db.execute("SELECT * FROM agent_pause_ledger").fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM agent_pause_ledger WHERE track = ?", (track,)
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ledger_release(self, agent_id: str, at: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE agent_pause_ledger SET released_at = ? WHERE agent_id = ?",
+                (at, agent_id),
+            )
+            self._db.commit()

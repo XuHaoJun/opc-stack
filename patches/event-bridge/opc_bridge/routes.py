@@ -28,10 +28,12 @@ def _q(params: dict, name: str, default: str = "") -> str:
 class Routes:
     def __init__(self, cfg: config.Config, store, auth: control.OperatorAuth | None = None,
                  backfill: Callable[[str], int] | None = None,
-                 backfill_labels: Callable[[], int] | None = None) -> None:
+                 backfill_labels: Callable[[], int] | None = None,
+                 paperclip=None) -> None:
         self.cfg = cfg
         self.store = store
         self.auth = auth
+        self._paperclip = paperclip
         self._backfill = backfill
         self._backfill_labels = backfill_labels
 
@@ -107,6 +109,26 @@ class Routes:
         self.store.audit(actor, "policy_override_revoked", policy_id, {"changed": changed})
         return 200, {"id": policy_id, "revoked": bool(changed)}
 
+    def allocation(self, params: dict) -> tuple[int, dict]:
+        body = _body(params)
+        actor = self._authorize(body)
+        try:
+            core = int(body.get("core", 0))
+            lab = int(body.get("lab", 0))
+        except (TypeError, ValueError):
+            return 400, {"error": "core and lab must be integers"}
+        from . import control as control_mod
+
+        try:
+            result = control_mod.apply_allocation(
+                self.cfg, self.store, self._paperclip, core, lab, actor,
+                body.get("authorization_event_id"), self._now(),
+                adaptive=bool(body.get("adaptive")),
+            )
+        except control.PolicyError as exc:
+            return 400, {"error": str(exc)}
+        return 200, result
+
     def backfill(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
         self._authorize(body)
@@ -147,8 +169,8 @@ class _Forbidden(Exception):
     pass
 
 
-def build(cfg: config.Config, store, auth=None, backfill=None, backfill_labels=None) -> dict[str, Handler]:
-    routes = Routes(cfg, store, auth, backfill, backfill_labels)
+def build(cfg: config.Config, store, auth=None, backfill=None, backfill_labels=None, paperclip=None) -> dict[str, Handler]:
+    routes = Routes(cfg, store, auth, backfill, backfill_labels, paperclip)
     table: dict[str, Handler] = {
         "GET /v1/policy/effective": routes.effective,
         "GET /v1/mandates": routes.mandates,
@@ -158,6 +180,7 @@ def build(cfg: config.Config, store, auth=None, backfill=None, backfill_labels=N
         "POST /v1/mandates/revoke": routes.revoke,
         "POST /v1/control/override": routes.override,
         "POST /v1/control/override/revoke": routes.override_revoke,
+        "POST /v1/control/allocation": routes.allocation,
         "POST /v1/control/backfill": routes.backfill,
         "POST /v1/control/backfill-labels": routes.backfill_labels,
     }

@@ -113,8 +113,13 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"WARNING control channel unavailable ({exc.kind}); mutations disabled")
 
     table = routes.build(
-        cfg, s, auth, backfill=p.backfill, backfill_labels=p.backfill_labels
+        cfg, s, auth, backfill=p.backfill, backfill_labels=p.backfill_labels, paperclip=pc
     )
+
+    try:
+        control.reconcile_lock(cfg, s, pc, config.iso(config.now(cfg)))
+    except Exception:
+        _log("lock re-assertion failed:\n" + traceback.format_exc())
 
     stop = threading.Event()
     server = api.serve(api.Api(cfg, s, table))

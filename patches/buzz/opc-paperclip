@@ -245,8 +245,17 @@ concurrency_show_json() {
     case "$_current" in
         ''|*[!0-9]*) die "agent has no valid runtimeConfig heartbeat maxConcurrentRuns" 4 ;;
     esac
+    # A third source: the event bridge writes its adaptive slot plan under its
+    # own metadata key. Without this branch, the first adaptive write would look
+    # like an operator_override (current != marker) and silently freeze
+    # adaptation forever.
+    _bridge="$(printf '%s' "$_agent" | jq -r \
+        '.metadata.opcBridgeAllocation.maxConcurrentRuns // empty')"
     _marker="$(printf '%s' "$_agent" | jq -r \
         '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns // empty')"
+    if [ -n "$_bridge" ] && [ "$_bridge" = "$_current" ]; then
+        _source=bridge_adaptive
+    else
     case "$_marker" in
         ''|"$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT")
             if [ "$_current" = "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" ]; then
@@ -257,6 +266,7 @@ concurrency_show_json() {
             ;;
         *) _source=operator_override ;;
     esac
+    fi
     jq -nc --argjson agent "$_agent" \
         --argjson max "$_current" \
         --argjson managed "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" \
