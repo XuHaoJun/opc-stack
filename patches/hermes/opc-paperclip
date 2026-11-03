@@ -175,6 +175,39 @@ agent_by_role() {
     esac
 }
 
+# ── track/style labels ──────────────────────────────────────────────────
+# OPC policy reads labels, never prose. These two functions are the only writer
+# of the four labels; the description markers are inputs for humans.
+label_marker() { # <description-file> <Key> → value or empty
+    sed -n "s/^[[:space:]]*$2[[:space:]]*:[[:space:]]*\([A-Za-z_-]*\).*/\1/p" "$1" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]'
+}
+
+ensure_ticket_labels_json() { # <track> <style> → JSON array of label ids
+    _labels="$(api_request GET "/companies/$(company_id)/labels")" ||
+        die "failed to list Paperclip labels" 4
+    printf '%s' "$_labels" | jq -e 'type == "array"' >/dev/null 2>&1 ||
+        die "Paperclip labels response is not an array" 4
+    _wanted="[\"track:$1\",\"style:$2\"]"
+    _ids="["
+    for _name in "track:$1" "style:$2"; do
+        _id="$(printf '%s' "$_labels" | jq -r --arg n "$_name" '[.[] | select(.name == $n)][0].id // empty')"
+        if [ -z "$_id" ]; then
+            case "$_name" in
+                track:core) _color="#2563eb" ;;
+                track:lab) _color="#7c3aed" ;;
+                style:blueprint) _color="#0f766e" ;;
+                *) _color="#b45309" ;;
+            esac
+            _id="$(api_request POST "/companies/$(company_id)/labels" \
+                "$(jq -nc --arg n "$_name" --arg c "$_color" '{name:$n,color:$c}')" \
+                | jq -r '.id // empty')" || die "failed to create label $_name" 4
+            [ -n "$_id" ] || die "Paperclip label create returned no id for $_name" 4
+        fi
+        _ids="${_ids}${_ids:+,}\"$_id\""
+    done
+    printf '%s]' "$_ids"
+}
+
 validate_concurrency_max() {
     _max="$1"
     if ! jq -en --arg value "$_max" \
@@ -926,13 +959,22 @@ prototype_ticket_create() {
     _agent="$(prototyper_agent)"
     _agent_id="$(printf '%s' "$_agent" | jq -r '.id // empty')"
     [ -n "$_agent_id" ] || die "Prototyper agent has no id" 4
+    _track="$(label_marker "$_description_file" Track)"
+    [ -n "$_track" ] || _track=lab
+    _style="$(label_marker "$_description_file" Style)"
+    [ -n "$_style" ] || _style=exploration
+    case "$_track" in core|lab) ;; *) die "unknown Track: $_track (core|lab)" 2 ;; esac
+    case "$_style" in blueprint|exploration) ;; *) die "unknown Style: $_style (blueprint|exploration)" 2 ;; esac
+    _labels_json="$(ensure_ticket_labels_json "$_track" "$_style")" || exit $?
     _payload="$(jq -nc --rawfile description "$_description_file" \
         --arg title "$_title" --arg priority "$_priority" --arg agent "$_agent_id" \
         --arg project "$_project_id" --arg workspace "$_workspace_id" \
         --arg idempotency "$_idempotency_key" --arg terminal_title "Prototype: $_name" \
-        --argjson terminal_epoch "$_terminal_epoch" --argjson allow_duplicate "$_allow_duplicate" '
+        --argjson terminal_epoch "$_terminal_epoch" --argjson allow_duplicate "$_allow_duplicate" \
+        --argjson labels "$_labels_json" '
         {title:(if $terminal_epoch == 1 then $terminal_title else $title end),
-         description:$description,assigneeAgentId:$agent,allowDuplicate:$allow_duplicate}
+         description:$description,assigneeAgentId:$agent,allowDuplicate:$allow_duplicate,
+         labelIds:$labels
         | if $priority == "" then . else .priority=$priority end
         | if $project == "" then . else .projectId=$project | .projectWorkspaceId=$workspace end
         | if $idempotency == "" then . else .idempotencyKey=$idempotency end
@@ -970,6 +1012,12 @@ active_engineer() {
         1) printf '%s' "$_matches" | jq -c '.[0]' ;;
         *) die "multiple active Paperclip agents match role engineer" 3 ;;
     esac
+}
+
+cmd_labels_ensure() {
+    _first="$(ensure_ticket_labels_json core blueprint)" || exit $?
+    _second="$(ensure_ticket_labels_json lab exploration)" || exit $?
+    jq -n --argjson a "$_first" --argjson b "$_second" '$a + $b | unique'
 }
 
 cmd_engineering_ticket_create() {
@@ -1025,13 +1073,20 @@ cmd_engineering_ticket_create() {
         agent_default) _settings="$(jq -nc '{mode:"agent_default",workspaceStrategy:{type:"adapter_managed"}}')" ;;
         reuse_existing) _settings="$(jq -nc '{mode:"reuse_existing"}')" ;;
     esac
+    _track="$(label_marker "$_description_file" Track)"
+    [ -n "$_track" ] || _track=core
+    _style="$(label_marker "$_description_file" Style)"
+    [ -n "$_style" ] || _style=blueprint
+    case "$_track" in core|lab) ;; *) die "unknown Track: $_track (core|lab)" 2 ;; esac
+    case "$_style" in blueprint|exploration) ;; *) die "unknown Style: $_style (blueprint|exploration)" 2 ;; esac
+    _labels_json="$(ensure_ticket_labels_json "$_track" "$_style")" || exit $?
     _payload="$(jq -nc --rawfile description "$_description_file" \
         --arg title "$_title" --arg priority "$_priority" --arg status "$_status" \
         --arg mode "$_mode" --arg execution_workspace_id "$_execution_workspace_id" \
         --arg agent "$_agent_id" --arg project "$_project_id" --arg workspace "$_workspace_id" \
-        --argjson settings "$_settings" '
+        --argjson settings "$_settings" --argjson labels "$_labels_json" '
         {title:$title,description:$description,assigneeAgentId:$agent,
-         projectId:$project,projectWorkspaceId:$workspace,
+         projectId:$project,projectWorkspaceId:$workspace,labelIds:$labels,
          executionWorkspacePreference:$mode,
          executionWorkspaceSettings:$settings}
         | if $priority == "" then . else .priority=$priority end
@@ -1112,6 +1167,10 @@ main() {
             [ "${1-}" = create ] || die "usage: opc-paperclip prototype-ticket create ..." 2
             shift
             prototype_ticket_create "$@"
+            ;;
+        labels)
+            [ "${1-}" = ensure ] || die "usage: opc-paperclip labels ensure" 2
+            cmd_labels_ensure
             ;;
         engineering-ticket)
             shift

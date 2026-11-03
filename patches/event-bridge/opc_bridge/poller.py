@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Mapping
 
-from . import config, events
+from . import config, events, labels
 from .config import iso, parse_iso  # re-exported: tests and callers use poller.iso
 
 POLL_OVERLAP_SECONDS = 10.0
@@ -110,6 +110,8 @@ class Poller:
         self._clock = clock or (lambda: config.now(cfg))
         self.log = log
         self._comments_cache: dict[str, list[dict]] = {}
+        self._label_names: dict[str, str] | None = None
+        self._agents_by_id: dict[str, dict] | None = None
 
     # ── public API ───────────────────────────────────────────────────────
     def bootstrap(self) -> None:
@@ -138,6 +140,41 @@ class Poller:
         now = self._clock() if now is None else now
         since = iso(now - self.cfg.reconcile_lookback_hours * 3600.0)
         return self._recover(since, now)
+
+    def issue_track(self, issue: Mapping[str, Any]) -> str:
+        """Track from labels, falling back to the assignee (legacy tickets)."""
+        names = {self._label_names_by_id().get(str(i), "") for i in (issue.get("labelIds") or [])}
+        agent = self._agents_map().get(str(issue.get("assigneeAgentId") or ""))
+        return labels.track_of([name for name in names if name], agent)
+
+    def backfill_labels(self) -> int:
+        """Label open tickets that predate the track dimension.
+
+        Idempotent and driven by the assignee, because the alternative — parsing
+        prose — makes an untrusted input part of the policy resolver.
+        """
+        ensured = labels.ensure_labels(self.pc)
+        self._label_names = {label_id: name for name, label_id in ensured.items()}
+        changed = 0
+        for status in _OPEN_STATUSES:
+            for issue in self.pc.issues_with_status(status, limit=PAGE_SIZE):
+                current = [str(i) for i in (issue.get("labelIds") or [])]
+                if any(i in ensured.values() for i in current):
+                    continue
+                agent = self._agents_map().get(str(issue.get("assigneeAgentId") or ""))
+                track = labels.track_of(set(), agent)
+                if track == "unknown":
+                    self._policy_violation(issue, "unlabeled_track")
+                    continue
+                desired = labels.labels_for_markers(
+                    {"lane": "engineering" if track == "core" else "prototype"}
+                )
+                ids = [ensured[name] for name in desired if name in ensured]
+                if not ids:
+                    continue
+                self.pc.patch_issue(str(issue["id"]), {"labelIds": current + ids})
+                changed += 1
+        return changed
 
     def backfill(self, since_iso: str, now: float | None = None) -> int:
         now = self._clock() if now is None else now
@@ -228,6 +265,42 @@ class Poller:
         seen_at = str(issue.get("createdAt") or issue.get("updatedAt") or "")
         return event_type if seen_at and seen_at > watermark else None
 
+    def _policy_violation(self, issue: Mapping[str, Any], reason: str) -> None:
+        issue_id = str(issue["id"])
+        now = self._clock()
+        event = events.Event(
+            schema_version=events.SCHEMA_VERSION,
+            event_id=events.health_event_id(issue_id, "policy_" + reason, 0),
+            event_type=events.POLICY_VIOLATION,
+            source="opc",
+            company_id=self._company(),
+            project_id=issue.get("projectId"),
+            issue_id=issue_id,
+            issue_identifier=issue.get("identifier"),
+            run_id=None,
+            status=reason,
+            occurred_at=str(issue.get("updatedAt") or iso(now)),
+            observed_at=iso(now),
+            artifact_url=None,
+            origin_channel_id=self.store.get_origin(issue_id) or (None, None)[0],
+            origin_event_id=(self.store.get_origin(issue_id) or (None, None))[1],
+            correlation_id=f"{issue.get('identifier') or issue_id}-{reason}",
+            track="unknown",
+            issue_title=issue.get("title"),
+        )
+        self.store.enqueue_event(event, now)
+
+    def _label_names_by_id(self) -> dict[str, str]:
+        if self._label_names is None:
+            ensured = labels.ensure_labels(self.pc)
+            self._label_names = {label_id: name for name, label_id in ensured.items()}
+        return self._label_names
+
+    def _agents_map(self) -> dict[str, dict]:
+        if self._agents_by_id is None:
+            self._agents_by_id = {str(a.get("id")): a for a in self.pc.agents()}
+        return self._agents_by_id
+
     def _observe_runs(self, now: float) -> int:
         """A run that failed leaves the issue open; that is its own event.
 
@@ -275,7 +348,7 @@ class Poller:
             origin_channel_id=channel,
             origin_event_id=anchor,
             correlation_id=f"{identifier or issue_id}-{status}",
-            track=str(issue.get("track") or "unknown"),
+            track=self.issue_track(issue),
             issue_title=issue.get("title"),
         )
 
@@ -303,7 +376,7 @@ class Poller:
             origin_channel_id=channel,
             origin_event_id=anchor,
             correlation_id=f"{identifier or issue_id}-run-{str(run['id'])[:8]}",
-            track=str(issue.get("track") or "unknown"),
+            track=self.issue_track(issue),
             issue_title=issue.get("title"),
         )
 

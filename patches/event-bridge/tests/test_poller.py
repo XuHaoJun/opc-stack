@@ -19,6 +19,9 @@ class StubPaperclip:
         self.comments_by_issue: dict[str, list[dict]] = {}
         self.runs_by_issue: dict[str, list[dict]] = {}
         self.comment_calls: list[str] = []
+        self.label_rows: list[dict] = []
+        self.agent_rows: list[dict] = []
+        self.patched_issues: list[tuple] = []
 
     def issues_updated_since(self, iso, limit=100, offset=0):
         rows = [i for i in self.issues if (i.get("updatedAt") or "") > iso]
@@ -36,6 +39,21 @@ class StubPaperclip:
 
     def company(self):
         return "c1"
+
+    def labels(self):
+        return self.label_rows
+
+    def create_label(self, name, color):
+        row = {"id": "label-" + name, "name": name}
+        self.label_rows.append(row)
+        return row
+
+    def patch_issue(self, issue_id, body):
+        self.patched_issues.append((issue_id, dict(body)))
+        return {"id": issue_id}
+
+    def agents(self):
+        return self.agent_rows
 
 
 def _issue(issue_id="i1", identifier="OPC-1", status="todo", updated="2026-11-04T00:00:00Z", **extra):
@@ -210,6 +228,43 @@ class PollerTest(unittest.TestCase):
         self.assertEqual(self.p.backfill("2026-11-01T00:00:00Z"), 0)
 
     # ── artifacts ────────────────────────────────────────────────────────
+    # ── tracks ───────────────────────────────────────────────────────────
+    def test_track_comes_from_the_label_before_the_assignee(self):
+        self.pc.agents = lambda: [{"id": "a-eng", "name": "Fullstack Engineer", "role": "engineer"}]
+        self.pc.issues = [
+            _issue(
+                "i1",
+                status="in_progress",
+                updated="2026-11-04T00:00:00Z",
+                labelIds=["label-track:lab"],
+                assigneeAgentId="a-eng",
+            )
+        ]
+        self.p.bootstrap()
+        self.assertEqual(self.p.issue_track(self.pc.issues[0]), "lab")
+
+    def test_backfill_labels_an_unlabeled_legacy_ticket_from_its_assignee(self):
+        self.pc.agent_rows = [{"id": "a-eng", "name": "Fullstack Engineer", "role": "engineer"}]
+        self.pc.issues = [_issue("i1", status="todo", updated="2026-11-04T00:00:00Z", assigneeAgentId="a-eng")]
+        self.p.bootstrap()
+
+        changed = self.p.backfill_labels()
+
+        self.assertEqual(changed, 1)
+        issue_id, body = self.pc.patched_issues[0]
+        self.assertEqual(issue_id, "i1")
+        self.assertIn("label-track:core", body["labelIds"])
+
+    def test_unknown_track_emits_one_violation(self):
+        self.pc.issues = [_issue("i2", status="todo", updated="2026-11-04T00:00:00Z")]
+        self.p.bootstrap()
+
+        self.p.backfill_labels()
+        self.p.backfill_labels()
+
+        self.assertEqual(self.store.count_deliveries(), 1)
+        self.assertEqual(self.store.event_for_issue("i2")["event_type"], "opc.policy.violation")
+
     def test_artifact_prefers_a_port_url_and_skips_forge_subpaths(self):
         comments = [
             {"body": "see https://github.com/acme/app/pull/12", "authorType": "agent"},
