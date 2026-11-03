@@ -129,6 +129,23 @@ class Routes:
             return 400, {"error": str(exc)}
         return 200, result
 
+    def force_stop(self, params: dict) -> tuple[int, dict]:
+        body = _body(params)
+        actor = self._authorize(body)
+        run_id = str(body.get("run_id") or "")
+        if not run_id:
+            return 400, {"error": "run_id is required"}
+        from . import control as control_mod
+
+        try:
+            result = control_mod.force_stop(
+                self._paperclip, run_id, actor, body.get("authorization_event_id"),
+                self.store, self._now(),
+            )
+        except control.ForceStopError as exc:
+            return (404 if exc.reason == "not_found" else 409), {"error": exc.reason}
+        return 200, result
+
     def backfill(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
         self._authorize(body)
@@ -181,6 +198,7 @@ def build(cfg: config.Config, store, auth=None, backfill=None, backfill_labels=N
         "POST /v1/control/override": routes.override,
         "POST /v1/control/override/revoke": routes.override_revoke,
         "POST /v1/control/allocation": routes.allocation,
+        "POST /v1/control/force-stop": routes.force_stop,
         "POST /v1/control/backfill": routes.backfill,
         "POST /v1/control/backfill-labels": routes.backfill_labels,
     }

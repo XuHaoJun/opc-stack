@@ -77,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
     override.add_argument("--reason", default="")
     _auth_args(override)
 
+    stop = sub.add_parser("force-stop", help="cancel one run (owner-signed)")
+    stop.add_argument("--run", required=True)
+    _auth_args(stop)
+
     backfill = sub.add_parser("backfill", help="deliver history since an ISO timestamp")
     backfill.add_argument("--since", required=True)
     _auth_args(backfill)
@@ -129,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
             **proof,
         }
         status, body = _call(cfg, "POST", "/v1/control/override", payload)
+    elif args.cmd == "force-stop":
+        status, body = _call(cfg, "POST", "/v1/control/force-stop", {"run_id": args.run, **proof})
     elif args.cmd == "backfill":
         status, body = _call(cfg, "POST", "/v1/control/backfill", {"since": args.since, **proof})
     elif args.cmd == "backfill-labels":

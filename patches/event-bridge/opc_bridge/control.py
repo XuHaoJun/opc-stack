@@ -347,3 +347,46 @@ def reconcile_lock(cfg, store, pc, now_iso: str) -> dict:
     if result["paused"]:
         store.audit("bridge", "lock_reasserted", None, result)
     return result
+
+
+_CANCELLABLE = {"queued", "scheduled_retry", "running"}
+
+
+def force_stop(pc, run_id: str, actor: str, source_event_id: str | None, store, now, tries: int = 30) -> dict:
+    """Cancel exactly one run and prove it.
+
+    Nothing else is touched: no other run, no workspace, no agent. A run that
+    is already terminal is a refusal, not a silent success.
+    """
+    import time
+
+    run = pc.run(run_id)
+    status = str(run.get("status") or "")
+    if not run or status not in _CANCELLABLE:
+        raise ForceStopError("not_cancellable" if run else "not_found")
+
+    pc.cancel_run(run_id)
+
+    final = run
+    for _ in range(tries):
+        final = pc.run(run_id)
+        if str(final.get("status")) not in _CANCELLABLE:
+            break
+        time.sleep(0.5)
+
+    if str(final.get("status")) not in ("cancelled", "interrupted"):
+        raise ForceStopError("timeout")
+
+    issue_id = final.get("issueId") or run.get("issueId")
+    if issue_id:
+        try:
+            pc._request(
+                "POST",
+                f"/api/issues/{issue_id}/comments",
+                {"body": f"OPC_CONTROL: force-stop run={run_id} by={actor}"},
+            )
+        except Exception:
+            pass
+
+    store.audit(actor, "force_stop", run_id, {"status": str(final.get("status"))}, source_event_id)
+    return {"run_id": run_id, "status": str(final.get("status")), "issue_id": issue_id}
