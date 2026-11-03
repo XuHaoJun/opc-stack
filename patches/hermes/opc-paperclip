@@ -182,13 +182,35 @@ label_marker() { # <description-file> <Key> → value or empty
     sed -n "s/^[[:space:]]*$2[[:space:]]*:[[:space:]]*\([A-Za-z_-]*\).*/\1/p" "$1" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]'
 }
 
+# ── admission gate ──────────────────────────────────────────────────────
+# A locked track must refuse new work before anything is created. This is the
+# deterministic half of the policy; the other half is Paperclip's own agent
+# pause, which is what actually stops an execution from starting.
+admission_check() { # <track>
+    [ -n "${OPC_API_URL:-}" ] || return 0
+    _key="${OPC_API_KEY:-}"
+    if [ -z "$_key" ]; then
+        for _f in "${HERMES_HOME:-/opt/data}/.opc-control.key" /keys/opc-control.key; do
+            if [ -r "$_f" ]; then _key="$(cat "$_f")"; break; fi
+        done
+    fi
+    [ -n "$_key" ] || die "no OPC control key available — cannot verify admission" 4
+    _resp="$(curl -fsS --max-time 10 -H "Authorization: Bearer $_key" \
+        "$OPC_API_URL/v1/policy/effective?track=$1" 2>/dev/null)" ||
+        die "OPC policy lookup failed ($OPC_API_URL)" 4
+    _locked="$(printf '%s' "$_resp" | jq -r '.values.track_locked // false')" ||
+        die "OPC policy response is not JSON" 4
+    [ "$_locked" != "true" ] ||
+        die "track $1 is locked by the operator — no new ticket admitted (unlock it first)" 3
+}
+
 ensure_ticket_labels_json() { # <track> <style> → JSON array of label ids
     _labels="$(api_request GET "/companies/$(company_id)/labels")" ||
         die "failed to list Paperclip labels" 4
     printf '%s' "$_labels" | jq -e 'type == "array"' >/dev/null 2>&1 ||
         die "Paperclip labels response is not an array" 4
     _wanted="[\"track:$1\",\"style:$2\"]"
-    _ids="["
+    _ids=""
     for _name in "track:$1" "style:$2"; do
         _id="$(printf '%s' "$_labels" | jq -r --arg n "$_name" '[.[] | select(.name == $n)][0].id // empty')"
         if [ -z "$_id" ]; then
@@ -205,7 +227,7 @@ ensure_ticket_labels_json() { # <track> <style> → JSON array of label ids
         fi
         _ids="${_ids}${_ids:+,}\"$_id\""
     done
-    printf '%s]' "$_ids"
+    printf '[%s]' "$_ids"
 }
 
 validate_concurrency_max() {
@@ -897,6 +919,9 @@ prototype_ticket_create() {
     _first_line="$(sed -n '1p' "$_description_file")"
     [ "$_first_line" = "Prototype: $_name" ] ||
         die "description must start with exactly 'Prototype: $_name'" 2
+    _track="$(label_marker "$_description_file" Track)"
+    [ -n "$_track" ] || _track=lab
+    admission_check "$_track" || exit $?
 
     _company="$(company_id)"
     _matches="$(prototype_project_matches "$_name")" ||
@@ -1055,6 +1080,9 @@ cmd_engineering_ticket_create() {
     _description_file="$(mktemp "${TMPDIR:-/tmp}/opc-paperclip-description.XXXXXX")" ||
         die "failed to allocate description buffer" 4
     cat >"$_description_file"
+    _track="$(label_marker "$_description_file" Track)"
+    [ -n "$_track" ] || _track=core
+    admission_check "$_track" || exit $?
     _canonical="$(canonical_repo_json "$_repo")"
     _project="$(engineering_project "$_canonical")"
     _project_id="$(printf '%s' "$_project" | jq -r '.id // empty')"
@@ -1169,7 +1197,9 @@ main() {
             prototype_ticket_create "$@"
             ;;
         labels)
+            shift
             [ "${1-}" = ensure ] || die "usage: opc-paperclip labels ensure" 2
+            shift
             cmd_labels_ensure
             ;;
         engineering-ticket)
