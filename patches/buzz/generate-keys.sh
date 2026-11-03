@@ -33,10 +33,30 @@ gen() {
     echo "[keys] $name: generated"
 }
 
+# Random bearer token for the OPC control/read API. Not a Nostr key: it
+# authenticates HTTP calls to event-bridge, never a relay write.
+gen_token() {
+    name="$1"
+    if [ -s "$KEYS/$name.key" ]; then
+        echo "[keys] $name: already present"
+        return 0
+    fi
+    tmp="$KEYS/.$name.key.$$"
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$KEYS/$name.key"
+    echo "[keys] $name: generated"
+}
+
 gen relay
 gen agent
 # Expert agents get their OWN Nostr identity. Sharing agent.nsec would make
 # every expert post under the chief of staff's name — the spec calls this out
 # as a hard boundary, not a nicety.
 gen scientist
+# The notifier is a service identity, not an agent: it has its own key so system
+# notifications stop being signed by the chief of staff, and it is never given
+# another identity's key. /keys stays the single producer of this file.
+gen paperclip
+gen_token opc-control
 echo "[keys] ready"

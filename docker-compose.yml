@@ -342,6 +342,11 @@ services:
       # desktop must sign in with this key to decrypt. Entrypoint falls back
       # to /keys/relay.pub when unset.
       BUZZ_ACP_AGENT_OWNER: ${BUZZ_ACP_AGENT_OWNER:-}
+      # OPC event loop: the bridge's read/control API, and the deterministic
+      # wake gate. The author lists are computed by the entrypoint from the keys
+      # volume, so a new agent identity is covered without editing compose.
+      OPC_API_URL: http://event-bridge:8645
+      BUZZ_ACP_OPC_EVENT_TAG: ${BUZZ_ACP_OPC_EVENT_TAG:-opc-event}
       # NIP-OA owner attestation: lets the desktop verify this relay agent is
       # owned by the current human and ingest its owner-scoped ACP frames.
       # Contains only a public signature; the owner's private key is never

@@ -37,8 +37,16 @@ unset BUZZ_AUTH_TAG || true
 # Identities this loop maintains: <key-basename>|<kind:0 name>|<about>.
 # The front door is the chief of staff; the rest are expert agents that live
 # as hermes profiles in the gateway container and post their own findings.
-AGENTS="agent|hermes|OPC front-door agent (hermes + opencode go)
-scientist|scientist|OPC research agent (exploratory experiments)"
+#
+# Format: <key-basename>|<kind:0 name>|<about>|<surface>
+#   full    — kind:0 + kind:10100 + channel membership (agents the desktop lists)
+#   profile — kind:0 only, no directory entry, no channel joins. The Paperclip
+#             notifier posts system events; it must never be discoverable as an
+#             ACP agent (buzz-acp subscribes only to channels an identity is a
+#             member of, so no membership is also what keeps it inert).
+AGENTS="agent|hermes|OPC front-door agent (hermes + opencode go)|full
+scientist|scientist|OPC research agent (exploratory experiments)|full
+paperclip|paperclip|Paperclip work events and notifications|profile"
 
 log() { echo "[register-agent] $*"; }
 
@@ -72,8 +80,8 @@ log "relay ready: $RELAY_API"
 #    kind:0 / kind:10100 / channel membership while the container keeps
 #    running, this loop believes it already published and those surfaces stay
 #    gone until the container is recreated (or the marker deleted by hand).
-publish_surfaces() { # <who> <name> <about> <nsec> <auth-tag>
-    _who="$1"; _name="$2"; _about="$3"; _nsec="$4"; _tag="${5:-}"
+publish_surfaces() { # <who> <name> <about> <nsec> <auth-tag> <surface>
+    _who="$1"; _name="$2"; _about="$3"; _nsec="$4"; _tag="${5:-}"; _surface="${6:-full}"
     if [ ! -f "/tmp/reg-$_who-meta" ]; then
         if BUZZ_AUTH_TAG="$_tag" buzz --relay "$RELAY_API" --private-key "$_nsec" users set-profile \
             --name "$_name" --about "$_about" >/dev/null 2>&1; then
@@ -83,6 +91,7 @@ publish_surfaces() { # <who> <name> <about> <nsec> <auth-tag>
             log "$_who: kind 0 profile publish failed — will retry"
         fi
     fi
+    [ "$_surface" = "full" ] || return 0
     if [ ! -f "/tmp/reg-$_who-dir" ]; then
         if BUZZ_AUTH_TAG="$_tag" buzz --relay "$RELAY_API" --private-key "$_nsec" \
             channels set-add-policy --policy anyone >/dev/null 2>&1; then
@@ -95,7 +104,7 @@ publish_surfaces() { # <who> <name> <about> <nsec> <auth-tag>
 }
 
 while true; do
-    printf '%s\n' "$AGENTS" | while IFS='|' read -r who name about; do
+    printf '%s\n' "$AGENTS" | while IFS='|' read -r who name about surface; do
         [ -n "$who" ] || continue
         nsec_file="$BUZZ_KEYS_DIR/$who.nsec"
         pub_file="$BUZZ_KEYS_DIR/$who.pub"
@@ -107,9 +116,12 @@ while true; do
         who_tag=""
         [ "$who" = "agent" ] && who_tag="$OWNER_AUTH_TAG"
 
-        publish_surfaces "$who" "$name" "$about" "$nsec" "$who_tag"
+        publish_surfaces "$who" "$name" "$about" "$nsec" "$who_tag" "${surface:-full}"
 
         # Join every visible channel this identity is not already in.
+        # Profile-only identities never join channels: membership is what makes
+        # buzz-acp discover an identity as an agent.
+        [ "${surface:-full}" = "full" ] || continue
         all_ids="$(BUZZ_AUTH_TAG="$who_tag" buzz --relay "$RELAY_API" --private-key "$nsec" channels list 2>/dev/null | jq -r '.[].channel_id' 2>/dev/null || true)"
         my_ids="$(BUZZ_AUTH_TAG="$who_tag" buzz --relay "$RELAY_API" --private-key "$nsec" channels list --member 2>/dev/null | jq -r '.[].channel_id' 2>/dev/null || true)"
         [ -n "$all_ids" ] || continue
