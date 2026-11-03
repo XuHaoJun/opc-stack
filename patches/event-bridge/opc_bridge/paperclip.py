@@ -71,6 +71,7 @@ class Paperclip:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
+            exc.close()
             raise PaperclipError(exc.code, detail) from None
         except urllib.error.URLError as exc:
             raise PaperclipError(0, f"unreachable: {exc.reason}") from None

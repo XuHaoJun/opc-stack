@@ -22,6 +22,7 @@ def _event(**overrides):
         project_id="p1",
         issue_id="i1",
         issue_identifier="OPC-7",
+        issue_title="Build the thing",
         run_id=None,
         status="done",
         occurred_at="2026-11-04T02:00:00Z",
@@ -121,6 +122,11 @@ class RenderTest(unittest.TestCase):
         msg = events.render_message(evt, {"title": "t", "identifier": "OPC-7"}, "")
         self.assertIn("OPC-7", msg)
         self.assertNotIn("/issues/", msg)
+
+    def test_message_can_carry_the_title_without_a_live_issue_read(self):
+        evt = _event()
+        msg = events.render_message(evt, {}, "")
+        self.assertIn("Build the thing", msg)
 
     def test_tags_are_stable_and_scoped(self):
         evt = _event()

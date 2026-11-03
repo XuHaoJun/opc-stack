@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import time
+import datetime as _dt
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -139,3 +140,16 @@ def load(env: Mapping[str, str] | None = None) -> Config:
 def now(cfg: Config) -> float:
     """Unix seconds. `OPC_TEST_NOW` pins it for deterministic threshold tests."""
     return cfg.test_now if cfg.test_now is not None else time.time()
+
+
+def iso(ts: float) -> str:
+    """Unix seconds -> the ISO-8601 form Paperclip uses (millisecond, Z)."""
+    return (
+        _dt.datetime.fromtimestamp(ts, _dt.timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def parse_iso(value: str) -> float:
+    return _dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()

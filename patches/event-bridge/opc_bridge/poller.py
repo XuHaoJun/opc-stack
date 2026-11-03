@@ -19,11 +19,11 @@ and backfill over the same rows can never deliver twice.
 
 from __future__ import annotations
 
-import datetime as _dt
 import re
 from typing import Any, Callable, Mapping
 
 from . import config, events
+from .config import iso, parse_iso  # re-exported: tests and callers use poller.iso
 
 POLL_OVERLAP_SECONDS = 10.0
 PAGE_SIZE = 100
@@ -42,18 +42,6 @@ _ANCHOR_MARKER = re.compile(r"BUZZ_EVENT:\s*([0-9a-fA-F]{16,64})")
 _PORT_URL = re.compile(r"https?://[A-Za-z0-9._-]+:[0-9]{2,5}(?:/[^\s)\"'`<>]*)?" )
 _GITHUB_REPO = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _FORGE_HOSTS = {"github.com", "gitlab.com", "bitbucket.org"}
-
-
-def iso(ts: float) -> str:
-    return (
-        _dt.datetime.fromtimestamp(ts, _dt.timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
-
-
-def parse_iso(value: str) -> float:
-    return _dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 def _trusted_marker_author(comment: Mapping[str, Any]) -> bool:
@@ -267,6 +255,7 @@ class Poller:
             origin_event_id=anchor,
             correlation_id=f"{identifier or issue_id}-{status}",
             track=str(issue.get("track") or "unknown"),
+            issue_title=issue.get("title"),
         )
 
     def _run_event(self, issue: Mapping[str, Any], run: Mapping[str, Any], now: float):
@@ -294,6 +283,7 @@ class Poller:
             origin_event_id=anchor,
             correlation_id=f"{identifier or issue_id}-run-{str(run['id'])[:8]}",
             track=str(issue.get("track") or "unknown"),
+            issue_title=issue.get("title"),
         )
 
     # ── recovery ─────────────────────────────────────────────────────────

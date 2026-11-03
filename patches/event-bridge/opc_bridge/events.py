@@ -71,6 +71,7 @@ class Event:
     origin_event_id: str | None
     correlation_id: str
     track: str
+    issue_title: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -141,7 +142,7 @@ def classify_issue(
 
 def render_message(event: Event, issue: Mapping[str, Any], public_url: str) -> str:
     identifier = str(issue.get("identifier") or event.issue_identifier or event.correlation_id)
-    title = str(issue.get("title") or "").strip()
+    title = str(issue.get("title") or event.issue_title or "").strip()
     label = _LABEL.get(event.event_type, event.event_type)
 
     lines = [f"Paperclip 事件 · {identifier} · {label}"]

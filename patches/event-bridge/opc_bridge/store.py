@@ -366,3 +366,119 @@ class Store:
                 (issue_id, channel_id, event_id, at),
             )
             self._db.commit()
+
+    # ── outbox ───────────────────────────────────────────────────────────
+    def delivery(self, event_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM deliveries WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def pending_deliveries(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT d.*, e.payload FROM deliveries d JOIN events e ON e.event_id = d.event_id"
+                " WHERE d.state = 'pending' ORDER BY d.next_attempt_at"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def claim_due(self, now: float, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT d.event_id, d.attempts, e.payload FROM deliveries d"
+                " JOIN events e ON e.event_id = d.event_id"
+                " WHERE d.state = 'pending' AND d.next_attempt_at <= ?"
+                " ORDER BY d.next_attempt_at LIMIT ?",
+                (now, limit),
+            ).fetchall()
+            ids = [row["event_id"] for row in rows]
+            for event_id in ids:
+                self._db.execute(
+                    "UPDATE deliveries SET state = 'sending', updated_at = ?"
+                    " WHERE event_id = ? AND state = 'pending'",
+                    (now, event_id),
+                )
+            self._db.commit()
+        return [dict(row) for row in rows]
+
+    def recover_inflight(self) -> int:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE deliveries SET state = 'pending' WHERE state = 'sending'"
+            )
+            self._db.commit()
+            return int(cur.rowcount)
+
+    def mark_sent(self, event_id: str, buzz_event_id: str, now: float) -> None:
+        self._finish_delivery(event_id, "sent", now, buzz_event_id=buzz_event_id)
+
+    def mark_fallback(self, event_id: str, buzz_event_id: str, now: float) -> None:
+        self._finish_delivery(event_id, "fallback_sent", now, buzz_event_id=buzz_event_id)
+
+    def mark_expired(self, event_id: str, now: float) -> None:
+        self._finish_delivery(event_id, "expired", now, error="expired")
+
+    def mark_failed(self, event_id: str, reason: str, now: float) -> None:
+        self._finish_delivery(event_id, "failed", now, error=reason)
+
+    def _finish_delivery(
+        self,
+        event_id: str,
+        state: str,
+        now: float,
+        buzz_event_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE deliveries SET state = ?, buzz_event_id = COALESCE(?, buzz_event_id),"
+                " last_error = COALESCE(?, last_error), updated_at = ? WHERE event_id = ?",
+                (state, buzz_event_id, error, now, event_id),
+            )
+            self._db.commit()
+
+    def reschedule(self, event_id: str, next_attempt_at: float, error: str, now: float) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE deliveries SET state = 'pending', attempts = attempts + 1,"
+                " next_attempt_at = ?, last_error = ?, updated_at = ? WHERE event_id = ?",
+                (next_attempt_at, error, now, event_id),
+            )
+            self._db.commit()
+
+    def event(self, event_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    # ── audit ────────────────────────────────────────────────────────────
+    def audit(
+        self,
+        actor: str,
+        action: str,
+        target: str | None = None,
+        detail: dict | None = None,
+        source_event_id: str | None = None,
+        at: str | None = None,
+    ) -> None:
+        import datetime as _dt
+        import json
+
+        stamp = at or _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO audit(at, actor, action, target, detail_json, source_event_id)"
+                " VALUES(?, ?, ?, ?, ?, ?)",
+                (stamp, actor, action, target, json.dumps(detail or {}, ensure_ascii=False), source_event_id),
+            )
+            self._db.commit()
+
+    def audit_rows(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
