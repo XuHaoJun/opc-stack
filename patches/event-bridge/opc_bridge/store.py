@@ -656,3 +656,30 @@ class Store:
                 (at, agent_id),
             )
             self._db.commit()
+
+    # ── run health ───────────────────────────────────────────────────────
+    def run_health(self, run_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM run_health WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def set_run_health(
+        self, run_id: str, state: str, updated_at: float,
+        last_notified_at: float | None, notify_count: int, first_abnormal_at: float | None,
+        track: str = "unknown",
+    ) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO run_health(run_id, track, state, first_abnormal_at,"
+                " last_notified_at, notify_count, last_progress_at, updated_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(run_id) DO UPDATE SET state=excluded.state,"
+                " first_abnormal_at=COALESCE(run_health.first_abnormal_at, excluded.first_abnormal_at),"
+                " last_notified_at=excluded.last_notified_at,"
+                " notify_count=excluded.notify_count, updated_at=excluded.updated_at",
+                (run_id, track, state, first_abnormal_at, last_notified_at, notify_count,
+                 first_abnormal_at, updated_at),
+            )
+            self._db.commit()
