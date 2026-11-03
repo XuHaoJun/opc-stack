@@ -240,3 +240,129 @@ class Store:
                 "SELECT value FROM meta WHERE key = ?", (key,)
             ).fetchone()
         return None if row is None else str(row["value"])
+
+    # ── cursor / issue state ─────────────────────────────────────────────
+    def cursor(self) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT updated_since FROM cursor WHERE id = 1"
+            ).fetchone()
+        return None if row is None or not row["updated_since"] else str(row["updated_since"])
+
+    def set_cursor(self, updated_since: str, bootstrapped_at: str | None = None) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO cursor(id, updated_since, bootstrapped_at) VALUES(1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET updated_since = excluded.updated_since",
+                (updated_since, bootstrapped_at),
+            )
+            self._db.commit()
+
+    def get_issue_state(self, issue_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM issue_state WHERE issue_id = ?", (issue_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def upsert_issue_state(self, issue: dict) -> None:
+        from .events import terminal_ts
+
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO issue_state"
+                "(issue_id, identifier, project_id, status, terminal_ts, track, updated_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(issue_id) DO UPDATE SET"
+                "  identifier = excluded.identifier,"
+                "  project_id = excluded.project_id,"
+                "  status = excluded.status,"
+                "  terminal_ts = excluded.terminal_ts,"
+                "  updated_at = excluded.updated_at",
+                (
+                    str(issue["id"]),
+                    issue.get("identifier"),
+                    issue.get("projectId"),
+                    issue.get("status"),
+                    terminal_ts(issue),
+                    issue.get("track"),
+                    str(issue.get("updatedAt") or ""),
+                ),
+            )
+            self._db.commit()
+
+    # ── events / deliveries ──────────────────────────────────────────────
+    def enqueue_event(self, event, now: float) -> bool:
+        import json
+
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO events"
+                "(event_id, schema_version, event_type, occurred_at, observed_at,"
+                " issue_id, run_id, track, payload, created_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.event_id,
+                    event.schema_version,
+                    event.event_type,
+                    event.occurred_at,
+                    event.observed_at,
+                    event.issue_id,
+                    event.run_id,
+                    event.track,
+                    json.dumps(event.to_dict(), ensure_ascii=False),
+                    now,
+                ),
+            )
+            if cur.rowcount != 1:
+                self._db.rollback()
+                return False
+            self._db.execute(
+                "INSERT OR IGNORE INTO deliveries(event_id, state, attempts, next_attempt_at, updated_at)"
+                " VALUES(?, 'pending', 0, 0, ?)",
+                (event.event_id, now),
+            )
+            self._db.commit()
+            return True
+
+    def count_deliveries(self) -> int:
+        with self._lock:
+            return int(self._db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0])
+
+    def event_for_issue(self, issue_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM events WHERE issue_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (issue_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def delivery_for_issue(self, issue_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT d.* FROM deliveries d JOIN events e ON e.event_id = d.event_id"
+                " WHERE e.issue_id = ? ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1",
+                (issue_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    # ── origin ───────────────────────────────────────────────────────────
+    def get_origin(self, issue_id: str) -> tuple[str | None, str | None] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT channel_id, event_id FROM origin WHERE issue_id = ?", (issue_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return (row["channel_id"], row["event_id"])
+
+    def set_origin(self, issue_id: str, channel_id: str | None, event_id: str | None, at: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO origin(issue_id, channel_id, event_id, resolved_at) VALUES(?, ?, ?, ?)"
+                " ON CONFLICT(issue_id) DO UPDATE SET"
+                "  channel_id = excluded.channel_id, event_id = excluded.event_id,"
+                "  resolved_at = excluded.resolved_at",
+                (issue_id, channel_id, event_id, at),
+            )
+            self._db.commit()
