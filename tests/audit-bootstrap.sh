@@ -195,6 +195,15 @@ TDBEOF
 then ok "tencentdb: get before create"
 else bad "tencentdb: get before create"; fi
 
+# Delivery must have exactly one writer. The old watcher posted as the front
+# door (identity impersonation) and could not hold a durable cursor; the event
+# bridge replaced it. A leftover reference means two writers for one event.
+if grep -rqs "opc-issue-watcher" patches docker-compose.yml; then
+    bad "watcher retired (references remain — two delivery writers)"
+else
+    ok "watcher retired (event-bridge is the only delivery writer)"
+fi
+
 echo
 printf 'result: %d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

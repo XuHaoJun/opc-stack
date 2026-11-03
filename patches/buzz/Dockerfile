@@ -195,7 +195,6 @@ COPY --from=stripped-binaries /build/target/release/examples/opc_nip_oa_sign /us
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
 COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
-COPY opc/opc-issue-watcher.sh /usr/local/bin/opc-issue-watcher.sh
 COPY opc/buzz-entrypoint.sh /usr/local/bin/buzz-entrypoint.sh
 COPY opc/frontdoor-entrypoint.sh /usr/local/bin/frontdoor-entrypoint.sh
 # Agent spawn wrapper: buzz-acp runs it as root, it drops to the hermes
@@ -209,7 +208,7 @@ COPY opc/add-member.sh /usr/local/bin/opc-add-member.sh
 COPY opc/opc-paperclip /usr/local/bin/opc-paperclip
 RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh \
-             /usr/local/bin/opc-issue-watcher.sh /usr/local/bin/buzz-entrypoint.sh \
+             /usr/local/bin/buzz-entrypoint.sh \
              /usr/local/bin/frontdoor-entrypoint.sh /usr/local/bin/opc-generate-keys.sh \
              /usr/local/bin/opc-add-member.sh /usr/local/bin/opc-paperclip \
              /usr/local/libexec/hermes

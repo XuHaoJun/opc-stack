@@ -874,7 +874,7 @@ services:
   # agent: no ACP runtime, no kind:10100 registration, no channel membership by
   # default (an open channel accepts a post from any authenticated key).
   #
-  # Why a sidecar instead of extending opc-issue-watcher.sh: the watcher shared
+  # Why a sidecar instead of extending the old per-issue watcher: it shared
   # the front door's process tree and identity — that impersonation is the bug
   # this replaces — and a per-issue spawned process cannot hold a durable
   # cursor or an outbox. Paperclip has no usable push for this deployment

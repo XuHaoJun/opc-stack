@@ -7,8 +7,8 @@ description: Create and track Paperclip tickets; route work to the right executi
 
 Paperclip is the work control plane. The flow: create an issue (ticket) with
 acceptance criteria → Paperclip's runtime invokes omp to develop → omp pushes
-to GitHub and posts the repo link into the ticket → a watcher posts the link
-to Buzz automatically. You (the agent) are the orchestrator; Paperclip never
+to GitHub and posts the repo link into the ticket → the OPC event bridge posts
+the link to Buzz automatically, as its own identity. You (the agent) are the orchestrator; Paperclip never
 touches Buzz.
 
 ## Endpoints
@@ -305,8 +305,8 @@ and let the agent add it when the need is real.
    must include:
    `完成後: gh repo create <name> --private --source . --remote origin --push, 把 repo URL 貼回本 ticket comment, 然後將 issue status 改為 done`
    plus repo visibility, tech stack, and user preferences.
-4. **Add the marker comments** immediately (Buzz only — skip these and the
-   watcher step on surfaces that are not Buzz). Two of them, one call each:
+4. **Add the marker comments** immediately (Buzz only — skip them on surfaces
+   that are not Buzz). Two of them, one call each:
    - `{"body":"BUZZ_CHANNEL: <channel-uuid>"}` — the Buzz channel the user
      asked in.
    - `{"body":"BUZZ_EVENT: <event-id>"}` — the id of the message that asked
@@ -314,7 +314,6 @@ and let the agent add it when the need is real.
      as a reply to it, so the answer lands in the thread that asked rather
      than starting a new one. Omit it and the user gets a detached notice with
      nothing tying it to their request.
-5. **Spawn the watcher** (background, Buzz only): `/usr/local/bin/opc-issue-watcher.sh <issueId> <channel-uuid> <event-id> &`
 6. **Reply to the user** in whatever surface they asked from, WITH the link:
    「已建立 ticket <identifier> (lane: <lane>): $PAPERCLIP_PUBLIC_URL/issues/<identifier>
    開發中, 完成後我會貼結果。」
@@ -349,8 +348,8 @@ ticket exactly like "develop <X>":
      opc-paperclip engineering-ticket create --repo owner/repo \
        --title 'Resolve conflicts on owner/repo#<n>'
    ```
-3. On Buzz, add the `BUZZ_CHANNEL:` and `BUZZ_EVENT:` marker comments and
-   spawn the watcher; reply to the user with the ticket link. The helper's
+3. On Buzz, add the `BUZZ_CHANNEL:` and `BUZZ_EVENT:` marker comments; reply
+   to the user with the ticket link. The helper's
    returned issue ID is the ID used for those marker and watcher steps.
 
 ## Notes
@@ -360,11 +359,12 @@ ticket exactly like "develop <X>":
 - Agents differ only in the skills they carry, so the lane you choose IS the
   configuration — there is no way to "add prototype mode" to a ticket after
   the fact. Reassigning means the new agent starts from the ticket text alone.
-- The watcher is Buzz-specific. On dashboard chat or Telegram there is no
-  watcher: poll the issue when the user asks, or tell them you will check back.
-- The watcher posts the link automatically when the ticket reaches `done` —
-  do not double-post; if you are in a live conversation when it completes,
-  you may answer directly.
+- The event bridge is Buzz-specific: it replies into the origin thread. On
+  dashboard chat or Telegram there are no markers, so poll the issue when the
+  user asks, or tell them you will check back.
+- The event bridge posts the link automatically when the ticket reaches `done`,
+  authored by the `paperclip` service identity — do not double-post; if you are
+  in a live conversation when it completes, you may answer directly.
 - The Paperclip API key authenticates as the frontdoor agent; created issues
   are attributed to it.
 - **Never delete a prototype, and never file a ticket that deletes one.**

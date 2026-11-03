@@ -118,8 +118,8 @@ fi
 : "${BUZZ_ACP_AGENT_COMMAND:=/usr/local/libexec/hermes}"
 : "${BUZZ_ACP_AGENT_ARGS:=acp}"
 export BUZZ_RELAY_URL BUZZ_ACP_AGENT_COMMAND BUZZ_ACP_AGENT_ARGS
-# Persist the resolved relay URL for the issue watcher (the agent's terminal
-# children get a sanitized env without it).
+# Persist the resolved relay URL (the agent's terminal children get a sanitized
+# env without it, and ad-hoc tooling reads the file).
 mkdir -p /opt/data
 printf '%s' "$BUZZ_RELAY_URL" > /opt/data/buzz-relay-url
 echo "[frontdoor] relay=${BUZZ_RELAY_URL} agent=${BUZZ_ACP_AGENT_COMMAND} ${BUZZ_ACP_AGENT_ARGS}"
@@ -394,12 +394,6 @@ if [ -d "$SK_SRC" ]; then
     cp -r "$SK_SRC" "$SK_DST"
     echo "[frontdoor] synced skill: paperclip-api"
 fi
-
-# Re-attach paperclip issue watchers after a restart (self-heal). The watcher
-# posts GitHub links to Buzz when tickets complete; spawned per ticket by the
-# agent, re-attached here for any that survived the restart.
-mkdir -p /opt/data/issue-watchers
-/usr/local/bin/opc-issue-watcher.sh sweep >> /opt/data/issue-watchers/sweep.log 2>&1 &
 
 # Single-owner shared home: every hermes process touching this volume runs
 # as uid 10000 (the ACP agent via the setpriv wrapper, and hermes-dashboard).
