@@ -454,6 +454,18 @@ class Store:
             )
             self._db.commit()
 
+    def recent_events(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT e.event_id, e.event_type, e.issue_id, e.issue_identifier,"
+                " e.run_id, e.track, e.occurred_at, e.observed_at,"
+                " d.state AS delivery_state, d.attempts, d.last_error"
+                " FROM events e LEFT JOIN deliveries d ON d.event_id = e.event_id"
+                " ORDER BY e.created_at DESC, e.rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def event(self, event_id: str) -> dict | None:
         with self._lock:
             row = self._db.execute(
@@ -566,3 +578,39 @@ class Store:
                 "SELECT * FROM mandates WHERE id = ?", (mandate_id,)
             ).fetchone()
         return None if row is None else dict(row)
+
+    # ── operator authorizations ──────────────────────────────────────────
+    def auth_used(self, event_id: str) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM auth_uses WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        return row is not None
+
+    def use_auth(self, event_id: str, at: str, action: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO auth_uses(event_id, used_at, action) VALUES(?, ?, ?)",
+                (event_id, at, action),
+            )
+            self._db.commit()
+
+    # ── control state (filled by tasks 17/19) ────────────────────────────
+    def track_state(self, track: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM track_state WHERE track = ?", (track,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def set_track_state(self, track: str, desired: str, state: str, actor: str, reason: str, source_event_id: str | None, at: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO track_state(track, desired, state, changed_by, reason, source_event_id, changed_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(track) DO UPDATE SET desired=excluded.desired, state=excluded.state,"
+                " changed_by=excluded.changed_by, reason=excluded.reason,"
+                " source_event_id=excluded.source_event_id, changed_at=excluded.changed_at",
+                (track, desired, state, actor, reason, source_event_id, at),
+            )
+            self._db.commit()

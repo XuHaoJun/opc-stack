@@ -17,7 +17,7 @@ import time
 import traceback
 import urllib.request
 
-from . import api, buzz, config, deliver, paperclip, poller, store
+from . import api, buzz, config, control, deliver, paperclip, poller, routes, store
 
 
 def _log(message: str) -> None:
@@ -96,8 +96,28 @@ def main(argv: list[str] | None = None) -> int:
     p = poller.Poller(cfg, s, pc, log=_log)
     d = deliver.Deliverer(cfg, s, buzz_client, log=_log)
 
+    try:
+        p.backfill_labels()
+    except Exception:
+        _log("label backfill failed:\n" + traceback.format_exc())
+
+    # The control channel is resolved once (explicit env, existing name, or
+    # created). Without it there is no authorization surface, so mutations are
+    # refused — the endpoint still answers, it just cannot authorize.
+    auth = None
+    try:
+        channel = buzz.resolve_control_channel(cfg, buzz_client, s)
+        auth = control.OperatorAuth(cfg, buzz_client, s, channel)
+        _log(f"control channel {channel}")
+    except buzz.BuzzError as exc:
+        _log(f"WARNING control channel unavailable ({exc.kind}); mutations disabled")
+
+    table = routes.build(
+        cfg, s, auth, backfill=p.backfill, backfill_labels=p.backfill_labels
+    )
+
     stop = threading.Event()
-    server = api.serve(api.Api(cfg, s))
+    server = api.serve(api.Api(cfg, s, table))
 
     threads = [
         threading.Thread(target=_poller_loop, args=(stop, cfg, p), name="poller", daemon=True),
