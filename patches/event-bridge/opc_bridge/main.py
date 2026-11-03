@@ -17,7 +17,7 @@ import time
 import traceback
 import urllib.request
 
-from . import api, buzz, config, control, deliver, paperclip, poller, routes, store
+from . import api, buzz, config, control, deliver, health, paperclip, poller, routes, store
 
 
 def _log(message: str) -> None:
@@ -48,6 +48,15 @@ def _poller_loop(stop: threading.Event, cfg: config.Config, p: poller.Poller) ->
                 _log("poller reconcile failed:\n" + traceback.format_exc())
             next_reconcile = time.time() + cfg.reconcile_seconds
         stop.wait(cfg.poll_interval)
+
+
+def _health_loop(stop: threading.Event, cfg: config.Config, monitor) -> None:
+    while not stop.is_set():
+        try:
+            monitor.tick()
+        except Exception:
+            _log("health pass failed:\n" + traceback.format_exc())
+        stop.wait(cfg.health_interval)
 
 
 def _deliver_loop(stop: threading.Event, d: deliver.Deliverer) -> None:
@@ -95,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = poller.Poller(cfg, s, pc, log=_log)
     d = deliver.Deliverer(cfg, s, buzz_client, log=_log)
+    monitor = health.HealthMonitor(cfg, s, pc, log=_log)
 
     try:
         p.backfill_labels()
@@ -127,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     threads = [
         threading.Thread(target=_poller_loop, args=(stop, cfg, p), name="poller", daemon=True),
         threading.Thread(target=_deliver_loop, args=(stop, d), name="deliver", daemon=True),
+        threading.Thread(target=_health_loop, args=(stop, cfg, monitor), name="health", daemon=True),
     ]
     for thread in threads:
         thread.start()
