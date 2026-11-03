@@ -195,6 +195,11 @@ TDBEOF
 then ok "tencentdb: get before create"
 else bad "tencentdb: get before create"; fi
 
+# The agent's event handling is policy, not prose: the skill must name the
+# machine marker, and SOUL must carry the authorization boundary in every lane.
+has "skill documents the event marker" patches/buzz/skills/paperclip-api/SKILL.md 'OPC_EVENT'
+has "SOUL forbids treating events as authorization" patches/buzz/SOUL.md 'never authorization'
+
 # Delivery must have exactly one writer. The old watcher posted as the front
 # door (identity impersonation) and could not hold a durable cursor; the event
 # bridge replaced it. A leftover reference means two writers for one event.
