@@ -935,6 +935,13 @@ services:
       OPC_STALL_SECONDS: ${OPC_STALL_SECONDS:-1800}
       OPC_HEALTH_INTERVAL: ${OPC_HEALTH_INTERVAL:-30}
       OPC_HEALTH_REMINDER_SECONDS: ${OPC_HEALTH_REMINDER_SECONDS:-1800}
+    # Liveness only: /v1/health is open by design so the probe needs no secret.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8645/v1/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Standing devenv lease for the expert agents. Runs in the paperclip image
   # because that is where the devenv CLI lives — deliberately not copied into
