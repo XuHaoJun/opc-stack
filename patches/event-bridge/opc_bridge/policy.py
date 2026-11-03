@@ -124,7 +124,10 @@ def effective(store, company_id: str, project_id: str | None, track: str, now_is
         add(f"actions.{action}", allowed, PRIORITY["hard"], "company", "", "hard")
 
     for row in store.active_policies(now_iso):
-        if row["scope_kind"] == "company" and row["scope_id"] != company_id:
+        # Company rows written before the real company id was resolved carry the
+        # literal "default". Accept both, or an ops-written allocation becomes
+        # invisible to the resolver the first time the bridge learns the id.
+        if row["scope_kind"] == "company" and row["scope_id"] not in (company_id, "default"):
             continue
         if row["scope_kind"] == "project" and row["scope_id"] != project_id:
             continue

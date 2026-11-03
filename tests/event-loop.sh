@@ -14,6 +14,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail() { echo "FAIL  $*" >&2; exit 1; }
+# The bridge must be up before any control call: `up -d` returns before the
+# healthcheck passes, and a call that races the boot looks like a policy bug.
+timeout 120 bash -c 'until docker compose ps event-bridge --format "{{.Status}}" | grep -q healthy; do sleep 2; done' || true
+
+
 pass() { echo "PASS  $*"; }
 note() { echo "SKIP  $*"; }
 

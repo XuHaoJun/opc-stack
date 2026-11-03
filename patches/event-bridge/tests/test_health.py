@@ -20,6 +20,7 @@ class FakePaperclip:
         self.live = []
         self.runs = {}
         self.agents_rows = []
+        self.issues = {"i1": {"status": "in_progress"}}
 
     def live_runs(self):
         return self.live
@@ -29,6 +30,9 @@ class FakePaperclip:
 
     def agents(self):
         return self.agents_rows
+
+    def issue(self, issue_id):
+        return self.issues.get(issue_id, {"status": "in_progress"})
 
 
 class ClassifyTest(unittest.TestCase):
@@ -47,8 +51,10 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(health.classify(run, T0, "idle", T0 + 1801, 900, 1800), "unknown")
 
     def test_running_while_issue_terminal_is_lost(self):
-        run = {"id": "r", "status": "running", "issueStatus": "done", "startedAt": T0}
-        self.assertEqual(health.classify(run, T0, "idle", T0 + 10, 900, 1800), "lost")
+        run = {"id": "r", "status": "running", "issueId": "i1", "startedAt": T0}
+        self.assertEqual(
+            health.classify(run, T0, "idle", T0 + 10, 900, 1800, issue_status="done"), "lost"
+        )
 
     def test_running_under_a_paused_agent_is_lost(self):
         run = {"id": "r", "status": "running", "startedAt": T0}
@@ -92,6 +98,13 @@ class MonitorTest(unittest.TestCase):
 
         self.pc.runs["r1"]["outputSilence"]["lastOutputAt"] = T0 + 4000
         self.assertEqual(self.monitor.tick(T0 + 4001), 1)          # recovered
+
+    def test_monitor_reads_the_issue_status_from_the_api(self):
+        self.stalled()
+        self.pc.runs["r1"]["issueId"] = "i1"
+        self.pc.issues["i1"] = {"status": "done"}
+        self.assertEqual(self.monitor.tick(T0 + 10), 1)
+        self.assertEqual(self.store.recent_events(1)[0]["event_type"], "opc.run.lost")
 
     def test_unknown_is_not_notified(self):
         self.pc.runs["r1"] = {"id": "r1", "status": "running", "agentId": "a1", "startedAt": T0}

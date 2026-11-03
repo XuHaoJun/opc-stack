@@ -537,9 +537,21 @@ docker compose exec frontdoor opc-paperclip labels ensure
 !opc mandate revoke <mandate-id>
 ```
 
-每一道變更都需要 `authorization_event_id`（那道訊息的 event id）與 `command`（訊息原文）。
-bridge 會驗作者 = `BUZZ_ACP_AGENT_OWNER`、15 分鐘新鮮度、指令原文、以及一次性使用；
-API key 本身不是授權。
+每一道變更都需要 `authorization_event_id`（那道訊息的 event id）。bridge 會驗作者 =
+`BUZZ_ACP_AGENT_OWNER`、15 分鐘新鮮度、**指令動詞與參數都由 bridge 自己組出來比對**（不是
+呼叫端提供的文字）、以及一次性使用。所以 `!opc force-stop run A` 不能用來停 run B，
+空的指令也不會授權任何事；API key 本身不是授權。
+
+被接受的文法（參數要逐字出現在訊息裡）:
+
+| 動作 | 訊息必須包含 |
+|---|---|
+| force stop | `!opc force-stop run <run-id>` |
+| 配比 | `!opc allocate core=<n> lab=<m>` |
+| mandate 授予 | `!opc mandate grant project=<id>` 或 `track=<core\|lab>` |
+| mandate 撤銷 | `!opc mandate revoke <mandate-id>` |
+| override | `!opc override <scope-id> <key>` |
+| 補發歷史 | `!opc backfill <ISO-8601>` |
 
 ```bash
 # 由 ops 直接執行（同一個驗證路徑；示例：授權後的 force stop）

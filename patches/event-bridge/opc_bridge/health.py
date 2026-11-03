@@ -51,6 +51,7 @@ def classify(
     now: float,
     slow: int,
     stall: int,
+    issue_status: str | None = None,
 ) -> str:
     status = str(run.get("status") or "")
     if status != "running":
@@ -58,7 +59,7 @@ def classify(
 
     if run.get("finishedAt"):
         return "lost"
-    if str(run.get("issueStatus") or "") in ("done", "cancelled", "blocked"):
+    if issue_status in ("done", "cancelled", "blocked"):
         return "lost"
     if agent_status in ("paused", "terminated"):
         return "lost"
@@ -101,6 +102,13 @@ class HealthMonitor:
                 continue
             run = self.pc.run(run_id)
             agent = agents.get(str(run.get("agentId") or ""))
+            issue_status = None
+            issue_id = run.get("issueId")
+            if issue_id:
+                try:
+                    issue_status = str(self.pc.issue(str(issue_id)).get("status") or "")
+                except Exception:
+                    issue_status = None
             state = classify(
                 run,
                 _progress_at(run),
@@ -108,6 +116,7 @@ class HealthMonitor:
                 now,
                 self.cfg.slow_seconds,
                 self.cfg.stall_seconds,
+                issue_status,
             )
             emitted += int(self._apply(run_id, state, run, now))
         return emitted

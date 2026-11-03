@@ -43,11 +43,20 @@ class OperatorAuth:
         self.channel_id = channel_id
         self._clock = clock or (lambda: config.now(cfg))
 
-    def verify(self, command: str, event_id: str, now: float | None = None) -> dict:
+    def verify(self, verb: str, tokens: list[str], event_id: str, now: float | None = None) -> dict:
+        """Authorize exactly the operation the caller is about to perform.
+
+        `verb` and `tokens` are supplied by the route from its own parameters —
+        never from the request body. The owner's message must start with `verb`
+        and contain every token, so `!opc force-stop run A` cannot authorize
+        cancelling run B, and an empty verb can never match.
+        """
         now = self._clock() if now is None else now
         if not self.cfg.operator_pubkey:
             raise AuthError("missing")
         if not event_id:
+            raise AuthError("missing")
+        if not verb or not verb.strip():
             raise AuthError("missing")
 
         # Scan wider than the freshness window so a stale command is reported as
@@ -66,13 +75,18 @@ class OperatorAuth:
         if now - created_at > self.cfg.command_max_age_seconds:
             raise AuthError("stale")
 
-        if not _normalize(message.get("content")).startswith(_normalize(command)):
+        content = _normalize(message.get("content"))
+        if not content.startswith(_normalize(verb)):
             raise AuthError("command_mismatch")
+        words = set(content.split(" "))
+        for token in tokens:
+            if _normalize(token) and _normalize(token) not in words:
+                raise AuthError("command_mismatch")
 
         if self.store.auth_used(event_id):
             raise AuthError("replayed")
 
-        action = _normalize(command).split(" ")[1] if len(_normalize(command).split(" ")) > 1 else "opc"
+        action = _normalize(verb).split(" ")[1] if len(_normalize(verb).split(" ")) > 1 else "opc"
         self.store.use_auth(event_id, config.iso(now), action)
         return message
 
@@ -284,6 +298,18 @@ def apply_allocation(
         if share == 0:
             for agent in agents:
                 if str(agent.get("status")) == "paused":
+                    # Already paused. If we paused it before, reopen our ledger
+                    # row so a later unlock can resume it; if a human paused it
+                    # and we have never managed it, leave it alone.
+                    prior = store.ledger_get(str(agent["id"]))
+                    if prior is not None:
+                        store.ledger_put(
+                            str(agent["id"]), track,
+                            prior.get("original_status") or "idle",
+                            prior.get("original_lifecycle_state") or "ready",
+                            prior.get("original_holds_json") or "[]",
+                            source_event_id, now_iso,
+                        )
                     continue
                 store.ledger_put(
                     str(agent["id"]), track, str(agent.get("status")),
@@ -297,6 +323,11 @@ def apply_allocation(
         else:
             for agent in agents:
                 ledger = store.ledger_get(str(agent["id"]))
+                if ledger and not ledger.get("released_at") and str(agent.get("status")) != "paused":
+                    # Already resumed (by a human, or by a previous partial
+                    # unlock). Close the row so a reboot cannot re-pause it.
+                    store.ledger_release(str(agent["id"]), now_iso)
+                    ledger = None
                 if ledger and not ledger.get("released_at") and str(agent.get("status")) == "paused":
                     current_holds = _holds(agent.get("lifecycleHolds"))
                     recorded = _holds(ledger.get("original_holds_json"))
@@ -337,7 +368,17 @@ def reconcile_lock(cfg, store, pc, now_iso: str) -> dict:
     for ledger in store.ledger_all():
         if ledger.get("released_at"):
             continue
+        track = str(ledger["track"])
+        share = policy.effective(
+            store, cfg.company_id or "default", None, track, now_iso
+        )["values"].get(f"allocation.{track}", 100)
         agent = pc.agent(str(ledger["agent_id"]))
+        if share and share > 0:
+            # The operator unlocked this track while the row was open. Releasing
+            # here is what stops a later reboot from re-pausing the agent.
+            store.ledger_release(str(ledger["agent_id"]), now_iso)
+            result["skipped"].append(str(ledger["agent_id"]))
+            continue
         if str(agent.get("status")) == "paused":
             result["skipped"].append(str(ledger["agent_id"]))
             continue

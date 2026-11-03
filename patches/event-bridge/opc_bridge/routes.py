@@ -70,7 +70,9 @@ class Routes:
     # ── mutations (owner-signed) ─────────────────────────────────────────
     def grant(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
-        actor = self._authorize(body)
+        scope_kind = str(body.get("scope_kind") or "track")
+        scope_id = str(body.get("scope_id") or body.get("track") or "")
+        actor = self._authorize(body, "!opc mandate grant", [f"{scope_kind}={scope_id}"])
         try:
             row = control.grant_mandate(
                 self.store, body, actor, body.get("authorization_event_id"), self._now()
@@ -81,7 +83,7 @@ class Routes:
 
     def revoke(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
-        actor = self._authorize(body)
+        actor = self._authorize(body, "!opc mandate revoke", [str(body.get("id") or "")])
         try:
             return 200, control.revoke_mandate(
                 self.store, str(body.get("id") or ""), actor,
@@ -92,7 +94,9 @@ class Routes:
 
     def override(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
-        actor = self._authorize(body)
+        actor = self._authorize(
+            body, "!opc override", [str(body.get("scope_id") or ""), str(body.get("key") or "")]
+        )
         try:
             row = control.set_override(
                 self.store, body, actor, body.get("authorization_event_id"), self._now()
@@ -103,7 +107,7 @@ class Routes:
 
     def override_revoke(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
-        actor = self._authorize(body)
+        actor = self._authorize(body, "!opc override revoke", [str(body.get("id") or "")])
         policy_id = str(body.get("id") or "")
         changed = self.store.revoke_policy(policy_id, self._now())
         self.store.audit(actor, "policy_override_revoked", policy_id, {"changed": changed})
@@ -111,12 +115,12 @@ class Routes:
 
     def allocation(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
-        actor = self._authorize(body)
         try:
             core = int(body.get("core", 0))
             lab = int(body.get("lab", 0))
         except (TypeError, ValueError):
             return 400, {"error": "core and lab must be integers"}
+        actor = self._authorize(body, "!opc allocate", [f"core={core}", f"lab={lab}"])
         from . import control as control_mod
 
         try:
@@ -131,10 +135,10 @@ class Routes:
 
     def force_stop(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
-        actor = self._authorize(body)
         run_id = str(body.get("run_id") or "")
         if not run_id:
             return 400, {"error": "run_id is required"}
+        actor = self._authorize(body, "!opc force-stop run", [run_id])
         from . import control as control_mod
 
         try:
@@ -148,28 +152,26 @@ class Routes:
 
     def backfill(self, params: dict) -> tuple[int, dict]:
         body = _body(params)
-        self._authorize(body)
-        if self._backfill is None:
-            return 503, {"error": "backfill unavailable"}
         since = str(body.get("since") or "")
         if not since:
             return 400, {"error": "since is required (ISO-8601)"}
+        self._authorize(body, "!opc backfill", [since])
         return 200, {"enqueued": self._backfill(since)}
 
     def backfill_labels(self, params: dict) -> tuple[int, dict]:
-        self._authorize(_body(params))
+        self._authorize(_body(params), "!opc labels backfill", [])
         if self._backfill_labels is None:
             return 503, {"error": "label backfill unavailable"}
         return 200, {"labelled": self._backfill_labels()}
 
     # ── helpers ──────────────────────────────────────────────────────────
-    def _authorize(self, body: dict) -> str:
+    def _authorize(self, body: dict, verb: str, tokens: list[str]) -> str:
+        """The command text is the ROUTE's, never the caller's."""
         if self.auth is None:
             raise _Forbidden("control node not ready")
-        command = str(body.get("command") or "")
         event_id = str(body.get("authorization_event_id") or "")
         try:
-            self.auth.verify(command, event_id)
+            self.auth.verify(verb, tokens, event_id)
         except control.AuthError as exc:
             self.store.audit("anonymous", "authorization_refused", event_id, {"reason": exc.reason})
             raise _Forbidden(exc.reason) from None
@@ -179,7 +181,10 @@ class Routes:
         return config.iso(config.now(self.cfg))
 
     def _company(self) -> str:
-        return self.cfg.company_id or ""
+        # One spelling for the writer and the reader: apply_allocation writes
+        # `cfg.company_id or "default"`, so the resolver must match it or the
+        # allocation the bridge just applied is invisible to its own policy read.
+        return self.cfg.company_id or "default"
 
 
 class _Forbidden(Exception):

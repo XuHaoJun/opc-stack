@@ -457,7 +457,8 @@ class Store:
     def recent_events(self, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT e.event_id, e.event_type, e.issue_id, e.issue_identifier,"
+                "SELECT e.event_id, e.event_type, e.issue_id,"
+                " json_extract(e.payload, '$.issue_identifier') AS issue_identifier,"
                 " e.run_id, e.track, e.occurred_at, e.observed_at,"
                 " d.state AS delivery_state, d.attempts, d.last_error"
                 " FROM events e LEFT JOIN deliveries d ON d.event_id = e.event_id"

@@ -141,6 +141,25 @@ class PolicyTest(unittest.TestCase):
         self.store.store.revoke_mandate(mandate_id, "2026-11-03T00:00:00Z", "operator:x")
         self.assertFalse(self.effective()["values"]["followups.allowed"])
 
+    def test_a_company_row_written_as_default_applies_to_the_real_company(self):
+        import uuid
+
+        self.store.store.insert_policy(
+            {
+                "id": str(uuid.uuid4()),
+                "scope_kind": "company",
+                "scope_id": "default",
+                "key": "allocation.lab",
+                "value_json": "0",
+                "priority": 20,
+                "created_by": "ops:test",
+                "reason": "test",
+                "created_at": "2026-11-01T00:00:00Z",
+            }
+        )
+        eff = policy.effective(self.store.store, "real-company-uuid", None, "lab", NOW)
+        self.assertEqual(eff["values"]["allocation.lab"], 0)
+
     def test_provenance_exists_for_every_key(self):
         result = self.effective()
         self.assertEqual(set(result["values"]), set(result["provenance"]))

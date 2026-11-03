@@ -87,6 +87,43 @@ class AllocationTest(unittest.TestCase):
         self.assertIn("a-proto", result["paused"])
         self.assertEqual(self.pc.agent("a-proto")["status"], "paused")
 
+    def test_an_unlocked_track_is_not_re_paused_after_a_restart(self):
+        # Reviewer's finding 2: a stale ledger row re-paused an agent after the
+        # operator unlocked the track while the agent was not paused.
+        import json
+        import uuid
+
+        self.apply(100, 0)
+        self.store.insert_policy(
+            {
+                "id": str(uuid.uuid4()),
+                "scope_kind": "company",
+                "scope_id": "default",
+                "key": "allocation.lab",
+                "value_json": json.dumps(30),
+                "priority": 20,
+                "created_by": "operator:test",
+                "reason": "unlock",
+                "created_at": "2026-11-04T03:00:00Z",  # newer than the lock row
+            }
+        )
+        # A human (or a partial unlock) resumed the agent; the ledger row is open.
+        self.pc.agent("a-proto")["status"] = "idle"
+        self.pc.agent("a-proto")["lifecycleState"] = "ready"
+
+        control.reconcile_lock(self.cfg, self.store, self.pc, NOW)
+
+        self.assertEqual(self.pc.agent("a-proto")["status"], "idle")
+        self.assertIsNotNone(self.store.ledger_get("a-proto")["released_at"])
+
+    def test_relocking_reopens_the_ledger_for_an_agent_we_paused_before(self):
+        self.apply(100, 0)
+        self.apply(70, 30)          # resume + release
+        self.apply(100, 0)          # agents are already paused; the row must reopen
+        self.assertIsNone(self.store.ledger_get("a-proto")["released_at"])
+        self.apply(70, 30)
+        self.assertEqual(self.pc.agent("a-proto")["status"], "idle")
+
     def test_adaptive_does_not_override_an_operator_allocation(self):
         self.apply(100, 0)
         result = self.apply(90, 10, adaptive=True)

@@ -10,6 +10,7 @@ Failure policy at boot:
 
 from __future__ import annotations
 
+import dataclasses
 import signal
 import sys
 import threading
@@ -96,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
             s.close()
 
     pc = paperclip.Paperclip(cfg.paperclip_api_url, _read_required(cfg.paperclip_key_path, "board key"))
+    if cfg.company_id is None:
+        try:
+            cfg = dataclasses.replace(cfg, company_id=pc.company())
+        except paperclip.PaperclipError as exc:
+            _log(f"WARNING company id unresolved ({exc.status}); using the 'default' scope")
     buzz_client = buzz.Buzz(cfg.relay_url, cfg.notifier_key_path)
 
     recovered = s.recover_inflight()
