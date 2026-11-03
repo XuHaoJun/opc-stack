@@ -862,6 +862,80 @@ services:
       # injected; interactive shells do not).
       - paperclip-data:/paperclip
 
+  # Event bridge: the deterministic integration between Paperclip (work) and
+  # Buzz (conversation). It owns the `paperclip` Buzz identity, the event
+  # outbox, policy/mandates, admission control (track pause / hard lock),
+  # owner-authorized force stop and run-health classification. It is NOT an
+  # agent: no ACP runtime, no kind:10100 registration, no channel membership by
+  # default (an open channel accepts a post from any authenticated key).
+  #
+  # Why a sidecar instead of extending opc-issue-watcher.sh: the watcher shared
+  # the front door's process tree and identity — that impersonation is the bug
+  # this replaces — and a per-issue spawned process cannot hold a durable
+  # cursor or an outbox. Paperclip has no usable push for this deployment
+  # (deployment mode `authenticated` rejects board keys on the live-events WS,
+  # the plugin bus is in-process, MCP webhooks expire in 24h), so the bridge
+  # polls `issues?updatedSince=`; polling is the spec's allowed v1 transport.
+  #
+  # No published port: the control/read API is compose-network only. State
+  # (cursor, outbox, policy, audit) lives on its own volume. Work truth stays
+  # in Paperclip — this store is Policy Configuration and delivery bookkeeping.
+  event-bridge:
+    build:
+      context: ./patches/event-bridge
+      # Build-order edge, same mechanism as hermes' buzz-cli stage: a named
+      # context makes compose build frontdoor first, so a clean
+      # `docker compose up --build` cannot race this FROM (depends_on orders
+      # containers, not builds). The ARG keeps a manual `docker build` working.
+      additional_contexts:
+        frontdoor: "service:frontdoor"
+    image: ${IMAGE_PREFIX:-opc}/event-bridge:local
+    init: true
+    restart: unless-stopped
+    depends_on:
+      paperclip:
+        condition: service_healthy
+      buzz:
+        condition: service_healthy
+      buzz-keys:
+        condition: service_completed_successfully
+    volumes:
+      # Read-only: the notifier key (paperclip.nsec), the board key and the
+      # control key. The bridge never reads agent.nsec — identity separation is
+      # the whole point of this service existing.
+      - opc-keys:/keys:ro
+      - opc-event-state:/var/lib/opc-bridge
+    environment:
+      PAPERCLIP_API_URL: http://paperclip:3100
+      PAPERCLIP_API_KEY_FILE: /keys/paperclip-api.key
+      OPC_DB_PATH: /var/lib/opc-bridge/bridge.db
+      OPC_API_KEY_FILE: /keys/opc-control.key
+      OPC_API_LISTEN: 0.0.0.0:8645
+      BUZZ_RELAY_URL: ws://buzz:3000
+      BUZZ_KEYS_DIR: /keys
+      OPC_NOTIFIER_NSEC: /keys/paperclip.nsec
+      OPC_NOTIFIER_PUB: /keys/paperclip.pub
+      OPC_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-}
+      OPC_OPERATOR_PUBKEY: ${BUZZ_ACP_AGENT_OWNER:-}
+      OPC_CONTROL_CHANNEL: ${OPC_CONTROL_CHANNEL:-}
+      OPC_EVENT_FALLBACK_CHANNEL: ${OPC_EVENT_FALLBACK_CHANNEL:-}
+      OPC_EVENT_POLL_INTERVAL: ${OPC_EVENT_POLL_INTERVAL:-7}
+      OPC_EVENT_RECONCILE_SECONDS: ${OPC_EVENT_RECONCILE_SECONDS:-600}
+      OPC_EVENT_RECONCILE_LOOKBACK_HOURS: ${OPC_EVENT_RECONCILE_LOOKBACK_HOURS:-24}
+      OPC_EVENT_CUTOVER_LOOKBACK_HOURS: ${OPC_EVENT_CUTOVER_LOOKBACK_HOURS:-0}
+      OPC_EVENT_MAX_ATTEMPTS: ${OPC_EVENT_MAX_ATTEMPTS:-12}
+      OPC_EVENT_MAX_AGE_HOURS: ${OPC_EVENT_MAX_AGE_HOURS:-168}
+      OPC_CONTROL_COMMAND_MAX_AGE_SECONDS: ${OPC_CONTROL_COMMAND_MAX_AGE_SECONDS:-900}
+      OPC_TRACK_CORE_AGENTS: ${OPC_TRACK_CORE_AGENTS:-role:engineer}
+      OPC_TRACK_LAB_AGENTS: ${OPC_TRACK_LAB_AGENTS:-name:Prototyper,name:Scientist}
+      OPC_ALLOC_CORE: ${OPC_ALLOC_CORE:-70}
+      OPC_ALLOC_LAB: ${OPC_ALLOC_LAB:-30}
+      OPC_SLOT_BUDGET: ${OPC_SLOT_BUDGET:-6}
+      OPC_SLOW_SECONDS: ${OPC_SLOW_SECONDS:-900}
+      OPC_STALL_SECONDS: ${OPC_STALL_SECONDS:-1800}
+      OPC_HEALTH_INTERVAL: ${OPC_HEALTH_INTERVAL:-30}
+      OPC_HEALTH_REMINDER_SECONDS: ${OPC_HEALTH_REMINDER_SECONDS:-1800}
+
   # Standing devenv lease for the expert agents. Runs in the paperclip image
   # because that is where the devenv CLI lives — deliberately not copied into
   # the hermes image: devenv is a generic resource-lease tool and should not
@@ -1366,6 +1440,10 @@ volumes:
   # login covers default (chief of staff) plus every expert.
   hermes-profiles:
   paperclip-data:
+  # Event bridge state: cursor, issue/run state, outbox, policy, mandates,
+  # audit. Seeded by the service itself (idempotent schema) — never migrated
+  # from anywhere, and never a record of work truth.
+  opc-event-state:
   buzz-mise:
   frontdoor-mise:
   hermes-mise:
