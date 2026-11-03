@@ -1,3 +1,5 @@
+diff --git a/gateway/opc_shared_native.py b/gateway/opc_shared_native.py
+new file mode 100644
 --- /dev/null
 +++ b/gateway/opc_shared_native.py
 @@ -0,0 +1,249 @@
@@ -250,9 +252,10 @@
 +    manager = getattr(runner, '_opc_shared_native', None)
 +    if manager is not None:
 +        await manager.stop()
+diff --git a/gateway/run_runtime.py b/gateway/run_runtime.py
 --- a/gateway/run_runtime.py
 +++ b/gateway/run_runtime.py
-@@ -386,6 +386,7 @@
+@@ -456,6 +456,7 @@ async def serve_profile_runtime(runner, name, home):
      from gateway.session_hosted_service import _ensure_hosted_service, start_ready_hosted_services
      from gateway.session_local_recovery import recover_local_sessions
      from gateway.platforms.webhook_ingress import recover_webhook_finalizations
@@ -260,7 +263,7 @@
      home = await asyncio.to_thread(Path(home).resolve)
      registry = runner.session_authorities
      existing = registry.for_home(home)
-@@ -408,11 +409,14 @@
+@@ -478,11 +479,14 @@ async def serve_profile_runtime(runner, name, home):
              _recover_published_api_turns(runner, authority)
          if getattr(runner, 'session_control_server', None) is not None:
              await _ensure_hosted_service(runner, authority)
@@ -276,7 +279,7 @@
      start_ready_hosted_services(runner)
      return authority
  
-@@ -461,15 +465,19 @@
+@@ -531,15 +535,19 @@ async def unserve_profile_runtime(runner, home):
      False when one of its turns outlived the Stop deadline (keep the reservation); True otherwise,
      including for a profile this process never served."""
      home = await asyncio.to_thread(Path(home).resolve)
@@ -296,12 +299,17 @@
      return retired
  
  
-@@ -496,10 +504,16 @@
+@@ -566,6 +574,7 @@ async def recover_bot_mailbox(authority):
  
  async def start_gateway_runtime_api(runner):
-     from gateway.run_api import start_gateway_api
+     from gateway import run_api
 +    from gateway.opc_shared_native import sync_shared_native, stop_shared_native
-     runner.session_api = await start_gateway_api(runner)
+     from gateway.webapp_listener import (
+         STARTING, BrowserCredentialError, browser_session_token, dial_origin, listener_plan, register_control_verbs,
+     )
+@@ -613,8 +622,13 @@ async def start_gateway_runtime_api(runner):
+         if webapp is not None:
+             runner.webapp_status = {"state": "serving", "url": dial_origin(host, port), "reason": None}
      runner.session_runtime_descriptor['api_origin'] = runner.session_api.api_origin
 -    for authority in _authorities(runner):
 -        await _recover_profile_bot_mailbox(runner, authority)
@@ -315,7 +323,7 @@
  
  
  async def _recover_profile_bot_mailbox(runner, authority):
-@@ -663,6 +677,8 @@
+@@ -780,6 +794,8 @@ async def settle_gateway_runtime(runner, budget=None, reason=None):
              logging.getLogger(__name__).warning('ACP sessions of %s not ended at shutdown',
                                                  getattr(authority, 'profile_id', '?'), exc_info=True)
      from gateway.run_api import stop_gateway_api
@@ -324,200 +332,10 @@
      store = getattr(runner, 'session_ticket_store', None)
      if store is not None:
          store.revoke()
---- a/hermes_cli/gateway_runtime.py
-+++ b/hermes_cli/gateway_runtime.py
-@@ -6,6 +6,7 @@
- import ipaddress
- import math
- import os
-+import stat
- from pathlib import Path
- from typing import TYPE_CHECKING, Literal
- from urllib.parse import urlsplit
-@@ -36,6 +37,8 @@
-     # A gateway that outlived ``hermes update`` keeps serving old code, so an attaching client
-     # compares this with its own checkout and restarts the owner instead of re-attaching it.
-     code_sha: str | None = None
-+    # Opt-in shared-home transport; the advertised loopback origin still governs the handshake.
-+    api_socket: str | None = None
- 
- 
- @dataclass(frozen=True)
-@@ -93,6 +96,18 @@
-     except (FileNotFoundError, OSError, DiscoveryError):
-         return home
-     return target.parent
-+
-+
-+def _shared_native_api_socket(home: Path) -> Path:
-+    """Validate the selected profile's fixed, same-user native API relay path."""
-+    from hermes_cli.gateway_runtime_discovery import DiscoveryError, _private_node
-+    _private_node(home, kind="directory", home=True)
-+    path = home / "gateway.api.sock"
-+    node = _private_node(path, kind="socket")
-+    if stat.S_IMODE(node.st_mode) != 0o600:
-+        raise DiscoveryError("unsafe_control_permissions",
-+                             f"{path} must have mode 0600")
-+    return path
- 
- 
- def _endpoint(payload: dict, home: Path, control_home: Path | None = None) -> GatewayDiscovery:
-@@ -143,12 +158,28 @@
-     supervisor = payload.get("supervisor")
-     if supervisor not in {"none", "systemd", "launchd", "windows", "external"}:
-         return GatewayDiscovery("inaccessible", reason_code="invalid_supervisor")
-+    api_socket = None
-+    if os.name != "nt" and os.environ.get("OPC_HERMES_SHARED_NATIVE") == "1":
-+        from hermes_cli.gateway_runtime_discovery import DiscoveryError
-+        try:
-+            api_socket = str(_shared_native_api_socket(home))
-+        except FileNotFoundError:
-+            # A live control owner without its relay is not an absent owner: never spawn another.
-+            return GatewayDiscovery("inaccessible", reason_code="shared_native_unavailable",
-+                                    detail="Gateway shared-home API socket is not ready")
-+        except DiscoveryError as exc:
-+            return GatewayDiscovery("inaccessible", reason_code=exc.reason,
-+                                    detail=exc.bounded_detail(500))
-+        except OSError:
-+            return GatewayDiscovery("inaccessible", reason_code="shared_native_unavailable",
-+                                    detail="Gateway shared-home API socket cannot be accessed")
-     return GatewayDiscovery("draining" if restart_wait else "ready", GatewayEndpoint(
-         profile_id=matches[0]["profile_id"], instance_id=instance,
-         authority_epoch=epoch, runtime_protocol=1, api_origin=origin,
-         supervisor=supervisor, capabilities=frozenset(capabilities),
-         control_home=str(control_home) if control_home is not None else None,
-         code_sha=code_sha if isinstance(code_sha := payload.get("code_sha"), str) and code_sha else None,
-+        api_socket=api_socket,
-     ), reason_code=RESTART_WAIT_REASON if restart_wait else None)
- 
- 
---- a/hermes_cli/gateway_client.py
-+++ b/hermes_cli/gateway_client.py
-@@ -7,6 +7,7 @@
- import json
- import os
- from pathlib import Path
-+import socket
- import time
- 
- # The owner's protocol name; session_contract is dependency-free (no config/plugins load).
-@@ -258,8 +259,40 @@
-     return grant["ticket"]
- 
- 
-+async def _connect_shared_native(home: Path, api_socket: str) -> socket.socket:
-+    """Connect only to the selected home's private relay and authenticate its kernel peer."""
-+    from hermes_cli.gateway_runtime import _shared_native_api_socket
-+    from hermes_cli.gateway_runtime_discovery import DiscoveryError, socket_peer_uid
-+    try:
-+        path = _shared_native_api_socket(home)
-+    except DiscoveryError as exc:
-+        raise GatewayClientError("Gateway shared-home API socket is unsafe") from exc
-+    if str(path) != api_socket:
-+        raise GatewayClientError("Gateway shared-home API socket does not match the selected profile")
-+    before = path.lstat()
-+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-+    try:
-+        peer.setblocking(False)
-+        async with asyncio.timeout(5):
-+            await asyncio.get_running_loop().sock_connect(peer, str(path))
-+        # Path validation alone cannot authenticate a listener swapped between lstat and connect.
-+        if socket_peer_uid(peer) != os.getuid():
-+            raise GatewayClientError("Gateway shared-home API peer is not the current user")
-+        _shared_native_api_socket(home)
-+        after = path.lstat()
-+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-+            raise GatewayClientError("Gateway shared-home API socket changed; retry launch")
-+        return peer
-+    except DiscoveryError as exc:
-+        peer.close()
-+        raise GatewayClientError("Gateway shared-home API socket is unsafe") from exc
-+    except BaseException:
-+        peer.close()
-+        raise
-+
-+
- @asynccontextmanager
--async def connect_gateway(endpoint=None, subject=None):
-+async def connect_gateway(endpoint=None, subject=None, *, profile_home=None):
-     """Attach to this home's owner. ``endpoint``: an already-discovered ready owner to dial as-is
-     (maintenance that must never start a gateway); default ensures one, starting it if needed.
-     ``subject``: mint the ticket for this principal (the caller's authenticated dashboard user)
-@@ -272,8 +305,13 @@
-     remote = "" if endpoint is not None else os.environ.get("HERMES_TUI_GATEWAY_URL", "").strip()
-     protocols = None
-     if endpoint is not None:
--        ticket = await asyncio.to_thread(_session_ticket, gateway_profile_home(get_hermes_home()), endpoint,
--                                         subject=subject)
-+        home = Path(profile_home) if profile_home is not None else \
-+            Path(endpoint.api_socket).parent if getattr(endpoint, "api_socket", None) else \
-+            gateway_profile_home(get_hermes_home())
-+        if subject is None:
-+            ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
-+        else:
-+            ticket = await asyncio.to_thread(_session_ticket, home, endpoint, subject=subject)
-         url, protocols = gateway_ws_target(endpoint, ticket)
-     elif remote:
-         parsed = urlsplit(remote)
-@@ -297,12 +335,20 @@
-         endpoint = result.endpoint
-         ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
-         url, protocols = gateway_ws_target(endpoint, ticket)
-+    peer = None
-     try:
-         # The gateway is a loopback (or explicitly named) peer, never something to route through the
-         # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
-         # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
--        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024,
--                           proxy=None) as ws:
-+        if endpoint is not None and getattr(endpoint, "api_socket", None) is not None:
-+            from websockets.asyncio.client import unix_connect
-+            peer = await _connect_shared_native(home, endpoint.api_socket)
-+            connector = unix_connect(uri=url, sock=peer, subprotocols=protocols, open_timeout=10,
-+                                     max_size=8 * 1024 * 1024, proxy=None)
-+        else:
-+            connector = connect(url, subprotocols=protocols, open_timeout=10,
-+                                max_size=8 * 1024 * 1024, proxy=None)
-+        async with connector as ws:
-             if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
-                 raise GatewayClientError("Gateway protocol mismatch; update/restart required")
-             async with GatewayClient(ws) as client:
-@@ -311,3 +357,7 @@
-         raise
-     except (OSError, TimeoutError) as exc:
-         raise GatewayClientError("Gateway connection failed; no local fallback") from exc
-+    finally:
-+        # Also covers cancellation and handshake failures before websockets takes ownership.
-+        if peer is not None:
-+            peer.close()
---- a/tui_gateway/owner_forward.py
-+++ b/tui_gateway/owner_forward.py
-@@ -78,17 +78,11 @@
- @contextlib.asynccontextmanager
- async def connect_owner(home: Path, endpoint):
-     """A ``GatewayClient`` on ``endpoint``, the ready gateway serving ``home``."""
--    from hermes_cli.gateway_client import GATEWAY_WS_PROTOCOL, GatewayClient, _session_ticket, gateway_ws_target
--    from websockets.asyncio.client import connect
--
--    ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
--    url, protocols = gateway_ws_target(endpoint, ticket)
--    # Loopback owner dial: never through HTTP(S)_PROXY (websockets>=14 honours it by default).
--    async with connect(url, subprotocols=protocols, open_timeout=10, proxy=None) as ws:
--        if ws.subprotocol != GATEWAY_WS_PROTOCOL:
--            raise OwnerUnavailable("the gateway answered with another protocol")
--        async with GatewayClient(ws) as client:
--            yield client
-+    from hermes_cli.gateway_client import connect_gateway
-+
-+    # Pin the selected owner even when the caller's current profile is different.
-+    async with connect_gateway(endpoint=endpoint, profile_home=home) as client:
-+        yield client
- 
- 
- def forwardable(refusal: Any, session: dict, text: Any, params: dict) -> bool:
+diff --git a/gateway/session_a2a.py b/gateway/session_a2a.py
 --- a/gateway/session_a2a.py
 +++ b/gateway/session_a2a.py
-@@ -144,39 +144,29 @@
+@@ -144,39 +144,29 @@ async def forward(connection, params):
  
  async def forward_to_owner(home, *, agent, tenant, peer, context_id, input_id, text, timeout):
      """Transport-only caller; a timeout never cancels or re-identifies accepted work."""
@@ -574,3 +392,201 @@
  
  
  async def _completion(client, admission_id):
+diff --git a/hermes_cli/gateway_client.py b/hermes_cli/gateway_client.py
+--- a/hermes_cli/gateway_client.py
++++ b/hermes_cli/gateway_client.py
+@@ -8,6 +8,7 @@ import contextvars
+ import json
+ import os
+ from pathlib import Path
++import socket
+ import time
+ 
+ # The owner's protocol name; session_contract is dependency-free (no config/plugins load).
+@@ -315,8 +316,41 @@ def outside_restart_wait():
+         _REFUSE_RESTART_WAIT.reset(token)
+ 
+ 
++async def _connect_shared_native(home: Path, api_socket: str) -> socket.socket:
++    """Connect only to the selected home's private relay and authenticate its kernel peer."""
++    from hermes_cli.gateway_runtime import _shared_native_api_socket
++    from hermes_cli.gateway_runtime_discovery import DiscoveryError, socket_peer_uid
++    try:
++        path = _shared_native_api_socket(home)
++    except DiscoveryError as exc:
++        raise GatewayClientError("Gateway shared-home API socket is unsafe") from exc
++    if str(path) != api_socket:
++        raise GatewayClientError("Gateway shared-home API socket does not match the selected profile")
++    before = path.lstat()
++    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++    try:
++        peer.setblocking(False)
++        async with asyncio.timeout(5):
++            await asyncio.get_running_loop().sock_connect(peer, str(path))
++        # Path validation alone cannot authenticate a listener swapped between lstat and connect.
++        if socket_peer_uid(peer) != os.getuid():
++            raise GatewayClientError("Gateway shared-home API peer is not the current user")
++        _shared_native_api_socket(home)
++        after = path.lstat()
++        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
++            raise GatewayClientError("Gateway shared-home API socket changed; retry launch")
++        return peer
++    except DiscoveryError as exc:
++        peer.close()
++        raise GatewayClientError("Gateway shared-home API socket is unsafe") from exc
++    except BaseException:
++        peer.close()
++        raise
++
++
+ @asynccontextmanager
+-async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 1024):
++async def connect_gateway(endpoint=None, subject=None, *, profile_home=None, scope=None,
++                          max_size=8 * 1024 * 1024):
+     """Attach to this home's owner. ``endpoint``: an already-discovered ready owner to dial as-is
+     (maintenance that must never start a gateway); default ensures one, starting it if needed.
+     ``subject``: mint the ticket for this principal (the caller's authenticated dashboard user)
+@@ -334,8 +368,15 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
+     remote = "" if endpoint is not None else os.environ.get("HERMES_TUI_GATEWAY_URL", "").strip()
+     protocols = None
+     if endpoint is not None:
+-        ticket = await asyncio.to_thread(_session_ticket, gateway_profile_home(get_hermes_home()), endpoint,
+-                                         subject=subject)
++        home = Path(profile_home) if profile_home is not None else \
++            Path(endpoint.api_socket).parent if getattr(endpoint, "api_socket", None) else \
++            gateway_profile_home(get_hermes_home())
++        if subject is None:
++            ticket = await asyncio.to_thread(_session_ticket, home, endpoint,
++                                             **({"scope": scope} if scope else {}))
++        else:
++            ticket = await asyncio.to_thread(_session_ticket, home, endpoint, subject=subject,
++                                             **({"scope": scope} if scope else {}))
+         url, protocols = gateway_ws_target(endpoint, ticket)
+     elif remote:
+         parsed = urlsplit(remote)
+@@ -366,12 +407,20 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
+             raise GatewayUnavailableError(f"Gateway inaccessible: {exc.reason}" + (f" ({detail})" if detail else ""),
+                                           "inaccessible", exc.reason) from exc
+         url, protocols = gateway_ws_target(endpoint, ticket)
++    peer = None
+     try:
+         # The gateway is a loopback (or explicitly named) peer, never something to route through the
+         # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
+         # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
+-        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=max_size,
+-                           proxy=None) as ws:
++        if endpoint is not None and getattr(endpoint, "api_socket", None) is not None:
++            from websockets.asyncio.client import unix_connect
++            peer = await _connect_shared_native(home, endpoint.api_socket)
++            connector = unix_connect(uri=url, sock=peer, subprotocols=protocols, open_timeout=10,
++                                     max_size=max_size, proxy=None)
++        else:
++            connector = connect(url, subprotocols=protocols, open_timeout=10,
++                                max_size=max_size, proxy=None)
++        async with connector as ws:
+             if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
+                 raise GatewayClientError("Gateway protocol mismatch; update/restart required")
+             async with GatewayClient(ws) as client:
+@@ -380,3 +429,7 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
+         raise
+     except (OSError, TimeoutError) as exc:
+         raise GatewayClientError("Gateway connection failed; no local fallback") from exc
++    finally:
++        # Also covers cancellation and handshake failures before websockets takes ownership.
++        if peer is not None:
++            peer.close()
+diff --git a/hermes_cli/gateway_runtime.py b/hermes_cli/gateway_runtime.py
+--- a/hermes_cli/gateway_runtime.py
++++ b/hermes_cli/gateway_runtime.py
+@@ -6,6 +6,7 @@ from dataclasses import dataclass
+ import ipaddress
+ import math
+ import os
++import stat
+ from pathlib import Path
+ from typing import TYPE_CHECKING, Literal
+ from urllib.parse import urlsplit
+@@ -36,6 +37,8 @@ class GatewayEndpoint:
+     # A gateway that outlived ``hermes update`` keeps serving old code, so an attaching client
+     # compares this with its own checkout and restarts the owner instead of re-attaching it.
+     code_sha: str | None = None
++    # Opt-in shared-home transport; the advertised loopback origin still governs the handshake.
++    api_socket: str | None = None
+ 
+ 
+ @dataclass(frozen=True)
+@@ -95,6 +98,18 @@ def _overlay_owner_home(home: Path) -> Path:
+     return target.parent
+ 
+ 
++def _shared_native_api_socket(home: Path) -> Path:
++    """Validate the selected profile's fixed, same-user native API relay path."""
++    from hermes_cli.gateway_runtime_discovery import DiscoveryError, _private_node
++    _private_node(home, kind="directory", home=True)
++    path = home / "gateway.api.sock"
++    node = _private_node(path, kind="socket")
++    if stat.S_IMODE(node.st_mode) != 0o600:
++        raise DiscoveryError("unsafe_control_permissions",
++                             f"{path} must have mode 0600")
++    return path
++
++
+ def _endpoint(payload: dict, home: Path, control_home: Path | None = None) -> GatewayDiscovery:
+     if type(payload.get("runtime_protocol")) is not int or payload["runtime_protocol"] != 1:
+         return GatewayDiscovery("incompatible", reason_code="runtime_protocol")
+@@ -143,12 +158,28 @@ def _endpoint(payload: dict, home: Path, control_home: Path | None = None) -> Ga
+     supervisor = payload.get("supervisor")
+     if supervisor not in {"none", "systemd", "launchd", "windows", "external"}:
+         return GatewayDiscovery("inaccessible", reason_code="invalid_supervisor")
++    api_socket = None
++    if os.name != "nt" and os.environ.get("OPC_HERMES_SHARED_NATIVE") == "1":
++        from hermes_cli.gateway_runtime_discovery import DiscoveryError
++        try:
++            api_socket = str(_shared_native_api_socket(home))
++        except FileNotFoundError:
++            # A live control owner without its relay is not an absent owner: never spawn another.
++            return GatewayDiscovery("inaccessible", reason_code="shared_native_unavailable",
++                                    detail="Gateway shared-home API socket is not ready")
++        except DiscoveryError as exc:
++            return GatewayDiscovery("inaccessible", reason_code=exc.reason,
++                                    detail=exc.bounded_detail(500))
++        except OSError:
++            return GatewayDiscovery("inaccessible", reason_code="shared_native_unavailable",
++                                    detail="Gateway shared-home API socket cannot be accessed")
+     return GatewayDiscovery("draining" if restart_wait else "ready", GatewayEndpoint(
+         profile_id=matches[0]["profile_id"], instance_id=instance,
+         authority_epoch=epoch, runtime_protocol=1, api_origin=origin,
+         supervisor=supervisor, capabilities=frozenset(capabilities),
+         control_home=str(control_home) if control_home is not None else None,
+         code_sha=code_sha if isinstance(code_sha := payload.get("code_sha"), str) and code_sha else None,
++        api_socket=api_socket,
+     ), reason_code=RESTART_WAIT_REASON if restart_wait else None)
+ 
+ 
+diff --git a/tui_gateway/owner_forward.py b/tui_gateway/owner_forward.py
+--- a/tui_gateway/owner_forward.py
++++ b/tui_gateway/owner_forward.py
+@@ -80,17 +80,12 @@ async def connect_owner(home: Path, endpoint, *, scope=None, max_size: int = 2 *
+     """A ``GatewayClient`` on ``endpoint``, the ready gateway serving ``home``; ``scope``: the
+     ticket's profile scope (``"host"``: the one native Desktop holds); ``max_size``: the largest
+     answer frame accepted (websockets' 1 MiB default)."""
+-    from hermes_cli.gateway_client import GATEWAY_WS_PROTOCOL, GatewayClient, _session_ticket, gateway_ws_target
+-    from websockets.asyncio.client import connect
+-
+-    ticket = await asyncio.to_thread(_session_ticket, home, endpoint, scope=scope)
+-    url, protocols = gateway_ws_target(endpoint, ticket)
+-    # Loopback owner dial: never through HTTP(S)_PROXY (websockets>=14 honours it by default).
+-    async with connect(url, subprotocols=protocols, open_timeout=10, proxy=None, max_size=max_size) as ws:
+-        if ws.subprotocol != GATEWAY_WS_PROTOCOL:
+-            raise OwnerUnavailable("the gateway answered with another protocol")
+-        async with GatewayClient(ws) as client:
+-            yield client
++    from hermes_cli.gateway_client import connect_gateway
++
++    # Pin the selected owner even when the caller's current profile is different.
++    async with connect_gateway(endpoint=endpoint, profile_home=home, scope=scope,
++                               max_size=max_size) as client:
++        yield client
+ 
+ 
+ def forwardable(refusal: Any, session: dict, text: Any, params: dict) -> bool:

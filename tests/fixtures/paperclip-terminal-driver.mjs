@@ -69,6 +69,16 @@ async function cleanup() {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   for (const id of [evidence.agentId, evidence.companyId, ...evidence.runs.map(r => r.runId)]) assert.match(id, uuid);
   await api('POST', `/agents/${evidence.agentId}/pause`, {});
+  // Since v2026.1023.0 the lifecycle owns removal: DELETE refuses a live agent
+  // with 409, so the owned fixture terminates first and waits for that state.
+  await api('POST', `/agents/${evidence.agentId}/terminate`, {});
+  let terminated = null;
+  for (let i = 0; i < 60; i++) {
+    terminated = await api('GET', `/agents/${evidence.agentId}`);
+    if (terminated.status === 'terminated' && terminated.lifecycleState === 'terminated') break;
+    await sleep(1000);
+  }
+  assert.equal(terminated?.lifecycleState, 'terminated', 'owned agent did not terminate');
   const runs = evidence.runs.map(r => `'${r.runId}'::uuid`).join(',');
   const owned = runs
     ? `company_id='${evidence.companyId}'::uuid AND agent_id='${evidence.agentId}'::uuid AND heartbeat_run_id IN (${runs})`
@@ -77,8 +87,23 @@ async function cleanup() {
   const guard = `agent_id='${evidence.agentId}'::uuid AND (NOT COALESCE((${owned}),FALSE) OR cost_cents <> 0 OR COALESCE(input_tokens,0) <> 0 OR COALESCE(cached_input_tokens,0) <> 0 OR COALESCE(output_tokens,0) <> 0)`;
   sql(`BEGIN; LOCK TABLE cost_events IN SHARE ROW EXCLUSIVE MODE; DO $$ BEGIN IF EXISTS (SELECT 1 FROM cost_events WHERE ${guard}) THEN RAISE EXCEPTION 'protected fixture accounting'; END IF; END $$; DELETE FROM cost_events WHERE ${owned} AND cost_cents=0 AND COALESCE(input_tokens,0)=0 AND COALESCE(cached_input_tokens,0)=0 AND COALESCE(output_tokens,0)=0; COMMIT;`);
   evidence.cleanup.zeroCostRowsRemoved = true;
-  await api('DELETE', `/agents/${evidence.agentId}`, undefined, [200, 204]);
-  assert.equal(await api('GET', `/agents/${evidence.agentId}`, undefined, [404]), null);
+  // The accounting projection may still land a zero-cost row after the first
+  // pass; an FK then fails the delete. Re-run the owned-row purge and retry.
+  let removed = false;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const result = await api('DELETE', `/agents/${evidence.agentId}`, undefined, [200, 204, 500]);
+    if (result === null || result.ok === true) { removed = true; break; }
+    sql(`DELETE FROM cost_events WHERE ${owned} AND cost_cents=0 AND COALESCE(input_tokens,0)=0 AND COALESCE(cached_input_tokens,0)=0 AND COALESCE(output_tokens,0)=0;`);
+    await sleep(1000);
+  }
+  assert.ok(removed, 'owned agent delete failed');
+  let absent = false;
+  for (let i = 0; i < 30; i++) {
+    const state = await api('GET', `/agents/${evidence.agentId}`, undefined, [200, 404]);
+    if (state === null) { absent = true; break; }
+    await sleep(500);
+  }
+  assert.ok(absent, 'owned agent still present after delete');
   evidence.cleanup.agentDeleted = true;
   const logRoot = process.env.RUN_LOG_BASE_PATH || '/paperclip/instances/default/data/run-logs';
   for (const entry of evidence.runs.filter(r => r.logRef)) {

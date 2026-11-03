@@ -243,7 +243,7 @@ p="$fx/upstream/paperclip"
 git_init "$p"
 mkdir -p "$p/scripts" "$p/server" "$p/ui" "$p/packages/db/src/migrations" \
     "$p/packages/adapters/claude-local/src/server" "$p/server/src/services" \
-    "$fx/patches/paperclip/patches"
+    "$p/packages/paperclip-runner" "$fx/patches/paperclip/patches"
 printf 'x\n' > "$p/package.json"
 printf 'lock\n' > "$p/pnpm-lock.yaml"
 printf 'x\n' > "$p/scripts/docker-entrypoint.sh"
@@ -252,13 +252,9 @@ printf 'FROM scratch\n' > "$p/Dockerfile"
 printf 'CREATE TABLE a();\n' > "$p/packages/db/src/migrations/0001_a.sql"
 printf 'export const config = {};\n' > "$p/packages/adapters/claude-local/src/server/acp.ts"
 printf 'export const runtimeTools = true;\n' > "$p/server/src/services/heartbeat.ts"
-cat > "$fx/patches/paperclip/patches/server-runtime-dependencies-lock.patch" <<'EOF'
---- a/pnpm-lock.yaml
-+++ b/pnpm-lock.yaml
-@@ -1 +1,2 @@
- lock
-+dependency
-EOF
+printf 'digest\n' > "$p/packages/paperclip-runner/attestation.json"
+printf 'probe\n' > "$p/packages/adapters/claude-local/src/server/probe.ts"
+printf 'harness\n' > "$p/server/src/services/harness.ts"
 cat > "$fx/patches/paperclip/patches/omp-acpx-runtime-env.patch" <<'EOF'
 --- a/packages/adapters/claude-local/src/server/acp.ts
 +++ b/packages/adapters/claude-local/src/server/acp.ts
@@ -272,6 +268,27 @@ cat > "$fx/patches/paperclip/patches/task-bound-runtime-mcp.patch" <<'EOF'
 @@ -1 +1,2 @@
  export const runtimeTools = true;
 +export const scoped = true;
+EOF
+cat > "$fx/patches/paperclip/patches/acpx-profile-attestation.patch" <<'EOF'
+--- a/packages/paperclip-runner/attestation.json
++++ b/packages/paperclip-runner/attestation.json
+@@ -1 +1,2 @@
+ digest
++updated-digest
+EOF
+cat > "$fx/patches/paperclip/patches/custom-acp-command-probe.patch" <<'EOF'
+--- a/packages/adapters/claude-local/src/server/probe.ts
++++ b/packages/adapters/claude-local/src/server/probe.ts
+@@ -1 +1,2 @@
+ probe
++skip-probe
+EOF
+cat > "$fx/patches/paperclip/patches/harness-health-verification.patch" <<'EOF'
+--- a/server/src/services/harness.ts
++++ b/server/src/services/harness.ts
+@@ -1 +1,2 @@
+ harness
++accept-health
 EOF
 mkdir -p "$p/patches"
 printf 'package-env\n' > "$p/patches/acpx@0.12.0.patch"
@@ -288,12 +305,16 @@ git_tag "$p" v1.1.0
 git -C "$p" checkout -q v1.0.0
 run paperclip v1.1.0
 expect_rc 0 "paperclip overlays apply"
-for overlay in server-runtime-dependencies-lock omp-acpx-runtime-env task-bound-runtime-mcp acpx-terminal-env; do
+for overlay in omp-acpx-runtime-env task-bound-runtime-mcp acpx-terminal-env; do
     git -C "$p" checkout -q v1.0.0
-    if [ "$overlay" = server-runtime-dependencies-lock ]; then
-        printf 'lock changed\n' > "$p/pnpm-lock.yaml"
-    elif [ "$overlay" = task-bound-runtime-mcp ]; then
+    if [ "$overlay" = task-bound-runtime-mcp ]; then
         printf 'export const runtimeTools = false;\n' > "$p/server/src/services/heartbeat.ts"
+    elif [ "$overlay" = acpx-profile-attestation ]; then
+        printf 'changed\n' > "$p/packages/paperclip-runner/attestation.json"
+    elif [ "$overlay" = custom-acp-command-probe ]; then
+        printf 'changed\n' > "$p/packages/adapters/claude-local/src/server/probe.ts"
+    elif [ "$overlay" = harness-health-verification ]; then
+        printf 'changed\n' > "$p/server/src/services/harness.ts"
     elif [ "$overlay" = acpx-terminal-env ]; then
         printf 'package-env changed\n' > "$p/patches/acpx@0.12.0.patch"
     else

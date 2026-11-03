@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.19
-# OPC Hermes v0.22.5: upstream PM/runtime/products with OPC persistent tools and identities.
+# OPC Hermes v0.22.6: upstream PM/runtime/products with OPC persistent tools and identities.
 ARG NIX_SEED_IMAGE=opc/nix-seed:local
 ARG BUZZ_IMAGE=opc/frontdoor:local
 FROM ${NIX_SEED_IMAGE} AS nix-seed
@@ -81,7 +81,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools
 # names (see .hermes/plans/termux-removal-commit-spec.md).
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-    ca-certificates curl iputils-ping python3 python-is-python3 gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git patch openssh-client docker-cli xz-utils \
+    ca-certificates curl iputils-ping python3 python-is-python3 gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git patch openssh-client docker-cli xz-utils tmux \
     libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 && \
     rm -rf /var/lib/apt/lists/*
 
@@ -200,10 +200,11 @@ WORKDIR /opt/hermes
 # here rather than by `npx playwright install`,
 # which fetched whatever revision the npm-resolved playwright wanted,
 # unverified, and recorded no fact. The resolved browser binary path is
-# baked to /etc/hermes/agent-browser-executable-path for stage2-hook.sh:
-# the layout differs per arch (chrome-linux64/chrome on amd64,
-# chromium-linux-arm64/chromium on arm64), so it is resolved at build time
-# and never hunted at boot.
+# baked to /etc/hermes/chromium-executable-path: the layout differs per arch
+# (chrome-linux64/chrome on amd64, chromium-linux-arm64/chromium on arm64),
+# so it is resolved at build time and never hunted at boot. Hermes reads it
+# itself (hermes_cli/browser_runtime.py); stage2-hook.sh only checks it names
+# a runnable binary.
 ENV HERMES_RUNTIME_DIR=/opt/hermes/tools
 COPY pm/ pm/
 # pm's lazy imports resolve get_default_hermes_root()/project_venv_dir()
@@ -224,7 +225,7 @@ RUN set -eu; \
     test -n "$browser_bin"; \
     "$browser_bin" --version; \
     mkdir -p /etc/hermes; \
-    printf '%s' "$browser_bin" > /etc/hermes/agent-browser-executable-path
+    printf '%s' "$browser_bin" > /etc/hermes/chromium-executable-path
 
 # PM is resident too: never borrow application libraries or create its worker
 # environment under /root (unreachable to the runtime UID).
@@ -291,7 +292,7 @@ RUN python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3
     --out /opt/hermes/.venv --no-install-project --sealed --record-selection \
     --cache /opt/hermes/uv-cache \
     --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
-    --extra azure-identity --extra matrix --extra google-chat
+    --extra azure-identity --extra matrix --extra google-chat --extra fal --extra documents
 
 # Icons render on the runtime environment: Pillow and resvg-py are core
 # dependencies. A stage of its own so the frontend stage keeps building its
@@ -324,6 +325,23 @@ COPY --from=icons /tmp/hermes-icons /tmp/hermes-icons
 RUN node scripts/build/tui.mjs --source /opt/hermes --out /opt/products/tui && \
     node scripts/build/web.mjs --source /opt/hermes --icons /tmp/hermes-icons --out /opt/products/web
 
+# The Webapp (the browser-hosted Desktop) builds through its source recipe,
+# which installs Desktop's dependencies in a private workspace. A stage of its
+# own so Desktop changes leave the TUI and dashboard layers cached (upstream
+# v0.22.6).
+FROM runtime_base AS webapp_build
+COPY package.json package-lock.json .npmrc ./
+COPY apps/desktop/package.json apps/desktop/
+COPY apps/desktop/scripts/build-webapp.mjs apps/desktop/scripts/
+COPY apps/shared/package.json apps/shared/
+COPY scripts/build/*.mjs scripts/build/
+ENV npm_config_install_links=false
+# Dependencies first, keyed only by the manifests and the recipe, so a source
+# change reuses this layer and the build below reuses its install.
+RUN node apps/desktop/scripts/build-webapp.mjs --deps-only
+COPY apps/ apps/
+RUN node apps/desktop/scripts/build-webapp.mjs
+
 FROM python_deps AS runtime
 # Standalone TypeScript linting is a runtime feature; Vite/esbuild are not.
 COPY --from=frontend_build /opt/hermes/node_modules/typescript /opt/hermes/node_modules/typescript
@@ -349,6 +367,7 @@ RUN cd plugins/platforms/photon/sidecar && \
 # Shared product outputs are independent of application dependency assembly.
 COPY --from=frontend_build /opt/products/tui /opt/hermes/ui-tui
 COPY --from=frontend_build /opt/products/web /opt/hermes/hermes_cli/web_dist
+COPY --from=webapp_build /opt/hermes/apps/desktop/dist-webapp /opt/hermes/apps/desktop/dist-webapp
 # ---------- Bot Screen X socket directory ----------
 # Xvnc would create this itself (/tmp is 1777); pre-creating it keeps ownership
 # deterministic when HERMES_UID is remapped between boots.
@@ -399,12 +418,12 @@ RUN mkdir -p /opt/hermes/bin && \
 # ---------- Image provenance + install stamp ----------
 ARG HERMES_GIT_SHA=bf0203a794a07aac3ff764972ab9087baa4e4f4e
 RUN python3 scripts/write_install_stamp.py --output /opt/hermes/install-stamp.json \
-    --commit "${HERMES_GIT_SHA}" --base-version 0.22.5 --display-version 0.22.5 \
+    --commit "${HERMES_GIT_SHA}" --base-version 0.22.6 --display-version 0.22.6 \
     --distance 0 --source opc --distribution docker --update-mechanism external \
     --runtime-dir tools
 # The stamp is code-scoped; the immutable-image marker is outside both the
 # install tree and mutable home. Neither can be clobbered by a home mount.
-RUN python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/hermes","version":"0.22.5","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)'
+RUN python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/hermes","version":"0.22.6","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)'
 
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.
@@ -473,6 +492,10 @@ ENV XDG_RUNTIME_DIR=/tmp/hermes-runtime
 # the opt-out env var (HERMES_DOCKER_EXEC_AS_ROOT=1).
 COPY --chmod=0755 docker/hermes-exec-shim.sh /opt/hermes/bin/hermes
 COPY --chmod=0755 docker/entrypoint-dispatch.sh /opt/hermes/docker/entrypoint-dispatch.sh
+# Login shells re-read /etc/profile, which resets PATH; this re-adds the
+# hermes bin dirs above (upstream v0.22.6). OPC's own profile.d script below
+# appends the nix/mise entries on top.
+COPY --chmod=0644 docker/profile-hermes-path.sh /etc/profile.d/hermes.sh
 
 # Pre-s6 entrypoint.sh did `source .venv/bin/activate` which exported
 # the venv bin onto PATH; Architecture B's main-wrapper.sh does the

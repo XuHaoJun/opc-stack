@@ -89,16 +89,18 @@ COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
-# Reconcile the declared runtime graph and scoped terminal package patches
-# before frozen installation; the build-only patch tool never enters runtime.
-COPY opc/patches/server-runtime-dependencies-lock.patch opc/patches/acpx-terminal-env.patch /tmp/
+# Apply the scoped terminal package patches, then let pnpm reconcile the
+# declared runtime graph in the image's private build tree (upstream
+# v2026.1023.0). The acpx patch changes the patchedDependencies hash, so the
+# resolution pass is what keeps the frozen install honest; no lock overlay is
+# carried here any more. The build-only patch tool never enters runtime.
+COPY opc/patches/acpx-terminal-env.patch /tmp/
 RUN apt-get update \
   && apt-get install -y --no-install-recommends patch \
   && rm -rf /var/lib/apt/lists/* \
   && patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/acpx-terminal-env.patch \
-  && patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/server-runtime-dependencies-lock.patch \
-  && rm /tmp/server-runtime-dependencies-lock.patch /tmp/acpx-terminal-env.patch
-RUN pnpm install --frozen-lockfile
+  && rm /tmp/acpx-terminal-env.patch
+RUN pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile && pnpm install --frozen-lockfile
 
 FROM base AS rust-toolchain
 WORKDIR /app
@@ -171,10 +173,13 @@ COPY --from=deps /app/patches/acpx@0.12.0.patch /app/patches/acpx@0.13.1.patch p
 # Keep the closed host projection intact; the adapter contributes only OPC
 # capabilities, and remote callers still supply no host environment.
 COPY --from=deps /usr/bin/patch /usr/local/bin/opc-build-patch
-COPY opc/patches/omp-acpx-runtime-env.patch opc/patches/task-bound-runtime-mcp.patch /tmp/
+COPY opc/patches/omp-acpx-runtime-env.patch opc/patches/task-bound-runtime-mcp.patch opc/patches/acpx-profile-attestation.patch opc/patches/custom-acp-command-probe.patch opc/patches/harness-health-verification.patch /tmp/
 RUN opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/omp-acpx-runtime-env.patch \
   && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/task-bound-runtime-mcp.patch \
-  && rm /tmp/omp-acpx-runtime-env.patch /tmp/task-bound-runtime-mcp.patch /usr/local/bin/opc-build-patch
+  && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/acpx-profile-attestation.patch \
+  && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/custom-acp-command-probe.patch \
+  && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/harness-health-verification.patch \
+  && rm /tmp/omp-acpx-runtime-env.patch /tmp/task-bound-runtime-mcp.patch /tmp/acpx-profile-attestation.patch /tmp/custom-acp-command-probe.patch /tmp/harness-health-verification.patch /usr/local/bin/opc-build-patch
 RUN find packages/paperclip-runner/runner packages/paperclip-runner/protocol -type f -exec touch -d @0 {} + \
   && touch -d @0 packages/paperclip-runner/rust-toolchain.toml
 # Both the browser bundle and server stamp need the exact source commit.

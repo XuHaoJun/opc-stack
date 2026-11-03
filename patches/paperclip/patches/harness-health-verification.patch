@@ -1,0 +1,16 @@
+--- a/server/src/services/agent-harness-verification.ts
++++ b/server/src/services/agent-harness-verification.ts
+@@ -14,8 +14,12 @@
+ import type { LifecycleAgent } from "../modules/agent-lifecycle/index.js";
+ 
+ export function assertHarnessTestPassed(result: AdapterEnvironmentTestResult) {
++  // OPC overlay: non-Claude adapters (hermes_gateway and other remote
++  // harnesses) report success through their own *_health_ok probe; requiring a
++  // Claude hello probe here would pause every such agent at creation.
+   const verified = result.checks.some(check => check.level === "info" &&
+-    (/hello_probe_(passed|succeeded)$/.test(check.code) || check.code === "ai_connection_api_key_reverified"));
++    (/hello_probe_(passed|succeeded)$/.test(check.code) || check.code === "ai_connection_api_key_reverified"
++      || /_health_ok$/.test(check.code)));
+   const authenticationFailed = result.checks.some(check =>
+     check.code === ADAPTER_AUTH_MISSING_CHECK_CODE || /_hello_probe_auth_required$/.test(check.code));
+   const incomplete = !verified && (result.status === "warn" || result.checks.some(check => check.code.includes("hello_probe")));

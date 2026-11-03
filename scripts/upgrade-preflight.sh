@@ -211,7 +211,7 @@ paperclip)
   # and task-bound MCP advertisement. Probe each even without SQL changes.
   tmp="$(mktemp -d)"
   if git -C "$UP" archive "$TAG" | tar -x -C "$tmp"; then
-    for overlay in server-runtime-dependencies-lock omp-acpx-runtime-env task-bound-runtime-mcp acpx-terminal-env; do
+    for overlay in omp-acpx-runtime-env task-bound-runtime-mcp acpx-terminal-env acpx-profile-attestation custom-acp-command-probe harness-health-verification; do
       pf="patches/paperclip/patches/$overlay.patch"
       if [ ! -f "$pf" ]; then
         finding "overlay patch missing: $pf"

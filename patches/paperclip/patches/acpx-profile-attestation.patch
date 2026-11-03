@@ -1,0 +1,141 @@
+--- a/packages/paperclip-runner/acpx-profiles.json
++++ b/packages/paperclip-runner/acpx-profiles.json
+@@ -19,7 +19,7 @@
+       "agentServerVersion": "0.0.33",
+       "agentRuntimePackage": "@earendil-works/pi-coding-agent",
+       "agentRuntimeVersion": "1.0.0",
+-      "commandDigest": "sha256:e92078bee3c23bec4100aa589013a44613d054cd686826534025d8019e9f39a9",
++      "commandDigest": "sha256:fff690518b765a9a656f27398b3991fc1d3e045d64919411c8b52b0d1870b5d0",
+       "requiresProviderPolicy": true
+     },
+     "cursor": {
+@@ -28,7 +28,7 @@
+       "agentServerVersion": "2026.09.26-dd393fe",
+       "agentRuntimePackage": null,
+       "agentRuntimeVersion": null,
+-      "commandDigest": "sha256:ac8092119542c8fbe95dae18ba5ef4d3689803fec56b7d2735fa193eea42f59b",
++      "commandDigest": "sha256:cd218a6d636e74871f1f3b92db4095b4334e926ae32b20d8550c92d5f95faeb3",
+       "requiresProviderPolicy": true
+     },
+     "copilot": {
+@@ -37,7 +37,7 @@
+       "agentServerVersion": "1.0.88",
+       "agentRuntimePackage": null,
+       "agentRuntimeVersion": null,
+-      "commandDigest": "sha256:481d0852ae8272a90f9912723d540518a874a0da65a9070e33b52ea1a14cbd7f",
++      "commandDigest": "sha256:838af528918a07791f63c1fb313c1e3222560623a39ac7a50bf720909b6ba761",
+       "requiresProviderPolicy": true,
+       "qualificationStatus": "pending"
+     },
+--- a/packages/paperclip-runner/cursor-contract.json
++++ b/packages/paperclip-runner/cursor-contract.json
+@@ -5,7 +5,7 @@
+   "base": "dd868ed125cd709506dd9b29fca640a44d580501",
+   "vendor": "2026.09.26-dd393fe",
+   "nativePatch": "paperclip-cursor-usage-v4",
+-  "acpxPatchSha256": "00d6af17216cb0cad902b48633eb19bf0ec6b05837a984cb24661fca593f09c1",
++  "acpxPatchSha256": "f0fbe85a4dc7c222ef0d1ab409a04da132a5342a27809c59d3b02cd3557e39c3",
+   "publicSetup": "paperclipai runtime setup cursor",
+   "assets": "public-server-and-provider-pack",
+   "modes": [
+@@ -19,5 +19,5 @@
+   "planAcceptance": "successful-run-open-task-explicit-continuation",
+   "otherProviders": "mainline-gated",
+   "modelSelection": "explicit-provider-verified-startup-and-reconnect",
+-  "commandDigest": "sha256:ac8092119542c8fbe95dae18ba5ef4d3689803fec56b7d2735fa193eea42f59b"
++  "commandDigest": "sha256:cd218a6d636e74871f1f3b92db4095b4334e926ae32b20d8550c92d5f95faeb3"
+ }
+--- a/packages/paperclip-runner/test-fixtures/pi-acp/profile-v22-identity.json
++++ b/packages/paperclip-runner/test-fixtures/pi-acp/profile-v22-identity.json
+@@ -1,5 +1,5 @@
+ {
+-  "commandDigest": "sha256:e92078bee3c23bec4100aa589013a44613d054cd686826534025d8019e9f39a9",
++  "commandDigest": "sha256:fff690518b765a9a656f27398b3991fc1d3e045d64919411c8b52b0d1870b5d0",
+   "declaration": {
+     "schema": "paperclip.acpx_profile_declaration.v1",
+     "agent": "pi",
+@@ -20,7 +20,7 @@
+     "nativeQuestions": "select-confirm-input-editor-v4-root-field-types",
+     "pathPolicy": "sdk-normalization-v1",
+     "mcpToolNames": "provider-safe-exact-source-v1",
+-    "acpxPatchSha256": "00d6af17216cb0cad902b48633eb19bf0ec6b05837a984cb24661fca593f09c1",
++    "acpxPatchSha256": "f0fbe85a4dc7c222ef0d1ab409a04da132a5342a27809c59d3b02cd3557e39c3",
+     "nativeAssistantMessages": "pi1-rpc-deltas-v3-bound-message-and-tool-receipts",
+     "nativeNotices": "session-extension-v2-bounded-runtime-failure",
+     "messageProjectionSha256": "17d1e91b948dfa6a56e1905645add52b502041ad843c8d50a13b07956f22aadd",
+--- a/packages/paperclip-runner/test/fixtures/copilot-profile-v17-identity.json
++++ b/packages/paperclip-runner/test/fixtures/copilot-profile-v17-identity.json
+@@ -1,5 +1,5 @@
+ {
+-  "commandDigest": "sha256:481d0852ae8272a90f9912723d540518a874a0da65a9070e33b52ea1a14cbd7f",
++  "commandDigest": "sha256:838af528918a07791f63c1fb313c1e3222560623a39ac7a50bf720909b6ba761",
+   "declaration": {
+     "schema": "paperclip.acpx_profile_declaration.v1",
+     "agent": "copilot",
+@@ -7,7 +7,7 @@
+     "acpxVersion": "0.13.1",
+     "agentServerVersion": "1.0.88",
+     "protocolPolicyRevision": "copilot-agent-manual-v1",
+-    "acpxPatchSha256": "00d6af17216cb0cad902b48633eb19bf0ec6b05837a984cb24661fca593f09c1",
++    "acpxPatchSha256": "f0fbe85a4dc7c222ef0d1ab409a04da132a5342a27809c59d3b02cd3557e39c3",
+     "policySha256": "a4be69be43db84052560420a3ca546a665c9165573c24d543eb33d144ba138a3",
+     "distributionSourceSha256": "c0a65e247fc47b263bd369a3d5ab505c4b323d4e6493be8a9ecbeb0e9dbb9107",
+     "agentFilesBinding": "registered-runtime-context-v1",
+--- a/packages/paperclip-runner/src/drivers/acpx/generated-profiles.ts
++++ b/packages/paperclip-runner/src/drivers/acpx/generated-profiles.ts
+@@ -27,7 +27,7 @@
+     "agentServerVersion": "0.0.33",
+     "agentRuntimePackage": "@earendil-works/pi-coding-agent",
+     "agentRuntimeVersion": "1.0.0",
+-    "commandDigest": "sha256:e92078bee3c23bec4100aa589013a44613d054cd686826534025d8019e9f39a9",
++    "commandDigest": "sha256:fff690518b765a9a656f27398b3991fc1d3e045d64919411c8b52b0d1870b5d0",
+     "permissionPolicy": "interactive"
+   },
+   "cursor": {
+@@ -40,7 +40,7 @@
+     "agentServerVersion": "2026.09.26-dd393fe",
+     "agentRuntimePackage": null,
+     "agentRuntimeVersion": null,
+-    "commandDigest": "sha256:ac8092119542c8fbe95dae18ba5ef4d3689803fec56b7d2735fa193eea42f59b",
++    "commandDigest": "sha256:cd218a6d636e74871f1f3b92db4095b4334e926ae32b20d8550c92d5f95faeb3",
+     "permissionPolicy": "interactive"
+   },
+   "copilot": {
+@@ -53,7 +53,7 @@
+     "agentServerVersion": "1.0.88",
+     "agentRuntimePackage": null,
+     "agentRuntimeVersion": null,
+-    "commandDigest": "sha256:481d0852ae8272a90f9912723d540518a874a0da65a9070e33b52ea1a14cbd7f",
++    "commandDigest": "sha256:838af528918a07791f63c1fb313c1e3222560623a39ac7a50bf720909b6ba761",
+     "qualificationStatus": "pending",
+     "permissionPolicy": "interactive"
+   },
+--- a/packages/paperclip-runner/runner/crates/runner-core/src/generated_acpx_profiles.rs
++++ b/packages/paperclip-runner/runner/crates/runner-core/src/generated_acpx_profiles.rs
+@@ -29,7 +29,7 @@
+             agent_runtime_package: Some("@earendil-works/pi-coding-agent"),
+             agent_runtime_version: Some("1.0.0"),
+             command_digest:
+-                "sha256:e92078bee3c23bec4100aa589013a44613d054cd686826534025d8019e9f39a9",
++                "sha256:fff690518b765a9a656f27398b3991fc1d3e045d64919411c8b52b0d1870b5d0",
+             requires_provider_policy: true,
+         },
+         "cursor" => AcpxReleaseProfile {
+@@ -38,7 +38,7 @@
+             agent_runtime_package: None,
+             agent_runtime_version: None,
+             command_digest:
+-                "sha256:ac8092119542c8fbe95dae18ba5ef4d3689803fec56b7d2735fa193eea42f59b",
++                "sha256:cd218a6d636e74871f1f3b92db4095b4334e926ae32b20d8550c92d5f95faeb3",
+             requires_provider_policy: true,
+         },
+         "copilot" => AcpxReleaseProfile {
+@@ -47,7 +47,7 @@
+             agent_runtime_package: None,
+             agent_runtime_version: None,
+             command_digest:
+-                "sha256:481d0852ae8272a90f9912723d540518a874a0da65a9070e33b52ea1a14cbd7f",
++                "sha256:838af528918a07791f63c1fb313c1e3222560623a39ac7a50bf720909b6ba761",
+             requires_provider_policy: true,
+         },
+         "claude" => AcpxReleaseProfile {

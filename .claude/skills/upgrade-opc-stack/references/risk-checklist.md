@@ -108,10 +108,20 @@ memorized — this table is the starting hint list.
   lags the git tag (0.19.0 vs 0.20.1): installs are editable-from-git-tag.
 - **paperclip** — `pi_local` adapter is incompatible with omp v17; agents
   use `claude_local` + `engine:"acp"` + `agentCommand:"omp acp --yolo"`.
+  Since `v2026.1023.0` agent creation runs a harness environment test
+  (`server/src/services/agent-harness-verification.ts`) and pauses agents that
+  fail it. Two OPC overlays keep the bootstrap agents creatable:
+  `custom-acp-command-probe.patch` skips the Claude login probe when a custom
+  ACP `agentCommand` is configured, and `harness-health-verification.patch`
+  accepts an adapter `*_health_ok` check (hermes_gateway) as verification.
+  Remove either and every fresh-install agent is paused. Deletion is now
+  `POST /agents/:id/terminate` → wait for `lifecycleState === "terminated"` →
+  `DELETE` (the terminal gate's fixture encodes this).
   Production image installs `claude-code@latest codex@latest opencode-ai
   gemini-cli@latest` — these float; a paperclip bump can pull new CLI
   versions. Verify the ACP handshake after upgrade (`acp-smoke-test.mjs` in
-  the paperclip container).
+  the paperclip container) and run `tests/paperclip-acp-terminal.sh`; its
+  cleanup depends on the lifecycle contract above.
 - **tencentdb** — upstream `MemoryKnowledge/Dockerfile` is broken; hub uses
   `deploy/panel-knowledge-combined` (verify still present at new tag).
   Core sqlite migrates online and one-way (`ALTER TABLE ADD COLUMN`, and an FTS5

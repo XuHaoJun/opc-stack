@@ -1,10 +1,10 @@
 --- a/patches/acpx@0.12.0.patch
 +++ b/patches/acpx@0.12.0.patch
-@@ -44,7 +44,93 @@
+@@ -43,7 +43,93 @@
   		stdio: [
   			"pipe",
   			"pipe",
--@@ -3724,10 +3724,13 @@ function resolveClientCapabilities(params) {
+-@@ -3724,10 +3724,13 @@
 +@@ -3124,14 +3124,13 @@
 + 	const renderedArgs = (args ?? []).map((arg) => JSON.stringify(arg)).join(" ");
 + 	return renderedArgs.length > 0 ? `${command} ${renderedArgs}` : command;
@@ -91,15 +91,15 @@
 + 	if (spawnCommand.killProcessGroup) spawnOptions.detached = true;
 + 	const proc = spawn(spawnCommand.command, spawnCommand.args, spawnOptions);
 + 	await waitForSpawn(proc);
-+@@ -3724,10 +3727,13 @@ function resolveClientCapabilities(params) {
++@@ -3724,10 +3727,13 @@
   		},
   		terminal: params.terminal
   	};
-@@ -60,7 +146,16 @@
+@@ -59,7 +145,16 @@
   	};
   }
   function isDevinRequestDiagnosticsMethod(method) {
--@@ -3957,9 +3960,26 @@ var AcpClient = class {
+-@@ -3957,9 +3960,26 @@
 +@@ -3878,6 +3884,8 @@
 + 		});
 + 		this.terminalManager = new TerminalManager({
@@ -109,44 +109,45 @@
 + 			permissionMode: this.options.permissionMode,
 + 			nonInteractivePermissions: this.options.nonInteractivePermissions,
 + 			onOperation: (operation) => {
-+@@ -3957,9 +3965,26 @@ var AcpClient = class {
++@@ -3957,9 +3965,26 @@
   		this.lastAgentExit = void 0;
   		this.lastKnownPid = child.pid ?? void 0;
   		this.attachAgentLifecycleObservers(child);
-@@ -87,7 +182,7 @@
+@@ -86,7 +181,7 @@
   			if (!this.options.verbose) return;
   			process.stderr.write(chunk);
   		});
--@@ -3994,7 +4014,7 @@ var AcpClient = class {
-+@@ -3994,7 +4019,7 @@ var AcpClient = class {
+-@@ -3994,7 +4014,7 @@
++@@ -3994,7 +4019,7 @@
   			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
   			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
   			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
-@@ -96,7 +191,7 @@
-  		};
+@@ -105,7 +200,7 @@
+  			throw error;
+  		}
   	}
-  	logAgentLaunch(plan) {
--@@ -6070,6 +6090,27 @@ async function withConnectedSession(options) {
-+@@ -6070,6 +6095,27 @@ async function withConnectedSession(options) {
+-@@ -6070,6 +6093,27 @@
++@@ -6070,6 +6098,27 @@
   //#region src/runtime/engine/prompt-turn.ts
   const SESSION_REPLY_IDLE_MS = 1e3;
   const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
-@@ -124,7 +219,7 @@
+@@ -133,7 +228,7 @@
   async function runPromptTurn(params) {
   	try {
   		const promptPromise = params.client.prompt(params.sessionId, params.prompt);
--@@ -6079,6 +6120,20 @@ async function runPromptTurn(params) {
-+@@ -6079,6 +6125,20 @@ async function runPromptTurn(params) {
+-@@ -6079,6 +6123,20 @@
++@@ -6079,6 +6128,20 @@
   			idleMs: SESSION_REPLY_IDLE_MS,
   			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
   		}).catch(() => {});
+
 --- a/patches/acpx@0.13.1.patch
 +++ b/patches/acpx@0.13.1.patch
-@@ -99,7 +99,93 @@
-  		stdio: [
-  			"pipe",
-  			"pipe",
--@@ -3961,10 +3977,13 @@ function resolveClientCapabilities(params) {
+@@ -266,7 +266,93 @@
+  }
+  //#endregion
+  //#region src/acp/session-control-errors.ts
+-@@ -3961,10 +4052,13 @@
 +@@ -3347,14 +3363,12 @@
 + 	const renderedArgs = (args ?? []).map((arg) => JSON.stringify(arg)).join(" ");
 + 	return renderedArgs.length > 0 ? `${command} ${renderedArgs}` : command;
@@ -233,33 +234,33 @@
 + 	if (spawnCommand.killProcessGroup) spawnOptions.detached = true;
 + 	const proc = spawn(spawnCommand.command, spawnCommand.args, spawnOptions);
 + 	await waitForSpawn(proc);
-+@@ -3961,10 +3980,13 @@ function resolveClientCapabilities(params) {
++@@ -3961,10 +4055,13 @@
   			...params.elicitationModes.includes("url") ? { url: {} } : {}
   		} } : {}
   	};
-@@ -115,7 +201,7 @@
+@@ -282,7 +368,7 @@
   	};
   }
   function hasResponseField(response, field) {
--@@ -4067,6 +4086,27 @@ function createNdJsonMessageStream(agentCommand, output, input) {
-+@@ -4067,6 +4089,27 @@ function createNdJsonMessageStream(agentCommand, output, input) {
+-@@ -4067,6 +4161,27 @@
++@@ -4067,6 +4164,27 @@
   		} })
   	};
   }
-@@ -143,7 +229,7 @@
+@@ -310,7 +396,7 @@
   var AcpClient = class {
   	options;
   	connection;
--@@ -4105,7 +4145,9 @@ var AcpClient = class {
-+@@ -4105,7 +4148,9 @@ var AcpClient = class {
+-@@ -4105,7 +4220,9 @@
++@@ -4105,7 +4223,9 @@
   			cwd: asAbsoluteCwd(options.cwd),
   			authPolicy: options.authPolicy ?? "skip",
   			permissionPolicy: snapshotPermissionPolicy(options.permissionPolicy),
-@@ -154,7 +240,16 @@
+@@ -321,7 +407,16 @@
   		};
   		this.eventHandlers = {
   			onAcpMessage: this.options.onAcpMessage,
--@@ -4216,9 +4258,21 @@ var AcpClient = class {
+-@@ -4216,9 +4333,21 @@
 +@@ -4124,6 +4169,8 @@
 + 		});
 + 		this.terminalManager = new TerminalManager({
@@ -269,205 +270,196 @@
 + 			permissionMode: this.options.permissionMode,
 + 			nonInteractivePermissions: this.options.nonInteractivePermissions,
 + 			onOperation: (operation) => {
-+@@ -4216,9 +4263,21 @@ var AcpClient = class {
++@@ -4216,9 +4338,21 @@
   		this.lastAgentExit = void 0;
   		this.lastKnownPid = child.pid ?? void 0;
   		this.attachAgentLifecycleObservers(child);
-@@ -176,7 +271,7 @@
+@@ -343,7 +438,7 @@
   			if (!this.options.verbose) return;
   			process.stderr.write(chunk);
   		});
--@@ -4226,6 +4280,7 @@ var AcpClient = class {
-+@@ -4226,6 +4285,7 @@ var AcpClient = class {
+-@@ -4226,6 +4355,7 @@
++@@ -4226,6 +4360,7 @@
   		const output = Readable.toWeb(child.stdout);
   		const stream = this.createTappedStream(createNdJsonMessageStream(this.options.agentCommand, input, output));
   		const connection = this.createConnection(stream, launch);
-@@ -184,7 +279,7 @@
+@@ -351,7 +446,7 @@
   		connection.signal.addEventListener("abort", () => {
   			this.recordAgentExit("connection_close", child.exitCode ?? null, child.signalCode ?? null);
   		}, { once: true });
--@@ -4253,7 +4308,12 @@ var AcpClient = class {
-+@@ -4253,7 +4313,12 @@ var AcpClient = class {
+-@@ -4253,7 +4383,12 @@
++@@ -4253,7 +4388,12 @@
   			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
   			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
   			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
-@@ -198,7 +293,7 @@
+@@ -365,7 +460,7 @@
   		};
   	}
   	logAgentLaunch(plan) {
--@@ -4279,10 +4339,17 @@ var AcpClient = class {
-+@@ -4279,10 +4344,17 @@ var AcpClient = class {
+-@@ -4279,10 +4414,17 @@
++@@ -4279,10 +4419,17 @@
   	}
   	async spawnAgentProcess(plan) {
   		const spawnCommand = buildAgentSpawnCommand(plan.spawnCommand, plan.args, process.platform, plan.spawnOptions.env);
-@@ -218,7 +313,7 @@
+@@ -385,7 +480,7 @@
   		try {
   			await waitForSpawn$1(spawnedChild);
   		} catch (error) {
--@@ -4293,10 +4360,10 @@ var AcpClient = class {
-+@@ -4293,10 +4365,10 @@ var AcpClient = class {
+-@@ -4293,10 +4435,10 @@
++@@ -4293,10 +4440,10 @@
   	createConnection(stream, launch) {
   		const app = client({ name: "acpx" }).onNotification(methods.client.session.update, async ({ params }) => {
   			await this.handleSessionUpdate(params);
-@@ -232,7 +327,7 @@
+@@ -399,7 +494,7 @@
   		}).onRequest(methods.client.fs.readTextFile, async ({ params }) => {
   			return await this.handleReadTextFile(params);
   		}).onRequest(methods.client.fs.writeTextFile, async ({ params }) => {
--@@ -4312,6 +4379,11 @@ var AcpClient = class {
-+@@ -4312,6 +4384,11 @@ var AcpClient = class {
+-@@ -4312,6 +4454,11 @@
++@@ -4312,6 +4459,11 @@
   		}).onRequest(methods.client.terminal.release, async ({ params }) => {
   			return await this.handleReleaseTerminal(params);
   		});
-@@ -244,7 +339,7 @@
+@@ -411,7 +506,7 @@
   		if (launch.devinAcp) app.onRequest("_cognition.ai/request_diagnostics", (params) => {
   			return params && typeof params === "object" && !Array.isArray(params) ? params : {};
   		}, async () => ({}));
--@@ -4333,12 +4405,12 @@ var AcpClient = class {
-+@@ -4333,12 +4410,12 @@ var AcpClient = class {
+-@@ -4333,12 +4480,12 @@
++@@ -4333,12 +4485,12 @@
   	async initializeProtocolConnection(connection, launch) {
   		const initializePromise = connection.initialize({
   			protocolVersion: PROTOCOL_VERSION,
-@@ -259,7 +354,7 @@
+@@ -426,7 +521,7 @@
   			clientInfo: resolveClientInfo(launch.devinAcp)
   		});
   		const initialized = launch.geminiAcp ? await withTimeout(initializePromise, resolveGeminiAcpStartupTimeoutMs()) : await initializePromise;
--@@ -4358,6 +4430,36 @@ var AcpClient = class {
-+@@ -4358,6 +4435,36 @@ var AcpClient = class {
+-@@ -4358,6 +4505,49 @@
++@@ -4358,6 +4510,49 @@
   		throw normalizedError;
   	}
   	createTappedStream(base) {
-@@ -296,7 +391,7 @@
+@@ -476,7 +571,7 @@
   		const onAcpMessage = () => this.eventHandlers.onAcpMessage;
   		const onAcpOutputMessage = () => this.eventHandlers.onAcpOutputMessage;
   		const elicitationRequestIds = /* @__PURE__ */ new Set();
--@@ -4367,8 +4469,9 @@ var AcpClient = class {
-+@@ -4367,8 +4474,9 @@ var AcpClient = class {
+-@@ -4367,8 +4557,12 @@
++@@ -4367,8 +4562,12 @@
   		const shouldSuppressInboundReplaySessionUpdate = (message) => {
   			return this.suppressReplaySessionUpdateMessages && isSessionUpdateNotification(message);
   		};
-@@ -307,7 +402,7 @@
+@@ -490,7 +585,7 @@
   			if (requestId !== void 0) {
   				elicitationRequestIds.add(requestId);
   				return;
--@@ -4379,6 +4482,7 @@ var AcpClient = class {
-+@@ -4379,6 +4487,7 @@ var AcpClient = class {
+-@@ -4379,6 +4573,7 @@
++@@ -4379,6 +4578,7 @@
   			}
   		};
   		return {
-@@ -315,7 +410,7 @@
-  			readable: new ReadableStream({ async start(controller) {
-  				const reader = base.readable.getReader();
-  				try {
--@@ -4387,10 +4491,16 @@ var AcpClient = class {
-+@@ -4387,10 +4496,16 @@ var AcpClient = class {
-  						if (done) break;
-  						if (!value) continue;
-  						observeInbound(value);
-@@ -333,7 +428,7 @@
-  					reader.releaseLock();
-  					controller.close();
-  				}
--@@ -4403,10 +4513,20 @@ var AcpClient = class {
-+@@ -4403,10 +4518,20 @@ var AcpClient = class {
+@@ -528,7 +623,7 @@
+  				const promptOwner = promptRequestOwner(message);
+  				if (promptOwner) bindPromptOwner(promptOwner);
+  				const id = responseId(message);
+-@@ -4403,10 +4609,20 @@
++@@ -4403,10 +4614,20 @@
   					onAcpOutputMessage()?.("outbound", message);
   					onAcpMessage()?.("outbound", message);
   				}
-@@ -354,7 +449,7 @@
+@@ -549,7 +644,7 @@
   					writer.releaseLock();
   				}
   			} })
--@@ -4422,7 +4542,10 @@ var AcpClient = class {
-+@@ -4422,7 +4547,10 @@ var AcpClient = class {
+-@@ -4422,7 +4638,10 @@
++@@ -4422,7 +4643,10 @@
   			const createPromise = this.runConnectionRequest(() => connection.newSession({
   				cwd: sessionCwd,
   				mcpServers: this.options.mcpServers ?? [],
-@@ -366,7 +461,7 @@
-  			}));
-  			result = claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
+@@ -600,7 +695,7 @@
+  			return response;
   		} catch (error) {
--@@ -4864,7 +4987,7 @@ var AcpClient = class {
-+@@ -4864,7 +4992,7 @@ var AcpClient = class {
+  			return this.throwSessionModelError("session/set_config_option", modelId, error);
+-@@ -4864,7 +5087,7 @@
++@@ -4864,7 +5092,7 @@
   	}
   	selectAuthMethod(methods) {
   		for (const method of methods) {
-@@ -375,7 +470,7 @@
+@@ -609,7 +704,7 @@
   			if (envCredential) return {
   				methodId: method.id,
   				credential: envCredential,
--@@ -4890,7 +5013,7 @@ var AcpClient = class {
-+@@ -4890,7 +5018,7 @@ var AcpClient = class {
+-@@ -4890,7 +5113,7 @@
++@@ -4890,7 +5118,7 @@
   	}
   	readAgentSpecificEnvCredential(methodId) {
   		if (!this.isGrokBuildAcpCommand() || methodId !== "xai.api_key") return;
-@@ -384,7 +479,7 @@
+@@ -618,7 +713,7 @@
   		return typeof value === "string" && value.trim().length > 0 ? value : void 0;
   	}
   	selectAgentManagedAuthMethod(methodId) {
--@@ -4915,9 +5038,9 @@ var AcpClient = class {
-+@@ -4915,9 +5043,9 @@ var AcpClient = class {
+-@@ -4915,9 +5138,9 @@
++@@ -4915,9 +5143,9 @@
   		await connection.authenticate({ methodId: selected.methodId });
   		this.log(`authenticated with method ${selected.methodId} (${selected.source})`);
   	}
-@@ -396,7 +491,7 @@
+@@ -630,7 +725,7 @@
   		if (hostResponse) return hostResponse;
   		const { response, recorded } = await this.resolvePermissionRequestFromMode(params);
   		if (!recorded) {
--@@ -4926,14 +5049,49 @@ var AcpClient = class {
-+@@ -4926,14 +5054,49 @@ var AcpClient = class {
+-@@ -4926,14 +5149,81 @@
++@@ -4926,14 +5154,81 @@
   		}
   		return response;
   	}
-@@ -448,7 +543,7 @@
+@@ -714,7 +809,7 @@
   		})).then((response) => ({
   			kind: "response",
   			response
--@@ -4970,7 +5128,7 @@ var AcpClient = class {
-+@@ -4970,7 +5133,7 @@ var AcpClient = class {
+-@@ -4970,7 +5260,7 @@
++@@ -4970,7 +5265,7 @@
   	isElicitationSessionCancelling(sessionId) {
   		return this.closing || this.cancellingSessionIds.has(sessionId);
   	}
-@@ -457,7 +552,7 @@
+@@ -723,7 +818,7 @@
   		if (!this.options.onPermissionRequest) return;
   		const signal = this.cancellationSignalForSession(params.sessionId);
   		try {
--@@ -4978,7 +5136,7 @@ var AcpClient = class {
-+@@ -4978,7 +5141,7 @@ var AcpClient = class {
+-@@ -4978,7 +5268,7 @@
++@@ -4978,7 +5273,7 @@
   				sessionId: params.sessionId,
   				raw: params,
   				inferredKind: inferToolKind(params)
-@@ -466,7 +561,7 @@
+@@ -732,7 +827,7 @@
   			return this.hostPermissionDecisionResponse(params, signal, decision);
   		} catch (error) {
   			return this.hostPermissionErrorResponse(params, signal, error);
--@@ -5028,6 +5186,12 @@ var AcpClient = class {
-+@@ -5028,6 +5191,12 @@ var AcpClient = class {
+-@@ -5028,6 +5318,12 @@
++@@ -5028,6 +5323,12 @@
   	attachAgentLifecycleObservers(child) {
   		child.once("exit", (exitCode, signal) => {
   			this.recordAgentExit("process_exit", exitCode, signal);
-@@ -479,7 +574,7 @@
-  		});
-  		child.once("close", (exitCode, signal) => {
-  			this.recordAgentExit("process_close", exitCode, signal);
--@@ -5771,10 +5935,20 @@ function recordSessionUpdate(conversation, state, notification, timestamp = isoN
-+@@ -5771,10 +5940,20 @@ function recordSessionUpdate(conversation, state, notification, timestamp = isoN
+@@ -773,7 +868,7 @@
+  	};
+  }
+  function cloneUsageCost(cost) {
+-@@ -5771,10 +6072,20 @@
++@@ -5771,10 +6077,20 @@
   	trimConversationForRuntime(conversation);
   	return acpx;
   }
-@@ -502,7 +597,7 @@
-  	updateConversationTimestamp(conversation, timestamp);
-  	trimConversationForRuntime(conversation);
-  	return true;
--@@ -6435,6 +6609,27 @@ async function withConnectedSession(options) {
-+@@ -6435,6 +6614,27 @@ async function withConnectedSession(options) {
+@@ -832,7 +927,7 @@
+  			client: params.client,
+  			record: params.record,
+  			sessionId: params.sessionId,
+-@@ -6435,6 +6749,27 @@
++@@ -6435,6 +6754,27 @@
   //#region src/runtime/engine/prompt-turn.ts
   const SESSION_REPLY_IDLE_MS = 1e3;
   const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
-@@ -530,7 +625,7 @@
+@@ -860,7 +955,7 @@
   async function runPromptTurn(params) {
   	try {
   		const promptPromise = params.client.prompt(params.sessionId, params.prompt, params.onPromptRequestStarted, params.onElicitation);
--@@ -6444,7 +6639,22 @@ async function runPromptTurn(params) {
-+@@ -6444,7 +6644,22 @@ async function runPromptTurn(params) {
+-@@ -6444,7 +6779,23 @@
++@@ -6444,7 +6784,23 @@
   			idleMs: SESSION_REPLY_IDLE_MS,
   			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
   		}).catch(() => {});

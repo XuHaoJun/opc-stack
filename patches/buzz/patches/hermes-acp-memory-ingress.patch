@@ -1,6 +1,7 @@
+diff --git a/acp_adapter/content.py b/acp_adapter/content.py
 --- a/acp_adapter/content.py
 +++ b/acp_adapter/content.py
-@@ -280,3 +280,8 @@
+@@ -280,3 +280,8 @@ def _content_blocks_to_openai_user_content(prompt: list[PromptBlock]) -> str | l
          return "\n".join(text_parts)
  
      return parts
@@ -9,9 +10,10 @@
 +def preserve_prompt_block_meta(prompt: list[PromptBlock]) -> list[dict[str, Any]]:
 +    """Carry per-block ACP provenance without reconstructing boundaries from text."""
 +    return [dict(meta) for block in prompt if (meta := getattr(block, "field_meta", None))]
+diff --git a/acp_adapter/gateway_media.py b/acp_adapter/gateway_media.py
 --- a/acp_adapter/gateway_media.py
 +++ b/acp_adapter/gateway_media.py
-@@ -98,7 +98,7 @@
+@@ -98,7 +98,7 @@ async def stage_user_content(content, home=None):
      return "\n".join(texts), attachments
  
  
@@ -20,7 +22,7 @@
      """Identity of one logical prompt as the editor sent it (text, image ``data:`` bytes, remote image
      URLs), taken before staging: a retry of the same prompt matches without re-fetching a remote image,
      whose second download could fail or return other bytes and so change what is submitted."""
-@@ -108,4 +108,9 @@
+@@ -108,4 +108,9 @@ def submit_fingerprint(session_id, content):
          kind, value = ('text', part) if isinstance(part, str) else \
              ('text', part['text']) if part.get('type') == 'text' else ('image', part['image_url']['url'])
          digest.update(kind.encode() + len(value).to_bytes(8, 'big') + value.encode())
@@ -30,9 +32,10 @@
 +        metadata = json.dumps(memory_ingress, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 +        digest.update(b'memory_ingress' + metadata.encode())
      return session_id, digest.hexdigest()
+diff --git a/acp_adapter/gateway_server.py b/acp_adapter/gateway_server.py
 --- a/acp_adapter/gateway_server.py
 +++ b/acp_adapter/gateway_server.py
-@@ -635,7 +635,7 @@
+@@ -658,7 +658,7 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
          if prepared is None:
              return PromptResponse(stop_reason='cancelled')
          retry_key, input_id, staged = prepared
@@ -41,7 +44,7 @@
          answered, text = await self._run_slash(held_id, session_id, text) if not attachments else (False, text)
          if answered:
              return PromptResponse(stop_reason='end_turn')
-@@ -644,6 +644,8 @@
+@@ -667,6 +667,8 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
          submit = {'text': text}
          if attachments:
              submit['attachments'] = attachments
@@ -50,7 +53,7 @@
          self._submitting.add(session_id)
          try:
              # Inside the try: a failed reconnect is as ambiguous for a retained identity as a lost ack.
-@@ -744,12 +746,13 @@
+@@ -767,12 +769,13 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
          return True, None
  
      async def _prepare_submit(self, session_id, prompt):
@@ -67,7 +70,7 @@
          # Only this session's very next prompt may be the editor's retry of an un-acked submit; any
          # prompt (slash work included) retires the retained identity, so a later repeat is new work.
          retained = self._unacked.pop(session_id, None)
-@@ -761,7 +764,8 @@
+@@ -784,7 +787,8 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
          # submit itself, and the prompt then ends without being sent.
          self._submitting.add(session_id)
          try:
@@ -77,9 +80,10 @@
          finally:
              self._submitting.discard(session_id)
          if session_id in self._pending_cancels:
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
 --- a/agent/conversation_loop.py
 +++ b/agent/conversation_loop.py
-@@ -1636,6 +1636,7 @@
+@@ -1653,6 +1653,7 @@ def _run_conversation_turn(
      moa_config: Optional[dict[str, Any]] = None,
      title_user_message: Optional[str] = None,
      prelude: Optional[Prelude] = None,
@@ -87,17 +91,17 @@
  ) -> dict[str, Any]:
      """Run a complete conversation with tool calling until completion; returns the result dict.
  
-@@ -1651,6 +1652,9 @@
-         user_message, moa_config, persist_user_message = _decode_inline_moa_turn(
+@@ -1669,6 +1670,9 @@ def _run_conversation_turn(
              user_message, persist_user_message
          )
-+
+ 
 +    # Cached agents must never inherit the preceding turn's ACP metadata.
 +    agent._memory_ingress_blocks = memory_ingress
- 
++
      # The gateway caches agents across turns; compression state is per-turn, or a stale
      # in-place boundary would make a later uncompressed result look compacted.
-@@ -1798,6 +1802,7 @@
+     agent._last_compaction_in_place = agent._last_compression_attempt_recorded = False
+@@ -1815,6 +1819,7 @@ def run_conversation(
      turn_author: Optional[dict[str, Any]] = None,
      title_user_message: Optional[str] = None,
      prelude: Optional[Prelude] = None,
@@ -105,7 +109,7 @@
  ) -> dict[str, Any]:
      """Run one turn (see ``_run_conversation_turn``) and export the current-turn boundary.
  
-@@ -1832,8 +1837,10 @@
+@@ -1850,8 +1855,10 @@ def run_conversation(
                  turn_author=turn_author,
                  title_user_message=title_user_message,
                  prelude=prelude,
@@ -114,11 +118,12 @@
          finally:
 +            agent._memory_ingress_blocks = None
              end_voice_turn_route(agent)
+     settle_held_final(agent, result)
      result = export_current_turn_boundary(agent, result, user_message)
-     if isinstance(result, dict):
+diff --git a/agent/memory_manager.py b/agent/memory_manager.py
 --- a/agent/memory_manager.py
 +++ b/agent/memory_manager.py
-@@ -440,12 +440,13 @@
+@@ -443,12 +443,13 @@ class MemoryManager:
  
      def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "",
                   messages: Optional[list[dict[str, Any]]] = None,
@@ -134,7 +139,7 @@
  
          Everything forwarded is provider egress: turn strings AND the ``messages`` transcript slice
          (tool outputs included) go through ``_redact_for_provider`` so secrets are never archived
-@@ -455,9 +456,31 @@
+@@ -458,9 +459,31 @@ class MemoryManager:
          clean_user_content = self._strip_skill_scaffolding(user_content) if providers else None
          if not clean_user_content or not self._owner_allows("sync_turn"):
              return
@@ -169,9 +174,10 @@
  
          def _sync(provider: MemoryProvider) -> None:
              kwargs: dict[str, Any] = {"session_id": session_id}
+diff --git a/agent/turn_facade.py b/agent/turn_facade.py
 --- a/agent/turn_facade.py
 +++ b/agent/turn_facade.py
-@@ -27,6 +27,7 @@
+@@ -27,6 +27,7 @@ class TurnFacadeMixin:
          persist_user_display_metadata: Optional[dict[str, Any]]=None,
          persist_user_platform_id: Optional[str]=None, moa_config: Optional[dict[str, Any]]=None,
          turn_author: Optional[dict[str, Any]] = None,
@@ -179,7 +185,7 @@
          relay_metadata: Optional[dict[str, Any]] = None,
          title_user_message: Optional[str]=None,
          prelude: Optional[Generator]=None,
-@@ -153,6 +154,7 @@
+@@ -153,6 +154,7 @@ class TurnFacadeMixin:
                          persist_user_display_metadata=persist_user_display_metadata,
                          persist_user_platform_id=persist_user_platform_id, moa_config=moa_config,
                          turn_author=turn_author,
@@ -187,30 +193,36 @@
                          title_user_message=title_user_message,
                          prelude=prelude,
                      )
---- a/run_agent.py
-+++ b/run_agent.py
-@@ -902,6 +902,9 @@
-         is almost certainly a retry of the same intent, and a prefetch keyed on the interrupted turn would
-         fire against stale context. See #15218.
-         """
-+        # Pop before eligibility checks, including interrupted/empty turns.
-+        memory_ingress = getattr(self, "_memory_ingress_blocks", None)
-+        self._memory_ingress_blocks = None
-         if interrupted or not (self._memory_manager and final_response and original_user_message):
-             return
-         # Flatten multimodal parts to text (newline-joined for memory).
-@@ -915,6 +918,8 @@
-             turn_author = getattr(self, "_turn_author", None)
-             if turn_author is not None:
-                 sync_kwargs["turn_author"] = turn_author
-+            if memory_ingress is not None:
-+                sync_kwargs["memory_ingress"] = memory_ingress
-             self._memory_manager.sync_all(user_text, response_text, **sync_kwargs)
-             # Sibling of the build_turn_context() prefetch gate: don't key recall on zero-signal prompts.
-             if not is_trivial_prompt(user_text):
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -992,6 +992,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+                 kwargs["turn_author"] = (api.get('turn_author') if api is not None else
+                     admission_author.get() or {"id": ctx.source.user_id or None, "name": ctx.source.user_name or None,
+                                                "is_bot": bool(getattr(ctx.source, "is_bot", False))})
++            if _accepts_keyword(agent.run_conversation, "memory_ingress"):
++                from gateway.session_cli_turn import cli_turn
++                kwargs["memory_ingress"] = cli_turn(ctx.inbound_message_id).get("memory_ingress")
+             if ctx.title_user_message is not None:
+                 kwargs["title_user_message"] = ctx.title_user_message
+             if persist_user_message_override is not None:
+diff --git a/gateway/session_authority.py b/gateway/session_authority.py
+--- a/gateway/session_authority.py
++++ b/gateway/session_authority.py
+@@ -716,7 +716,8 @@ class SessionAuthority:
+         self._require_admission_open(queue_only=queue_only)
+         if (request.intent != 'queue' or not {'text'} <= set(request.payload) <= {
+                 'text', 'attachments', 'finite', 'unattended', 'surface', 'voice_context', 'interrupted',
+-                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch'}
++                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch',
++                'memory_ingress'}
+                 or not isinstance(request.payload['text'], str)):
+             raise RuntimeStoreError('invalid_params')
+         from gateway.session_ingress_media import admit_attachments
+diff --git a/gateway/session_cli_turn.py b/gateway/session_cli_turn.py
 --- a/gateway/session_cli_turn.py
 +++ b/gateway/session_cli_turn.py
-@@ -12,7 +12,7 @@
+@@ -12,7 +12,7 @@ from contextvars import ContextVar
  
  from hermes_state_runtime import RuntimeStoreError
  
@@ -219,7 +231,7 @@
  _API_TEXT_LIMIT = 1_000_000
  _cli_turn: ContextVar[tuple | None] = ContextVar('cli_turn', default=None)
  
-@@ -59,6 +59,16 @@
+@@ -59,6 +59,16 @@ def admit_cli_turn(params):
          # request (main's batch panel: classic CLI, Ink TUI). Viewers that never set it (an ACP
          # editor, a raw WebSocket client) answer per-question cards.
          committed['clarify_batch'] = True
@@ -236,9 +248,10 @@
      return {'cli_turn_v1': committed} if committed else {}
  
  
+diff --git a/gateway/session_controls.py b/gateway/session_controls.py
 --- a/gateway/session_controls.py
 +++ b/gateway/session_controls.py
-@@ -753,9 +753,13 @@
+@@ -816,9 +816,13 @@ class AuthorityConnection:
              raise RuntimeStoreError('permission_denied')
          forbidden = set(params) - {'session_id', 'text', 'submission_id', 'input_id', 'queued', 'attachments', 'finite', 'unattended',
                                     'surface', 'voice_context', 'interrupted', 'voice_turn', 'display_kind', 'title_preview',
@@ -253,33 +266,32 @@
          request_id = params.get('submission_id') or params.get('input_id')
          if not isinstance(request_id, str) or not request_id:
              raise RuntimeStoreError('invalid_params')
---- a/gateway/session_authority.py
-+++ b/gateway/session_authority.py
-@@ -658,7 +658,8 @@
-         self._require_admission_open(queue_only=queue_only)
-         if (request.intent != 'queue' or not {'text'} <= set(request.payload) <= {
-                 'text', 'attachments', 'finite', 'unattended', 'surface', 'voice_context', 'interrupted',
--                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch'}
-+                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch',
-+                'memory_ingress'}
-                 or not isinstance(request.payload['text'], str)):
-             raise RuntimeStoreError('invalid_params')
-         from gateway.session_ingress_media import admit_attachments
---- a/gateway/run_turn_runner.py
-+++ b/gateway/run_turn_runner.py
-@@ -965,6 +965,9 @@
-                 kwargs["turn_author"] = (api.get('turn_author') if api is not None else
-                     admission_author.get() or {"id": ctx.source.user_id or None, "name": ctx.source.user_name or None,
-                                                "is_bot": bool(getattr(ctx.source, "is_bot", False))})
-+            if _accepts_keyword(agent.run_conversation, "memory_ingress"):
-+                from gateway.session_cli_turn import cli_turn
-+                kwargs["memory_ingress"] = cli_turn(ctx.inbound_message_id).get("memory_ingress")
-             if ctx.title_user_message is not None:
-                 kwargs["title_user_message"] = ctx.title_user_message
-             if persist_user_message_override is not None:
+diff --git a/run_agent.py b/run_agent.py
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -898,6 +898,9 @@ class AIAgent(
+         is almost certainly a retry of the same intent, and a prefetch keyed on the interrupted turn would
+         fire against stale context. See #15218.
+         """
++        # Pop before eligibility checks, including interrupted/empty turns.
++        memory_ingress = getattr(self, "_memory_ingress_blocks", None)
++        self._memory_ingress_blocks = None
+         if interrupted or not (self._memory_manager and final_response and original_user_message):
+             return
+         # Flatten multimodal parts to text (newline-joined for memory).
+@@ -911,6 +914,8 @@ class AIAgent(
+             turn_author = getattr(self, "_turn_author", None)
+             if turn_author is not None:
+                 sync_kwargs["turn_author"] = turn_author
++            if memory_ingress is not None:
++                sync_kwargs["memory_ingress"] = memory_ingress
+             self._memory_manager.sync_all(user_text, response_text, **sync_kwargs)
+             # Sibling of the build_turn_context() prefetch gate: don't key recall on zero-signal prompts.
+             if not is_trivial_prompt(user_text):
+diff --git a/tui_gateway/contracts/canonical_sessions.py b/tui_gateway/contracts/canonical_sessions.py
 --- a/tui_gateway/contracts/canonical_sessions.py
 +++ b/tui_gateway/contracts/canonical_sessions.py
-@@ -228,6 +228,8 @@
+@@ -232,6 +232,8 @@ class CanonicalSubmitParams(CanonicalSessionParams):
      # The submitter answers the clarify tool's whole batch in one ``clarify`` server request (main's
      # batch panel); without it the turn's viewers get one ``clarify.request`` card per question.
      clarify_batch: bool = False

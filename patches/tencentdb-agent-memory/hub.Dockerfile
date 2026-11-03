@@ -6,7 +6,7 @@
 FROM node:22-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 make g++ git curl ca-certificates patch \
+      python3 make g++ git curl ca-certificates patch openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g npm@11 --no-audit --no-fund
@@ -16,14 +16,14 @@ WORKDIR /app
 FROM base AS panel-ui-builder
 WORKDIR /build/panel-web
 COPY MemoryPanel/web/package*.json ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY MemoryPanel/web/ ./
 RUN npm run build
 
 FROM base AS panel-builder
 WORKDIR /build/panel
 COPY MemoryPanel/package*.json ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY MemoryPanel/ ./
 COPY --from=panel-ui-builder /build/panel-web/dist ./web/dist
 RUN npm run build
@@ -31,7 +31,7 @@ RUN npm run build
 FROM base AS knowledge-builder
 WORKDIR /build/knowledge
 COPY MemoryKnowledge/package*.json ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY MemoryKnowledge/ ./
 
 # OPC overlay: attach a stable x-opencode-session header to wiki ingest calls.
@@ -65,6 +65,7 @@ ENV NODE_ENV=production \
     KNOWLEDGE_DATA_DIR=/data/knowledge \
     KNOWLEDGE_DB_PATH=/data/knowledge/knowledge.db \
     TDAI_AGENT_TEMPLATE_DIR=/data/knowledge/agent-templates \
+    KNOWLEDGE_SSH_KEY_DIR=/data/knowledge/ssh-keys \
     LOG_LEVEL=info \
     LOG_FORMAT=json
 
