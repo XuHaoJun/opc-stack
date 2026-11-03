@@ -501,6 +501,93 @@ docker compose exec frontdoor cat /opt/data/issue-watchers/watcher.log
   `scripts/sync-gh-creds.sh` (`docker compose restart frontdoor hermes
   paperclip` re-applies key perms).
 
+## Event bridge & autonomy control (OPC)
+
+`paperclip`（service identity）＋ `event-bridge`（sidecar）把 Paperclip 的工作事件
+送到原始 Buzz thread，並把「誰可以自主到什麼程度」變成可查詢、可撤銷、重啟後仍生效的政策。
+
+### 它是什麼
+
+| 元件 | 作用 |
+|---|---|
+| `event-bridge` (compose service) | 輪詢 `issues?updatedSince`、run 失敗、健康訊號；寫 sqlite outbox；以 `paperclip.nsec` 發佈帶 `opc-event` tag 的訊息；提供內部 read/control API (`:8645`, 不對外) |
+| `paperclip` Buzz 身分 | `/keys/paperclip.nsec|.pub`（600, `buzz-keys` one-shot 產生）；kind:0 名稱 `paperclip`；**不加入頻道、不發 kind:10100**，所以不會被當成可驅動的 agent |
+| `opc-control.key` | bridge read/control API 的 bearer key（600）；frontdoor 會鏡像到 `$HERMES_HOME/.opc-control.key` |
+| `opc-event-state` volume | cursor / outbox / policy / mandate / audit。Policy Configuration，不是工作狀態 |
+
+### 操作
+
+```bash
+docker compose exec event-bridge python3 -m opc_bridge.cli policy --track lab
+docker compose exec event-bridge python3 -m opc_bridge.cli state
+docker compose exec event-bridge python3 -m opc_bridge.cli events --limit 20
+docker compose exec frontdoor opc-paperclip labels ensure
+```
+
+控制指令（`!opc ...`）**只**在控制頻道被承認。bridge 首次啟動會解析或建立名為
+`opc-control` 的 open 頻道；設定 `OPC_CONTROL_CHANNEL=<uuid>` 可指定別的。owner 必須
+自己加入該頻道（授權需要真人的簽名），然後在那裡發：
+
+```
+!opc force-stop run <run-id> [原因]
+!opc pause lab | pause core
+!opc resume lab | resume core
+!opc allocate core=100 lab=0
+!opc mandate grant project=<project-id> track=lab style=exploration followups=on expires=2026-12-01
+!opc mandate revoke <mandate-id>
+```
+
+每一道變更都需要 `authorization_event_id`（那道訊息的 event id）與 `command`（訊息原文）。
+bridge 會驗作者 = `BUZZ_ACP_AGENT_OWNER`、15 分鐘新鮮度、指令原文、以及一次性使用；
+API key 本身不是授權。
+
+```bash
+# 由 ops 直接執行（同一個驗證路徑；示例：授權後的 force stop）
+docker compose exec event-bridge python3 -m opc_bridge.cli force-stop \
+  --run <run-id> --command '!opc force-stop run <run-id>' --auth-event <event-id>
+```
+
+### 政策與配比
+
+- 優先序：hard safety (10) > operator override (20) > mandate (30) > adaptive (40) > default (50)；
+  同級 project > track > company，再比新，最後取較嚴格者。
+- Track 綁 agent 群：Core = `role:engineer`，Lab = `Prototyper` + `Scientist`。
+  `Core 100% / Lab 0%` 會 `PATCH` Lab agents `status=paused`：新 wake/claim 被擋、在跑的 run 繼續、
+  重啟後仍有效；已排隊未開始的 run 會被 Paperclip 取消並回報。解鎖要人下指令。
+- 非零配比是近似值：依 `OPC_SLOT_BUDGET` 分配 `maxConcurrentRuns`，並寫
+  `metadata.opcBridgeAllocation`（`opc-paperclip agent concurrency show` 會顯示 `bridge_adaptive`）。
+- 建立 ticket 前 `opc-paperclip` 會查 `track_locked` 並以 exit 3 拒絕鎖定的 track。
+
+### 健康監控
+
+`>OPC_SLOW_SECONDS`（900s）沒有進展 = slow；`>OPC_STALL_SECONDS`（1800s）且
+`outputSilence.level` 異常 = suspected_stalled；狀態明顯不一致（issue 已終結但 run 仍在跑、
+agent 已暫停但 run 仍在跑）= lost；沒有 pid 且沒有訊號 = unknown（會說「無法確認」）。
+第一次異常通知，之後每 `OPC_HEALTH_REMINDER_SECONDS`（1800s）提醒一次，恢復時一則 recovered。
+**任何情況都不會自動終止 run。**
+
+### 既有安裝升級
+
+```bash
+scripts/prepare.sh
+docker compose build event-bridge buzz frontdoor
+docker compose up -d --force-recreate buzz-keys   # 產生 paperclip.nsec/pub + opc-control.key
+docker compose up -d event-bridge buzz frontdoor hermes
+docker compose exec event-bridge python3 -m opc_bridge.cli state
+```
+
+首次啟動不會重播歷史（既有終態 ticket 記為已觀察），需要時明確補：
+`... cli backfill --since <ISO> --command '!opc backfill' --auth-event <id>`。
+
+### 常見失敗
+
+| 症狀 | 原因 / 處理 |
+|---|---|
+| `relay error 404: no community is configured for this host` | `BUZZ_RELAY_URL` 的 host 與 community 綁定不一致；bridge 必須用與 frontdoor 相同的值 |
+| 事件一直 `pending`, `restricted: not a channel member` | 原頻道是 private；把 `paperclip` 加進該頻道，或設 `OPC_EVENT_FALLBACK_CHANNEL` |
+| `403 not_found` / `wrong_author` | 指令必須由 owner 在控制頻道發出，且 `--auth-event` 要是**那道訊息**的 id |
+| 控制頻道不存在 | `OPC_CONTROL_CHANNEL` 未設且自動建立失敗；看 `docker compose logs event-bridge` |
+
 ## Nix-based persistent tools (hermes, buzz, paperclip — OS level)
 
 Install more tools (survives `compose down/up`, recreates, and image rebuilds):

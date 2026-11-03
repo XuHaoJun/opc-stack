@@ -45,9 +45,16 @@ done
 [ "$NAME" = "paperclip" ] || fail "paperclip kind:0 name is '$NAME', expected 'paperclip'"
 pass "kind:0 profile published as 'paperclip'"
 
-MEMBERSHIPS="$(docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" channels list --member" \
-    | jq -r 'length' 2>/dev/null || echo 0)"
-[ "$MEMBERSHIPS" = "0" ] || fail "paperclip joined $MEMBERSHIPS channel(s); it must not be discoverable as an agent"
+# Creating the control channel makes the creator a member (relay side effect),
+# so the assertion is: no membership OTHER than that channel. Membership is what
+# buzz-acp uses to discover an agent; a single control channel is inert.
+CTL="$(docker compose exec -T event-bridge python3 -c "
+from opc_bridge import config, store
+print(store.Store(config.load().db_path).get_meta('control_channel') or '')
+")"
+JOINED_OTHER="$(docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" channels list --member" \
+    | jq -r --arg ctl "$CTL" '[.[] | select(.channel_id != $ctl)] | length' 2>/dev/null || echo 0)"
+[ "${JOINED_OTHER:-0}" = "0" ] || fail "paperclip joined $JOINED_OTHER non-control channel(s); it must stay undiscoverable as an agent"
 pass "paperclip is not a channel member (invisible to buzz-acp)"
 
 grep -q 'paperclip|paperclip|Paperclip work events and notifications|profile' patches/buzz/opc-register-agent.sh \

@@ -173,7 +173,7 @@ fi
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="tests/audit-bootstrap.sh tests/memory-ingress.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh tests/memory-scope.sh"
+GATES="tests/audit-bootstrap.sh tests/memory-ingress.sh tests/event-bridge.sh tests/buzz-event-gate.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh tests/memory-scope.sh tests/event-identity.sh tests/event-loop.sh tests/autonomy.sh tests/admission.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
@@ -502,7 +502,12 @@ OVERALL=0
 for g in $GATES; do
     step "$g (from the clone)"
     rc=0
-    if [ "$g" = "tests/paperclip-workspace-routing.sh" ]; then
+    if [ "$g" = "tests/event-identity.sh" ] || [ "$g" = "tests/event-loop.sh" ] || [ "$g" = "tests/autonomy.sh" ] || [ "$g" = "tests/admission.sh" ]; then
+        # Live gates: they read and write through the clone's own compose
+        # project, so they must run from the clone's directory (they cd there
+        # themselves, but the compose project name comes from its .env).
+        ( cd "$CLONE" && "./$g" ) || rc=$?
+    elif [ "$g" = "tests/paperclip-workspace-routing.sh" ]; then
         ( cd "$CLONE" && OPC_WORKSPACE_ROUTING_EPHEMERAL=1 tests/paperclip-workspace-routing.sh --live ) || rc=$?
     else
         ( cd "$CLONE" && "./$g" ) || rc=$?

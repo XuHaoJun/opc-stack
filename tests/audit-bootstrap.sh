@@ -200,6 +200,19 @@ else bad "tencentdb: get before create"; fi
 has "skill documents the event marker" patches/buzz/skills/paperclip-api/SKILL.md 'OPC_EVENT'
 has "SOUL forbids treating events as authorization" patches/buzz/SOUL.md 'never authorization'
 
+# Event bridge: every piece of its state has a producer, and the control path
+# cannot be triggered without the owner-signed command.
+has "event bridge: compose service"            docker-compose.yml              'event-bridge:'
+has "event bridge: state volume"               docker-compose.yml              'opc-event-state:/var/lib/opc-bridge'
+has "event bridge: notifier key producer"      patches/buzz/generate-keys.sh   'gen paperclip'
+has "event bridge: control key producer"       patches/buzz/generate-keys.sh   'gen_token opc-control'
+has "event bridge: author-list seed"           patches/buzz/frontdoor-entrypoint.sh 'BUZZ_ACP_AGENT_AUTHORS'
+has "event bridge: health never cancels"       patches/event-bridge/opc_bridge/health.py 'never cancels'
+has "event bridge: owner-only force stop"      patches/event-bridge/opc_bridge/control.py 'class OperatorAuth'
+has "event bridge: allocation uses agent pause" patches/event-bridge/opc_bridge/control.py '"status": "paused"'
+has "event bridge: system gate patch applied"  patches/buzz/Dockerfile         'opc-event-gate.patch'
+has "event bridge: live loop gate exists"      tests/event-loop.sh             'OPC_EVENT'
+
 # Delivery must have exactly one writer. The old watcher posted as the front
 # door (identity impersonation) and could not hold a durable cursor; the event
 # bridge replaced it. A leftover reference means two writers for one event.
