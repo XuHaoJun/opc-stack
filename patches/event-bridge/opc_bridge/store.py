@@ -489,3 +489,80 @@ class Store:
                 "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    # ── policy / mandates ────────────────────────────────────────────────
+    def insert_policy(self, row: dict) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO policies(id, scope_kind, scope_id, key, value_json, priority,"
+                " created_by, reason, source_event_id, created_at, expires_at, revoked_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["id"], row["scope_kind"], row["scope_id"], row["key"],
+                    row["value_json"], row["priority"], row["created_by"], row["reason"],
+                    row.get("source_event_id"), row["created_at"], row.get("expires_at"),
+                    row.get("revoked_at"),
+                ),
+            )
+            self._db.commit()
+
+    def active_policies(self, now_iso: str) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM policies WHERE revoked_at IS NULL"
+                " AND (expires_at IS NULL OR expires_at > ?) ORDER BY priority, created_at DESC",
+                (now_iso,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_policy(self, policy_id: str, at: str) -> int:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE policies SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                (at, policy_id),
+            )
+            self._db.commit()
+            return int(cur.rowcount)
+
+    def insert_mandate(self, row: dict) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO mandates(id, scope_kind, scope_id, style, track, allowed_json,"
+                " restricted_json, followups_allowed, max_followups_per_day, review_policy,"
+                " created_by, source_event_id, created_at, expires_at, revoked_at, revoked_by, reason)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["id"], row["scope_kind"], row["scope_id"], row["style"], row["track"],
+                    row["allowed_json"], row["restricted_json"], row["followups_allowed"],
+                    row.get("max_followups_per_day"), row["review_policy"], row["created_by"],
+                    row.get("source_event_id"), row["created_at"], row.get("expires_at"),
+                    row.get("revoked_at"), row.get("revoked_by"), row.get("reason"),
+                ),
+            )
+            self._db.commit()
+
+    def active_mandates(self, now_iso: str) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM mandates WHERE revoked_at IS NULL"
+                " AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC",
+                (now_iso,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_mandate(self, mandate_id: str, at: str, by: str) -> int:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE mandates SET revoked_at = ?, revoked_by = ?"
+                " WHERE id = ? AND revoked_at IS NULL",
+                (at, by, mandate_id),
+            )
+            self._db.commit()
+            return int(cur.rowcount)
+
+    def get_mandate(self, mandate_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM mandates WHERE id = ?", (mandate_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
