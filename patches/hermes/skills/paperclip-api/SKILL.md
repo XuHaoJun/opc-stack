@@ -352,10 +352,10 @@ and let the agent add it when the need is real.
    - `{"body":"BUZZ_CHANNEL: <channel-uuid>"}` — the Buzz channel the user
      asked in.
    - `{"body":"BUZZ_EVENT: <event-id>"}` — the id of the message that asked
-     for this (the same EVENT_ID you reply to). The watcher posts the result
-     as a reply to it, so the answer lands in the thread that asked rather
-     than starting a new one. Omit it and the user gets a detached notice with
-     nothing tying it to their request.
+     for this (the same EVENT_ID you reply to). The event bridge posts the
+     result as a reply to it, so the answer lands in the thread that asked
+     rather than starting a new one. Omit it and the user gets a detached
+     notice with nothing tying it to their request.
 6. **Reply to the user** in whatever surface they asked from, WITH the link:
    「已建立 ticket <identifier> (lane: <lane>): $PAPERCLIP_PUBLIC_URL/issues/<identifier>
    開發中, 完成後我會貼結果。」
@@ -392,7 +392,7 @@ ticket exactly like "develop <X>":
    ```
 3. On Buzz, add the `BUZZ_CHANNEL:` and `BUZZ_EVENT:` marker comments; reply
    to the user with the ticket link. The helper's
-   returned issue ID is the ID used for those marker and watcher steps.
+   returned issue ID is the ID used for those marker steps.
 
 ## Notes
 
@@ -405,8 +405,11 @@ ticket exactly like "develop <X>":
   dashboard chat or Telegram there are no markers, so poll the issue when the
   user asks, or tell them you will check back.
 - The event bridge posts the link automatically when the ticket reaches `done`,
-  authored by the `paperclip` service identity — do not double-post; if you are
-  in a live conversation when it completes, you may answer directly.
+  authored by the `paperclip` service identity — do not double-post, and do not
+  spawn any watcher process: the binary this stack used to ship is retired, and
+  a hand-rolled poller becomes a second delivery writer that duplicates every
+  notice. If you are in a live conversation when the ticket completes, you may
+  answer directly.
 - The Paperclip API key authenticates as the frontdoor agent; created issues
   are attributed to it.
 - **Never delete a prototype, and never file a ticket that deletes one.**

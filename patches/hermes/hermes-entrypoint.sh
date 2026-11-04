@@ -826,4 +826,20 @@ fi
 # at boot keeps ownership deterministic even on pre-existing volumes.
 chown -R "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH" 2>/dev/null || true
 
+# A runtime-authored skill can contradict the image (one taught agents to spawn
+# the watcher this stack retired, which made a second delivery writer).
+# Quarantine any skill that names the retired binary, in this home and in every
+# expert profile, on every boot.
+for _home in "$HH" "$HH"/profiles/*; do
+    for _skill in "$_home"/skills/*/ "$_home"/skills/*/*/; do
+        [ -f "$_skill/SKILL.md" ] || continue
+    case "$_skill" in *.retired.*) continue ;; esac   # already quarantined; do not churn
+        if grep -q "opc-issue-watcher" "$_skill/SKILL.md"; then
+            mv "$_skill" "${_skill%/}.retired.$(date +%s)" 2>/dev/null || true
+            echo "[hermes] quarantined obsolete skill ${_skill} (names the retired watcher)"
+        fi
+    done
+done
+unset _skill _home
+
 exec /opt/hermes/docker/entrypoint-dispatch.sh "$@"

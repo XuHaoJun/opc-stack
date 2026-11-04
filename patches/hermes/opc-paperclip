@@ -931,6 +931,8 @@ prototype_ticket_create() {
         die "description must start with exactly 'Prototype: $_name'" 2
     _track="$(label_marker "$_description_file" Track)"
     [ -n "$_track" ] || _track=lab
+    _style="$(label_marker "$_description_file" Style)"
+    [ -n "$_style" ] || _style=exploration
     admission_check "$_track" || exit $?
 
     _company="$(company_id)"
@@ -994,26 +996,12 @@ prototype_ticket_create() {
     _agent="$(prototyper_agent)"
     _agent_id="$(printf '%s' "$_agent" | jq -r '.id // empty')"
     [ -n "$_agent_id" ] || die "Prototyper agent has no id" 4
-    _track="$(label_marker "$_description_file" Track)"
-    [ -n "$_track" ] || _track=lab
-    _style="$(label_marker "$_description_file" Style)"
-    [ -n "$_style" ] || _style=exploration
     case "$_track" in core|lab) ;; *) die "unknown Track: $_track (core|lab)" 2 ;; esac
     case "$_style" in blueprint|exploration) ;; *) die "unknown Style: $_style (blueprint|exploration)" 2 ;; esac
     _labels_json="$(ensure_ticket_labels_json "$_track" "$_style")" || exit $?
-    _payload="$(jq -nc --rawfile description "$_description_file" \
-        --arg title "$_title" --arg priority "$_priority" --arg agent "$_agent_id" \
-        --arg project "$_project_id" --arg workspace "$_workspace_id" \
-        --arg idempotency "$_idempotency_key" --arg terminal_title "Prototype: $_name" \
-        --argjson terminal_epoch "$_terminal_epoch" --argjson allow_duplicate "$_allow_duplicate" \
-        --argjson labels "$_labels_json" '
-        {title:(if $terminal_epoch == 1 then $terminal_title else $title end),
-         description:$description,assigneeAgentId:$agent,allowDuplicate:$allow_duplicate,
-         labelIds:$labels
-        | if $priority == "" then . else .priority=$priority end
-        | if $project == "" then . else .projectId=$project | .projectWorkspaceId=$workspace end
-        | if $idempotency == "" then . else .idempotencyKey=$idempotency end
-    ')"
+    _payload="$(prototype_payload_json "$_description_file" "$_title" "$_priority" \
+        "$_agent_id" "$_project_id" "$_workspace_id" "$_idempotency_key" \
+        "Prototype: $_name" "$_terminal_epoch" "$_allow_duplicate" "$_labels_json")"
     _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
         die "failed to create prototype ticket" 4
     rm -f "$_description_file"
@@ -1047,6 +1035,45 @@ active_engineer() {
         1) printf '%s' "$_matches" | jq -c '.[0]' ;;
         *) die "multiple active Paperclip agents match role engineer" 3 ;;
     esac
+}
+
+# Payload builders are functions so the JSON can be validated without touching
+# the API: `tests/opc-paperclip.sh` sources this file (OPC_PAPERCLIP_SOURCE_ONLY)
+# and pipes each builder through `jq -e`. A malformed payload used to reach the
+# board as a jq compile error at create time and nothing caught it.
+engineering_payload_json() { # desc title priority status mode exec-ws agent project workspace settings labels
+    jq -nc --rawfile description "$1" \
+        --arg title "$2" --arg priority "$3" --arg status "$4" \
+        --arg mode "$5" --arg execution_workspace_id "$6" \
+        --arg agent "$7" --arg project "$8" --arg workspace "$9" \
+        --argjson settings "${10}" --argjson labels "${11}" '
+        {title:$title,description:$description,assigneeAgentId:$agent,
+         projectId:$project,projectWorkspaceId:$workspace,labelIds:$labels,
+         executionWorkspacePreference:$mode,
+         executionWorkspaceSettings:$settings}
+        | if $priority == "" then . else .priority=$priority end
+        | if $status == "" then . else .status=$status end
+        | if $mode == "reuse_existing"
+          then .executionWorkspaceId=$execution_workspace_id
+          | .executionWorkspacePreference="reuse_existing"
+          else . end
+    '
+}
+
+prototype_payload_json() { # desc title priority agent project workspace idempotency terminal_title terminal_epoch allow_duplicate labels
+    jq -nc --rawfile description "$1" \
+        --arg title "$2" --arg priority "$3" --arg agent "$4" \
+        --arg project "$5" --arg workspace "$6" \
+        --arg idempotency "$7" --arg terminal_title "$8" \
+        --argjson terminal_epoch "$9" --argjson allow_duplicate "${10}" \
+        --argjson labels "${11}" '
+        {title:(if $terminal_epoch == 1 then $terminal_title else $title end),
+         description:$description,assigneeAgentId:$agent,allowDuplicate:$allow_duplicate,
+         labelIds:$labels}
+        | if $priority == "" then . else .priority=$priority end
+        | if $project == "" then . else .projectId=$project | .projectWorkspaceId=$workspace end
+        | if $idempotency == "" then . else .idempotencyKey=$idempotency end
+    '
 }
 
 cmd_labels_ensure() {
@@ -1111,29 +1138,14 @@ cmd_engineering_ticket_create() {
         agent_default) _settings="$(jq -nc '{mode:"agent_default",workspaceStrategy:{type:"adapter_managed"}}')" ;;
         reuse_existing) _settings="$(jq -nc '{mode:"reuse_existing"}')" ;;
     esac
-    _track="$(label_marker "$_description_file" Track)"
-    [ -n "$_track" ] || _track=core
     _style="$(label_marker "$_description_file" Style)"
     [ -n "$_style" ] || _style=blueprint
     case "$_track" in core|lab) ;; *) die "unknown Track: $_track (core|lab)" 2 ;; esac
     case "$_style" in blueprint|exploration) ;; *) die "unknown Style: $_style (blueprint|exploration)" 2 ;; esac
     _labels_json="$(ensure_ticket_labels_json "$_track" "$_style")" || exit $?
-    _payload="$(jq -nc --rawfile description "$_description_file" \
-        --arg title "$_title" --arg priority "$_priority" --arg status "$_status" \
-        --arg mode "$_mode" --arg execution_workspace_id "$_execution_workspace_id" \
-        --arg agent "$_agent_id" --arg project "$_project_id" --arg workspace "$_workspace_id" \
-        --argjson settings "$_settings" --argjson labels "$_labels_json" '
-        {title:$title,description:$description,assigneeAgentId:$agent,
-         projectId:$project,projectWorkspaceId:$workspace,labelIds:$labels,
-         executionWorkspacePreference:$mode,
-         executionWorkspaceSettings:$settings}
-        | if $priority == "" then . else .priority=$priority end
-        | if $status == "" then . else .status=$status end
-        | if $mode == "reuse_existing"
-          then .executionWorkspaceId=$execution_workspace_id
-          | .executionWorkspacePreference="reuse_existing"
-          else . end
-    ')"
+    _payload="$(engineering_payload_json "$_description_file" "$_title" "$_priority" \
+        "$_status" "$_mode" "$_execution_workspace_id" "$_agent_id" "$_project_id" \
+        "$_workspace_id" "$_settings" "$_labels_json")"
     rm -f "$_description_file"
     _company="$(company_id)"
     _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
@@ -1221,5 +1233,9 @@ main() {
         *) die "unknown command: $1" 2 ;;
     esac
 }
+
+if [ "${OPC_PAPERCLIP_SOURCE_ONLY:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 main "$@"

@@ -395,6 +395,21 @@ if [ -d "$SK_SRC" ]; then
     echo "[frontdoor] synced skill: paperclip-api"
 fi
 
+# Runtime-authored skills are not version-controlled, and one of them taught the
+# agent to spawn the watcher this image retired plus a python fallback — a
+# second delivery writer that duplicates every notice. Quarantine any skill that
+# names the retired binary, every boot, so old volumes converge instead of
+# relying on somebody deleting the directory.
+for _skill in "$HH"/skills/*/ "$HH"/skills/*/*/; do
+    [ -f "$_skill/SKILL.md" ] || continue
+    case "$_skill" in *.retired.*) continue ;; esac   # already quarantined; do not churn
+    if grep -q "opc-issue-watcher" "$_skill/SKILL.md"; then
+        mv "$_skill" "${_skill%/}.retired.$(date +%s)" 2>/dev/null || true
+        echo "[frontdoor] quarantined obsolete skill ${_skill} (names the retired watcher)"
+    fi
+done
+unset _skill
+
 # Single-owner shared home: every hermes process touching this volume runs
 # as uid 10000 (the ACP agent via the setpriv wrapper, and hermes-dashboard).
 # All root entrypoint seeds above land before this line; any root-owned
