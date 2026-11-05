@@ -80,15 +80,19 @@ case "$FORGED" in
     *) fail "unauthorized mutation was not refused: $FORGED" ;;
 esac
 
-LOCK="$(bridge_py "
-from opc_bridge import config, control, store
-import time
-s = store.Store(config.load().db_path)
-row = control.set_override(s, {'scope_kind':'track','scope_id':'lab','key':'track_locked','value':True,
-                               'reason':'autonomy gate'}, 'ops:test', None, config.iso(time.time()))
-print(row['id'])
-")"
-[ -n "$LOCK" ] || fail "could not set the lab lock"
+# The hard lock is applied the way an operator applies it — an allocation —
+# not by hand-writing the policy row. `track_locked` is what the creation gate
+# reads, so this also proves the allocation writes it.
+bridge_py "
+from opc_bridge import config, control, store, paperclip
+import json, time
+cfg = config.load(); s = store.Store(cfg.db_path)
+pc = paperclip.Paperclip(cfg.paperclip_api_url, cfg.paperclip_key_path.read_text().strip())
+print(json.dumps(control.apply_allocation(cfg, s, pc, 100, 0, 'ops:test', None, config.iso(time.time()))))
+" >/dev/null
+[ "$(policy_json | jq -r '.values.track_locked')" = "true" ] \
+    || fail "allocation 100/0 did not set track_locked for lab"
+pass "hard lock sets the track_locked policy the creation gate reads"
 
 set +e
 OUT="$(printf 'Lane: engineering\nTrack: lab\n' | docker compose exec -T frontdoor \
@@ -100,10 +104,15 @@ grep -qi "locked by the operator" <<<"$OUT" || fail "refusal did not explain the
 pass "locked track refuses ticket creation before any API resolution"
 
 bridge_py "
-from opc_bridge import config, store
-s = store.Store(config.load().db_path)
-s.revoke_policy('$LOCK', config.iso(__import__('time').time()))
+from opc_bridge import config, control, store, paperclip
+import json, time
+cfg = config.load(); s = store.Store(cfg.db_path)
+pc = paperclip.Paperclip(cfg.paperclip_api_url, cfg.paperclip_key_path.read_text().strip())
+print(json.dumps(control.apply_allocation(cfg, s, pc, 70, 30, 'ops:test', None, config.iso(time.time()))))
 " >/dev/null
+[ "$(policy_json | jq -r '.values.track_locked')" = "false" ] \
+    || fail "unlock did not clear track_locked"
+pass "unlock clears the creation gate"
 
 LABELS="$(docker compose exec -T frontdoor opc-paperclip labels ensure)"
 [ "$(jq -r 'length' <<<"$LABELS")" -ge 4 ] || fail "labels ensure did not return four ids: $LABELS"

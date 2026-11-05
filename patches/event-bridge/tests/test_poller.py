@@ -39,6 +39,13 @@ class StubPaperclip:
     def runs_for_issue(self, issue_id):
         return self.runs_by_issue.get(issue_id, [])
 
+    def run(self, run_id):
+        for rows in self.runs_by_issue.values():
+            for row in rows:
+                if str(row.get("id") or row.get("runId")) == str(run_id):
+                    return row
+        return {}
+
     def heartbeat_runs(self, limit=100):
         return self.runs_recent[:limit]
 
@@ -203,6 +210,17 @@ class PollerTest(unittest.TestCase):
         self.assertEqual(row["event_id"], events.run_event_id("r1", "failed"))
         self.assertEqual(json.loads(row["payload"])["run_id"], "r1")
 
+    def test_run_sweep_reports_a_hard_lock_admission_cancellation(self):
+        self.store.set_meta("run_sweep_cursor", "2026-11-04T00:00:00Z")
+        self.pc.issues = [_issue("i1", status="todo", updated="2026-11-04T00:00:00Z")]
+        self.pc.runs_recent = [
+            {"id": "r9", "status": "cancelled", "finishedAt": "2026-11-04T01:00:00Z", "issueId": "i1"}
+        ]
+        self.pc.runs_by_issue["i1"] = [{"id": "r9", "errorCode": "agent_not_invokable"}]
+
+        self.assertEqual(self.p.tick(), 1)
+        self.assertEqual(self.store.event_for_issue("i1")["event_type"], "opc.run.admission_cancelled")
+
     def test_run_sweep_baselines_on_first_run(self):
         self.pc.runs_recent = [
             {"id": "r1", "status": "failed", "finishedAt": "2026-11-04T01:00:00Z", "issueId": "i1"}
@@ -335,6 +353,24 @@ class PollerTest(unittest.TestCase):
         issue_id, body = self.pc.patched_issues[0]
         self.assertEqual(issue_id, "i1")
         self.assertIn("label-track:core", body["labelIds"])
+
+    def test_cross_track_assignment_emits_a_violation(self):
+        self.pc.agent_rows = [{"id": "a-eng", "name": "Fullstack Engineer", "role": "engineer"}]
+        self.pc.issues = [
+            _issue(
+                "i4", status="todo", updated="2026-11-04T00:00:00Z",
+                labelIds=["label-track:lab"], assigneeAgentId="a-eng",
+            )
+        ]
+        self.p.bootstrap()
+
+        self.p.backfill_labels()
+        self.p.backfill_labels()
+
+        self.assertEqual(self.store.count_deliveries(), 1)
+        row = self.store.event_for_issue("i4")
+        self.assertEqual(row["event_type"], "opc.policy.violation")
+        self.assertIn("cross_track_assignment", row["payload"])
 
     def test_conflicting_track_labels_emit_a_violation(self):
         self.pc.agent_rows = [{"id": "a-eng", "name": "Fullstack Engineer", "role": "engineer"}]

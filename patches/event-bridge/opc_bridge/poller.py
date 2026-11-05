@@ -165,13 +165,10 @@ class Poller:
         changed = 0
         for status in _OPEN_STATUSES:
             for issue in self.pc.issues_with_status(status, limit=PAGE_SIZE):
+                self._check_track_conflict(issue)
                 current = [str(i) for i in (issue.get("labelIds") or [])]
                 track_ids = {label_id for name, label_id in ensured.items() if name.startswith("track:")}
-                present = [label_id for label_id in current if label_id in track_ids]
-                if len(present) > 1:
-                    self._policy_violation(issue, "conflicting_track")
-                    continue
-                if present:
+                if any(label_id in track_ids for label_id in current):
                     continue
                 agent = self._agents_map().get(str(issue.get("assigneeAgentId") or ""))
                 track = labels.track_of(set(), agent)
@@ -282,6 +279,16 @@ class Poller:
         track_names = {name for name in names if name.startswith("track:")}
         if len(track_names) > 1:
             self._policy_violation(issue, "conflicting_track")
+            return
+        if len(track_names) == 1:
+            label_track = next(iter(track_names)).split(":", 1)[1]
+            agent = self._agents_map().get(str(issue.get("assigneeAgentId") or ""))
+            agent_track = labels.track_of(set(), agent)
+            if agent_track in ("core", "lab") and agent_track != label_track:
+                # §6.4/§19.4: a Lab ticket on the engineering agent is not
+                # covered by the Lab lock. Report it rather than let it run
+                # silently outside the track's policy.
+                self._policy_violation(issue, "cross_track_assignment")
 
     def _policy_violation(self, issue: Mapping[str, Any], reason: str) -> None:
         issue_id = str(issue["id"])
@@ -353,8 +360,19 @@ class Poller:
             if observed > latest:
                 latest = observed
             status = str(run.get("status") or "")
+            admission_cancelled = False
             if status not in _RUN_FAILURES:
-                continue
+                if status == "cancelled":
+                    # A hard lock makes Paperclip cancel not-yet-started runs
+                    # with this error code; spec §12 promised that is reported,
+                    # not silent.
+                    try:
+                        detail = self.pc.run(str(run.get("id") or run.get("runId") or ""))
+                    except Exception:
+                        detail = {}
+                    admission_cancelled = str(detail.get("errorCode") or "") == "agent_not_invokable"
+                if not admission_cancelled:
+                    continue
             if not str(run.get("runId") or run.get("id") or "").strip():
                 continue
             issue_id = str(run.get("issueId") or "")
@@ -368,7 +386,8 @@ class Poller:
             issue = issues[issue_id]
             if not issue or str(issue.get("status")) in _QUIET_FAILURE_STATUSES:
                 continue
-            emitted += int(self.store.enqueue_event(self._run_event(issue, run, now), now))
+            event_type = events.ADMISSION_CANCELLED if admission_cancelled else events.ISSUE_FAILED
+            emitted += int(self.store.enqueue_event(self._run_event(issue, run, now, event_type), now))
 
         if latest != cursor:
             self.store.set_meta("run_sweep_cursor", latest)
@@ -404,7 +423,8 @@ class Poller:
             issue_title=issue.get("title"),
         )
 
-    def _run_event(self, issue: Mapping[str, Any], run: Mapping[str, Any], now: float):
+    def _run_event(self, issue: Mapping[str, Any], run: Mapping[str, Any], now: float,
+                   event_type: str = events.ISSUE_FAILED):
         issue_id = str(issue["id"])
         identifier = issue.get("identifier")
         status = str(run.get("status") or "")
@@ -412,10 +432,11 @@ class Poller:
         channel, anchor = self.resolve_origin(issue_id)
         run_id_value = str(run.get("runId") or run.get("id") or "")
 
+        event_kind = status if event_type == events.ISSUE_FAILED else "admission_cancelled"
         return events.Event(
             schema_version=events.SCHEMA_VERSION,
-            event_id=events.run_event_id(run_id_value, status),
-            event_type=events.ISSUE_FAILED,
+            event_id=events.run_event_id(run_id_value, event_kind),
+            event_type=event_type,
             source="paperclip",
             company_id=self._company(),
             project_id=issue.get("projectId"),

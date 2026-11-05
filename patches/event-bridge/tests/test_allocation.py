@@ -59,6 +59,21 @@ class AllocationTest(unittest.TestCase):
         self.assertEqual(control.slot_plan(70, 30, 6, 2), {"core": 4, "lab_per_agent": 1})
         self.assertEqual(control.slot_plan(100, 0, 6, 2)["lab_per_agent"], 0)
 
+    def test_hard_lock_sets_the_track_locked_policy_the_helper_reads(self):
+        from opc_bridge import policy
+
+        self.apply(100, 0)
+        self.assertTrue(
+            policy.effective(self.store, "default", None, "lab", NOW)["values"]["track_locked"]
+        )
+        self.assertFalse(
+            policy.effective(self.store, "default", None, "core", NOW)["values"]["track_locked"]
+        )
+        self.apply(70, 30)
+        self.assertFalse(
+            policy.effective(self.store, "default", None, "lab", NOW)["values"]["track_locked"]
+        )
+
     def test_zero_share_pauses_only_that_track(self):
         result = self.apply(100, 0)
         self.assertTrue(result["applied"])

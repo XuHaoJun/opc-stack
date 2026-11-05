@@ -17,6 +17,8 @@ import secrets
 import uuid
 from typing import Any
 
+import json
+
 from . import buzz as buzz_mod
 from . import config, policy
 
@@ -257,8 +259,6 @@ def apply_allocation(
     now_iso: str,
     adaptive: bool = False,
 ) -> dict:
-    import json
-
     if not (0 <= core <= 100 and 0 <= lab <= 100) or core + lab != 100:
         raise PolicyError("allocation must be 0..100 and sum to 100")
 
@@ -281,6 +281,25 @@ def apply_allocation(
                 "scope_id": cfg.company_id or "default",
                 "key": key,
                 "value_json": json.dumps(value),
+                "priority": priority,
+                "created_by": actor,
+                "reason": "allocation",
+                "source_event_id": source_event_id,
+                "created_at": now_iso,
+            }
+        )
+
+    # `track_locked` is what `opc-paperclip` reads before creating a ticket.
+    # Without this write the hard lock stopped executions (agent pause) but the
+    # documented creation-time refusal never fired.
+    for track, share in (("core", core), ("lab", lab)):
+        store.insert_policy(
+            {
+                "id": str(uuid.uuid4()),
+                "scope_kind": "track",
+                "scope_id": track,
+                "key": "track_locked",
+                "value_json": json.dumps(share == 0),
                 "priority": priority,
                 "created_by": actor,
                 "reason": "allocation",

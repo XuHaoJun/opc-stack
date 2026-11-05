@@ -689,8 +689,14 @@ keeps working; the new patches fail the build loudly if upstream moves the hunks
 5. Private-channel notification depends on membership or the configured fallback
    channel; there is no silent drop, but there is a visible fallback.
 6. Zero-share unlock is always manual; "上線後再說" never auto-expires.
-7. Allocation above zero is approximated by slots and measured by wall-clock run
-   time; token/cost weighting waits for a Paperclip aggregate we can trust.
+7. Allocation above zero is approximated by slots, and the adaptive
+   measurement loop described in §12 (rolling 60-min run-time split, ±15-point
+   drift, at most one slot per cycle) is **not implemented**: allocation changes
+   only when an operator applies one. `OPC_ALLOC_CORE/LAB` seed the defaults,
+   `apply_allocation(..., adaptive=True)` exists and refuses while an operator
+   row is present, but nothing calls it with measurements. Token/cost weighting
+   likewise waits for a Paperclip aggregate we can trust. This is the remaining
+   Phase 3 item, stated rather than implied.
 8. `Lab 0%` cancels Lab runs that were queued but never started (Paperclip's claim
    gate cancels instead of parking them). Running work always finishes. Those
    cancellations are visible in Paperclip (`errorCode: agent_not_invokable`) and
