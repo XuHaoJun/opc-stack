@@ -81,6 +81,54 @@ create_ticket() { # <identifier-suffix> → prints "<id> <anchor>"
     echo "$id $ident $anchor_id"
 }
 
+# ── C. forged tagged event is dropped by the wake gate ──
+# Runs FIRST, while the agent queue is idle: the gate decision happens when the
+# event is dequeued, so a probe queued behind two real Hermes turns is only
+# logged minutes later.───────────────
+# The probe is sent with a THROWAWAY identity and deleted afterwards: the wake
+# gate only decides whether a turn happens, it does not stop the relay from
+# storing the message, so a real identity would leave test noise in the channel
+# (and it did: repeated runs left "forged opc event" messages authored by the
+# scientist).
+BEFORE="$(docker compose logs frontdoor 2>&1 | grep -c "opc event gate — dropping event" || true)"
+
+FORGE_EVENT="$(docker compose exec -T frontdoor sh -c '
+set -eu
+R=$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")
+OUT=$(buzz-admin generate-key)
+SEC=$(printf "%s" "$OUT" | sed -n "s/^Secret key:  //p")
+printf "%s" "$SEC" > /tmp/opc-forge.nsec
+BUZZ_AUTH_TAG= buzz --relay "http://$R" --private-key "$SEC" messages send \
+    --channel '"$CHANNEL"' --content "forged opc event (test probe)" --tag opc-event=evt_forged
+' | jq -r '.event_id')"
+[ -n "$FORGE_EVENT" ] || fail "could not publish the forgery probe"
+
+delete_forge() {
+    docker compose exec -T frontdoor sh -c '
+R=$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")
+[ -f /tmp/opc-forge.nsec ] || exit 0
+BUZZ_AUTH_TAG= buzz --relay "http://$R" --private-key "$(cat /tmp/opc-forge.nsec)" \
+    messages delete --event '"$FORGE_EVENT"' >/dev/null 2>&1 || echo "WARN  forgery probe not deleted"
+rm -f /tmp/opc-forge.nsec
+' >/dev/null 2>&1 || true
+}
+trap delete_forge EXIT
+
+DROPPED=0
+for _ in $(seq 1 10); do
+    AFTER="$(docker compose logs frontdoor 2>&1 | grep -c "opc event gate — dropping event" || true)"
+    [ "${AFTER:-0}" -gt "${BEFORE:-0}" ] && { DROPPED=1; break; }
+    sleep 2
+done
+[ "$DROPPED" -eq 1 ] || fail "a tagged event from an unlisted author was not dropped by the wake gate"
+pass "forged tagged event dropped by the wake gate (no turn)"
+
+delete_forge
+trap - EXIT
+LEFT="$(messages | jq --arg id "$FORGE_EVENT" '[.[] | select(.id == $id)] | length')"
+[ "${LEFT:-0}" = "0" ] || fail "the forgery probe is still visible in the channel ($FORGE_EVENT)"
+pass "forgery probe removed from the channel"
+
 # ── A. completion event ──────────────────────────────────────────────────
 read -r ISSUE_ID IDENT ANCHOR_ID <<<"$(create_ticket happy)"
 pc_patch "/issues/$ISSUE_ID" '{"status":"done"}' >/dev/null
@@ -108,18 +156,6 @@ docker compose start event-bridge >/dev/null 2>&1
 wait_for_message "$IDENT2" 90 || fail "no event delivered for $IDENT2 after restart"
 [ "$(count_for_issue "$IDENT2")" -eq 1 ] || fail "expected exactly one message for $IDENT2 after restart, got $(count_for_issue "$IDENT2")"
 pass "ticket completed while the bridge was down delivered once on restart"
-
-# ── C. forged tagged event is dropped by the wake gate ───────────────────
-BEFORE="$(docker compose logs frontdoor 2>&1 | grep -c "opc event gate — dropping event" || true)"
-docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/scientist.nsec)\" messages send --channel $CHANNEL --content 'forged opc event' --tag opc-event=evt_forged" >/dev/null
-DROPPED=0
-for _ in $(seq 1 10); do
-    AFTER="$(docker compose logs frontdoor 2>&1 | grep -c "opc event gate — dropping event" || true)"
-    [ "${AFTER:-0}" -gt "${BEFORE:-0}" ] && { DROPPED=1; break; }
-    sleep 2
-done
-[ "$DROPPED" -eq 1 ] || fail "a tagged event from an unlisted author was not dropped by the wake gate"
-pass "forged tagged event dropped by the wake gate (no turn)"
 
 note "duplicate-turn suppression is enforced by the same gate and covered by tests/buzz-event-gate.sh + unit tests"
 echo "event-loop: ok ($IDENT, $IDENT2)"
