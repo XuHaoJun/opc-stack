@@ -462,10 +462,21 @@ priority 20. Two regimes:
 - **share > 0 → slot allocation (approximate).** `OPC_SLOT_BUDGET` (default 6)
   is split by share and written to each agent's
   `runtimeConfig.heartbeat.maxConcurrentRuns` (Core 70/30 → engineer 4, lab
-  agents 1 each). Measured usage is the rolling 60-min wall-clock sum of run
-  durations per track from `heartbeat-runs`; if the observed split drifts more
-  than ±15 points for 30 min, the bridge adjusts by at most one slot per cycle
-  and audits it. Adaptive writes never happen while an operator override exists.
+  agents 1 each).
+- **Adaptive adjustment** (`opc_bridge/adaptive.py`, thread on
+  `OPC_ADAPTIVE_INTERVAL` = 300 s): measured usage is the rolling
+  `OPC_ADAPTIVE_WINDOW_SECONDS` (3600) of `heartbeat-runs` `startedAt`/
+  `finishedAt` per track, clipped to the window and attributed through the
+  agent id. Fewer than `OPC_ADAPTIVE_MIN_RUNS` (5) finished runs or less than
+  `OPC_ADAPTIVE_MIN_SECONDS` (600) of measured work means **wait**, never
+  guess. When the measured split is more than `OPC_ADAPTIVE_DRIFT_POINTS` (15)
+  away from the intended one for `OPC_ADAPTIVE_HOLD_SECONDS` (1800), the
+  controller moves **one step** (`round(100 / OPC_SLOT_BUDGET)` points) toward
+  the measured side and audits it. It never takes a share to 0 (only an
+  operator command may pause a track), and it does nothing while any
+  priority-20 allocation row exists. Every decision (measured shares, total,
+  run count, drift age, last adjustment) is visible in
+  `GET /v1/control/state` under `adaptive`.
 
   Provenance is explicit, because the operator's own CLI reads the same field:
   the bridge writes `metadata.opcBridgeAllocation` (its own key, never
@@ -581,6 +592,12 @@ memory or on a container still being alive.
 | `OPC_EVENT_MAX_AGE_HOURS` | 168 | expire stale events |
 | `OPC_RUN_SWEEP_LIMIT` | 100 | newest heartbeat runs read per tick |
 | `OPC_RUN_SWEEP_OVERLAP_SECONDS` | 300 | cursor overlap for the run sweep (dedupe absorbs repeats) |
+| `OPC_ADAPTIVE_ENABLED` | true | adaptive allocation on/off |
+| `OPC_ADAPTIVE_INTERVAL` | 300 | measurement cadence |
+| `OPC_ADAPTIVE_WINDOW_SECONDS` | 3600 | rolling measurement window |
+| `OPC_ADAPTIVE_MIN_RUNS` / `MIN_SECONDS` | 5 / 600 | evidence required before acting |
+| `OPC_ADAPTIVE_DRIFT_POINTS` | 15 | gap that counts as drift |
+| `OPC_ADAPTIVE_HOLD_SECONDS` | 1800 | how long the drift must persist |
 | `OPC_EVENT_FALLBACK_CHANNEL` | empty | second rung of the destination ladder |
 | `OPC_NOTIFIER_JOIN_CHANNELS` | empty | opt-in membership list |
 | `OPC_CONTROL_CHANNEL` | auto (`opc-control`) | the only channel owner commands are read from |
@@ -616,6 +633,10 @@ Offline (no live stack; run in the image):
   track resolution.
 - `tests/health-monitor.sh` — classification with injected clock, reminder
   dedupe, recovery, "unknown is not stalled", and **no cancel call is ever made**.
+- Adaptive allocation (inside `tests/event-bridge.sh`): window clipping,
+  insufficient-evidence inertness, drift hold, one-step direction, direction
+  change resetting the hold, operator override disabling it, and the refusal to
+  step a share to zero.
 - Run-failure sweep (inside `tests/event-bridge.sh`): reads the list-row shape
   (`id`), emits once per failed run on a non-terminal issue, skips terminal
   issues and company-scope runs, persists the cursor in `meta`, and survives a
@@ -689,14 +710,11 @@ keeps working; the new patches fail the build loudly if upstream moves the hunks
 5. Private-channel notification depends on membership or the configured fallback
    channel; there is no silent drop, but there is a visible fallback.
 6. Zero-share unlock is always manual; "上線後再說" never auto-expires.
-7. Allocation above zero is approximated by slots, and the adaptive
-   measurement loop described in §12 (rolling 60-min run-time split, ±15-point
-   drift, at most one slot per cycle) is **not implemented**: allocation changes
-   only when an operator applies one. `OPC_ALLOC_CORE/LAB` seed the defaults,
-   `apply_allocation(..., adaptive=True)` exists and refuses while an operator
-   row is present, but nothing calls it with measurements. Token/cost weighting
-   likewise waits for a Paperclip aggregate we can trust. This is the remaining
-   Phase 3 item, stated rather than implied.
+7. Allocation above zero remains an approximation: adaptive adjusts by whole
+   slots from wall-clock run time, not by tokens or cost (no trusted aggregate
+   yet). It also needs a mapped agent (Core/Lab selectors) and at least
+   `OPC_ADAPTIVE_MIN_RUNS`/`MIN_SECONDS` of recent work; an idle or unmapped
+   stack is left alone rather than re-balanced on noise.
 8. `Lab 0%` cancels Lab runs that were queued but never started (Paperclip's claim
    gate cancels instead of parking them). Running work always finishes. Those
    cancellations are visible in Paperclip (`errorCode: agent_not_invokable`) and

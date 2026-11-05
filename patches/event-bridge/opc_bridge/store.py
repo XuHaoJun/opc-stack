@@ -529,6 +529,19 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_policy_count(self) -> int:
+        with self._lock:
+            return int(self._db.execute("SELECT COUNT(*) FROM policies").fetchone()[0])
+
+    def effective_allocation(self, company_id: str, now_iso: str) -> dict:
+        from . import policy
+
+        resolved = policy.effective(self, company_id, None, "lab", now_iso)
+        return {
+            "core": int(resolved["values"]["allocation.core"]),
+            "lab": int(resolved["values"]["allocation.lab"]),
+        }
+
     def revoke_policy(self, policy_id: str, at: str) -> int:
         with self._lock:
             cur = self._db.execute(

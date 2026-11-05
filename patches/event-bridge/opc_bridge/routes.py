@@ -29,11 +29,12 @@ class Routes:
     def __init__(self, cfg: config.Config, store, auth: control.OperatorAuth | None = None,
                  backfill: Callable[[str], int] | None = None,
                  backfill_labels: Callable[[], int] | None = None,
-                 paperclip=None) -> None:
+                 paperclip=None, adaptive=None) -> None:
         self.cfg = cfg
         self.store = store
         self.auth = auth
         self._paperclip = paperclip
+        self._adaptive = adaptive
         self._backfill = backfill
         self._backfill_labels = backfill_labels
 
@@ -60,6 +61,7 @@ class Routes:
                 "core": allocation["values"]["allocation.core"],
                 "lab": allocation["values"]["allocation.lab"],
             },
+            "adaptive": self._adaptive.state() if self._adaptive is not None else {},
         }
 
     def events(self, params: dict) -> tuple[int, dict]:
@@ -199,8 +201,8 @@ class _Forbidden(Exception):
     pass
 
 
-def build(cfg: config.Config, store, auth=None, backfill=None, backfill_labels=None, paperclip=None) -> dict[str, Handler]:
-    routes = Routes(cfg, store, auth, backfill, backfill_labels, paperclip)
+def build(cfg: config.Config, store, auth=None, backfill=None, backfill_labels=None, paperclip=None, adaptive=None) -> dict[str, Handler]:
+    routes = Routes(cfg, store, auth, backfill, backfill_labels, paperclip, adaptive)
     table: dict[str, Handler] = {
         "GET /v1/policy/effective": routes.effective,
         "GET /v1/mandates": routes.mandates,

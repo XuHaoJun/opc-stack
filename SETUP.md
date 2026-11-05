@@ -568,6 +568,11 @@ docker compose exec event-bridge python3 -m opc_bridge.cli force-stop \
   重啟後仍有效；已排隊未開始的 run 會被 Paperclip 取消並回報。解鎖要人下指令。
 - 非零配比是近似值：依 `OPC_SLOT_BUDGET` 分配 `maxConcurrentRuns`，並寫
   `metadata.opcBridgeAllocation`（`opc-paperclip agent concurrency show` 會顯示 `bridge_adaptive`）。
+- **Adaptive 調整**：每 5 分鐘用最近 60 分鐘的 run 時數算 core/lab 實測比例；
+  樣本不足（<5 個 run 或少於 600 秒）就不動作；實測與目標差距 >15 點且持續 30 分鐘，
+  才往實測方向移**一格**。永遠不會把某一軌調到 0（只有 operator 能暫停），
+  而且只要存在 operator 設定的 allocation 就完全不動作。目前量測與決策可從
+  `opc-control state` 的 `adaptive` 欄位看到。
 - 建立 ticket 前 `opc-paperclip` 會查 `track_locked` 並以 exit 3 拒絕鎖定的 track。
 
 ### 健康監控

@@ -75,4 +75,20 @@ done
 [ "$(agent_status Prototyper)" != "paused" ] || fail "lab agents did not resume at 70/30"
 pass "70/30 resumes the lab agents"
 
+# Live gates must not leave operator-priority policy behind: an allocation row
+# created here would silently disable adaptive allocation for the real stack.
+bridge_py "
+from opc_bridge import config, store
+import time
+s = store.Store(config.load().db_path)
+with s._lock:
+    cur = s._db.execute(
+        \"update policies set revoked_at=? where revoked_at is null \"
+        \"and created_by='ops:test' and key in ('allocation.core','allocation.lab','track_locked')\",
+        (config.iso(time.time()),),
+    )
+    s._db.commit()
+print('[gate] revoked test policy rows:', cur.rowcount)
+"
+
 echo "admission: ok ($ISSUE)"

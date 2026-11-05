@@ -44,6 +44,14 @@ class Config:
     max_age_hours: float
     run_sweep_limit: int
     run_sweep_overlap_seconds: int
+    # adaptive allocation (Phase 3)
+    adaptive_enabled: bool
+    adaptive_interval: float
+    adaptive_window_seconds: int
+    adaptive_min_runs: int
+    adaptive_min_seconds: int
+    adaptive_drift_points: int
+    adaptive_hold_seconds: int
     # destinations / authorization
     fallback_channel: str | None
     control_channel: str | None
@@ -83,6 +91,13 @@ def _int(env: Mapping[str, str], key: str, default: int) -> int:
 def _float(env: Mapping[str, str], key: str, default: float) -> float:
     raw = (env.get(key) or "").strip()
     return default if not raw else float(raw)
+
+
+def _bool(env: Mapping[str, str], key: str, default: bool) -> bool:
+    raw = (env.get(key) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
 
 
 def _split(env: Mapping[str, str], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -125,6 +140,13 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         max_age_hours=_float(env, "OPC_EVENT_MAX_AGE_HOURS", 168.0),
         run_sweep_limit=_int(env, "OPC_RUN_SWEEP_LIMIT", 100),
         run_sweep_overlap_seconds=_int(env, "OPC_RUN_SWEEP_OVERLAP_SECONDS", 300),
+        adaptive_enabled=_bool(env, "OPC_ADAPTIVE_ENABLED", True),
+        adaptive_interval=_float(env, "OPC_ADAPTIVE_INTERVAL", 300.0),
+        adaptive_window_seconds=_int(env, "OPC_ADAPTIVE_WINDOW_SECONDS", 3600),
+        adaptive_min_runs=_int(env, "OPC_ADAPTIVE_MIN_RUNS", 5),
+        adaptive_min_seconds=_int(env, "OPC_ADAPTIVE_MIN_SECONDS", 600),
+        adaptive_drift_points=_int(env, "OPC_ADAPTIVE_DRIFT_POINTS", 15),
+        adaptive_hold_seconds=_int(env, "OPC_ADAPTIVE_HOLD_SECONDS", 1800),
         fallback_channel=_optional(env, "OPC_EVENT_FALLBACK_CHANNEL"),
         control_channel=_optional(env, "OPC_CONTROL_CHANNEL"),
         command_max_age_seconds=_int(env, "OPC_CONTROL_COMMAND_MAX_AGE_SECONDS", 900),
