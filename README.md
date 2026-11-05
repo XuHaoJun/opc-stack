@@ -12,6 +12,7 @@ OPC Stack 是為單一操作者設計的 Docker Compose agent company runtime，
 2. Chief of Staff 判斷內容應該消失、存成記憶，或成為必須完成的工作；它負責分流，不自己實作。
 3. 必須完成的工作會成為 Paperclip issue，再依性質指派給 engineering、prototype 或 research lane。
 4. 執行 agent 將結果與狀態寫回 Paperclip；需要保留的程式碼與文件進 Git。記憶只提供 reasoning context，不會取代人的授權或 Paperclip 的工作狀態。
+5. Paperclip 的工作事件（完成／阻塞／取消／run 失敗）由 **event-bridge** 以獨立的 `paperclip` 身分送回 Buzz 的原始 thread；Chief of Staff 被喚醒後**回 Paperclip 查證**，再依已授權的 mandate 決定回報、繼續、開後續票或問人。資源與暫停由 OPC policy 在程式層把關，不靠 prompt。
 
 ### Agents
 
@@ -24,6 +25,8 @@ OPC Stack 是為單一操作者設計的 Docker Compose agent company runtime，
 
 兩個 coding agents 是負責 durable production implementation 的 **Fullstack Engineer**，以及負責 prototype lane 的 **Prototyper**；**Scientist** 則是跑在 Hermes gateway 裡、具獨立身分與常駐 devenv 租約的 research lane。
 
+另有一個**不是 agent** 的服務身分 `paperclip`：只負責張貼系統事件與健康告警，沒有 ACP runtime、不加入頻道、也不出現在 agent directory。
+
 ## 架構
 
 ```mermaid
@@ -35,6 +38,10 @@ flowchart TD
     Frontdoor <-->|"recall / capture"| Memory["TencentDB Agent Memory<br/>記憶與知識"]
 
     Paperclip <-->|"assignment / result / status"| Runtime["Execution agents<br/>Fullstack Engineer · Prototyper · Scientist"]
+    Paperclip -.->|"issues · runs · failures"| Bridge["event-bridge<br/>event delivery · policy · admission · health"]
+    Bridge -->|"signed events as paperclip"| Buzz
+    Bridge -->|"pause / cancel / slots"| Paperclip
+    Frontdoor -->|"effective policy"| Bridge
     Runtime --> Git["Git repo<br/>code / docs truth"]
     Runtime -.->|"shared resource lease"| Devenv["devenv<br/>PostgreSQL · Valkey · S3 · HTTP"]
     Runtime -.->|"dedicated daemon lease"| Podenv["podenv<br/>rootless nested containers"]
@@ -49,11 +56,29 @@ flowchart TD
 | `hermes` | gateway API server (dashboard 關閉) | 8642 |
 | `hermes-dashboard` | web dashboard over the buzz front door's hermes home (sessions + live logs/thinking) | 9119 |
 | `paperclip` | canonical work control plane | 3100 |
+| `event-bridge` | Paperclip→Buzz 的事件投遞、policy / mandate、admission（含硬鎖）、run 健康監控；無對外 port | — |
 | `devenv-pg` / `devenv-valkey` / `devenv-s3` | agent 共用、租戶隔離的 PostgreSQL/pgvector、Valkey 與 S3 | 5433 / 6380 / 9002（僅 localhost） |
 | `podenv` | rootless Podman daemon，提供巢狀容器租約 | 23000–23015（僅 localhost） |
 | `tencentdb-core` / `-hub` / `-proxy` | memory gateway / panel+knowledge / LLM proxy | 8420 / 8125+8424 / 8096 |
 
 LLM 全棧預設使用 OpenCode Go(`https://opencode.ai/zen/go/v1`),`.env` 填 `OPENAI_API_KEY` 一個 key 即可。`OPENAI_BASE_URL` 控制 OpenAI-compatible endpoint;shared gateway/dashboard/Paperclip/TencentDB 的模型用 `OPENAI_MODEL`（預設 `deepseek-v4.1-flash`）,frontdoor relay 則用 `BUZZ_AGENT_MODEL`（預設 `deepseek-v4.1-flash`）。Hermes custom provider runtime 讀 key/base URL,模型以 `config.yaml` 為 source of truth。Hermes 的記憶走官方 `memory_tencentdb` provider,直連 `tencentdb-core`。
+
+## 事件與自主權控制
+
+執行完成後不是「通知一聲就結束」，而是一個閉環：`event-bridge`（獨立服務、獨立身分）把 Paperclip 的 issue/run 事件可靠地送回 Buzz，Chief of Staff 查證後才決定下一步。
+
+- **事件**：完成的 ticket、blocked/cancelled、run 失敗、健康異常都以版本化事件送出（`opc-event` tag + 去重 id）；私有頻道不可達時走 fallback，不會靜默遺失。
+- **自主權**：`Execution Mandate` 決定 Hermes 能自主做什麼（style、可否開後續票、期限、預算）；優先序是 hard safety > operator override > mandate > adaptive > default。
+- **資源與控制**：Core = engineering agent，Lab = Prototyper + Scientist。`Lab 0%` 以 Paperclip 原生的 agent pause 實作（新工作進不來、進行中的跑完、重啟後仍有效）；非零配比會依近一小時的實際 run 時數緩慢自適應，但永不覆寫 operator 的設定，也永不把任一軌調到 0。
+- **人永遠有最終控制**：強制終止需要 owner 在 `#opc-control` 頻道簽名的指令；健康監控只告警，**不會**自動終止任何 run。
+
+```bash
+docker compose exec event-bridge python3 -m opc_bridge.cli state          # 配比、控制狀態、adaptive 量測
+docker compose exec event-bridge python3 -m opc_bridge.cli policy --track lab
+docker compose exec event-bridge python3 -m opc_bridge.cli events --limit 20
+```
+
+操作細節（`!opc` 指令文法、控制頻道、升級步驟）見 `SETUP.md`；設計與限制見 `docs/superpowers/specs/2026-11-04-event-autonomy-control-design.md`。
 
 ## 開發資源租約
 
