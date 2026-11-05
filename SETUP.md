@@ -548,7 +548,7 @@ docker compose exec frontdoor opc-paperclip labels ensure
 |---|---|
 | force stop | `!opc force-stop run <run-id>` |
 | 配比 | `!opc allocate core=<n> lab=<m>` |
-| mandate 授予 | `!opc mandate grant project=<id>` 或 `track=<core\|lab>` |
+| mandate 授予 | `!opc mandate grant project=<id>\|track=<core\|lab> style=<blueprint\|exploration> followups=<on\|off>` |
 | mandate 撤銷 | `!opc mandate revoke <mandate-id>` |
 | override | `!opc override <scope-id> <key>` |
 | 補發歷史 | `!opc backfill <ISO-8601>` |

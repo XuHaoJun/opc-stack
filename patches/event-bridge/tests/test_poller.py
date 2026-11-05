@@ -6,6 +6,7 @@ chat on cutover) and failing to emit a second completion of a re-opened ticket
 (the dedupe key swallows real work).
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -186,11 +187,16 @@ class PollerTest(unittest.TestCase):
         self.pc.issues = [
             _issue("i1", status="in_progress", updated="2026-11-04T01:00:00Z")
         ]
-        self.pc.runs_by_issue["i1"] = [{"id": "r1", "status": "failed", "error": "boom"}]
+        self.pc.runs_by_issue["i1"] = [
+            {"id": None, "runId": "r1", "status": "failed", "error": "boom"}
+        ]
 
         self.assertEqual(self.p.tick(), 1)
         self.assertEqual(self.p.tick(), 0)
-        self.assertEqual(self.store.event_for_issue("i1")["event_type"], "paperclip.issue.failed")
+        row = self.store.event_for_issue("i1")
+        self.assertEqual(row["event_type"], "paperclip.issue.failed")
+        self.assertEqual(row["event_id"], events.run_event_id("r1", "failed"))
+        self.assertEqual(json.loads(row["payload"])["run_id"], "r1")
 
     # ── origin ───────────────────────────────────────────────────────────
     def test_origin_markers_only_from_trusted_authors_and_cached(self):
@@ -212,12 +218,33 @@ class PollerTest(unittest.TestCase):
 
     # ── recovery ─────────────────────────────────────────────────────────
     def test_reconcile_recovers_a_terminal_issue_missed_while_stopped(self):
+        # A bridge that bootstrapped yesterday must still recover today's work.
+        self.store.set_cursor("2026-11-03T00:00:00Z", bootstrapped_at="2026-11-03T00:00:00Z")
         self.pc.issues = [
             _issue("i7", status="done", updated="2026-11-04T01:00:00Z", completedAt="2026-11-04T01:00:00Z")
         ]
 
         self.assertEqual(self.p.reconcile(), 1)
         self.assertEqual(self.p.reconcile(), 0)
+
+    def test_reconcile_does_not_replay_pre_cutover_history(self):
+        # Baseline is observed-not-delivered. Ten minutes after a first install
+        # reconcile runs; it must not re-announce the board.
+        self.p.bootstrap()
+        self.pc.issues = [
+            _issue("i-old", status="done", updated="2026-11-04T01:00:00Z", completedAt="2026-11-04T01:00:00Z")
+        ]
+
+        self.assertEqual(self.p.reconcile(), 0)
+
+    def test_backfill_ignores_the_cutover_watermark(self):
+        # The explicit history path is allowed to deliver pre-cutover tickets.
+        self.p.bootstrap()
+        self.pc.issues = [
+            _issue("i-old", status="done", updated="2026-11-04T01:00:00Z", completedAt="2026-11-04T01:00:00Z")
+        ]
+
+        self.assertEqual(self.p.backfill("2026-11-01T00:00:00Z"), 1)
 
     def test_backfill_is_explicit_and_idempotent(self):
         self.pc.issues = [
@@ -254,6 +281,22 @@ class PollerTest(unittest.TestCase):
         issue_id, body = self.pc.patched_issues[0]
         self.assertEqual(issue_id, "i1")
         self.assertIn("label-track:core", body["labelIds"])
+
+    def test_conflicting_track_labels_emit_a_violation(self):
+        self.pc.agent_rows = [{"id": "a-eng", "name": "Fullstack Engineer", "role": "engineer"}]
+        self.pc.issues = [
+            _issue(
+                "i3", status="todo", updated="2026-11-04T00:00:00Z",
+                labelIds=["label-track:core", "label-track:lab"], assigneeAgentId="a-eng",
+            )
+        ]
+        self.p.bootstrap()
+
+        self.p.backfill_labels()
+        self.p.backfill_labels()
+
+        self.assertEqual(self.store.count_deliveries(), 1)
+        self.assertEqual(self.store.event_for_issue("i3")["event_type"], "opc.policy.violation")
 
     def test_unknown_track_emits_one_violation(self):
         self.pc.issues = [_issue("i2", status="todo", updated="2026-11-04T00:00:00Z")]

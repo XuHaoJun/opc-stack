@@ -173,6 +173,19 @@ class RouteBindingTest(unittest.TestCase):
                                                 "command": "!opc force-stop run run-a"})
         self.assertEqual(self.auth.calls, [("!opc force-stop run", ["run-b"], "e" * 64)])
 
+    def test_grant_binds_style_and_followups(self):
+        self._post(self.routes.grant, {
+            "scope_kind": "track", "scope_id": "lab", "track": "lab",
+            "style": "exploration", "followups_allowed": True,
+            "authorization_event_id": "e" * 64,
+        })
+        self.assertEqual(
+            self.auth.calls,
+            [("!opc mandate grant",
+              ["track=lab", "style=exploration", "followups=on"],
+              "e" * 64)],
+        )
+
     def test_allocation_passes_the_numbers_it_will_apply(self):
         with self.assertRaises(RuntimeError):
             self._post(self.routes.allocation, {"core": 100, "lab": 0, "authorization_event_id": "e" * 64})

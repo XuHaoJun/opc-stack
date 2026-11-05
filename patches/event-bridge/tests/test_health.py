@@ -80,9 +80,15 @@ class ClassifyTest(unittest.TestCase):
             "lost",
         )
 
-    def test_running_under_a_paused_agent_is_lost(self):
+    def test_a_finishing_run_under_our_own_lock_is_not_lost(self):
+        # The hard lock pauses agents while in-flight work finishes; recent
+        # output means this is expected, not an inconsistency.
         run = {"id": "r", "status": "running", "startedAt": T0}
-        self.assertEqual(health.classify(run, T0, "paused", T0 + 10, 900, 1800), "lost")
+        self.assertNotEqual(health.classify(run, T0 + 7, "paused", T0 + 10, 900, 1800), "lost")
+
+    def test_a_run_silent_under_a_paused_agent_is_lost(self):
+        run = {"id": "r", "status": "running", "startedAt": T0}
+        self.assertEqual(health.classify(run, T0, "paused", T0 + 1000, 900, 1800), "lost")
 
     def test_recent_progress_is_healthy(self):
         run = {"id": "r", "status": "running", "startedAt": T0}
@@ -150,6 +156,19 @@ class MonitorTest(unittest.TestCase):
         self.pc.live = [{"id": "r1", "status": "running"}]
         self.pc.agents_rows = [{"id": "a1", "status": "idle"}]
         self.assertEqual(self.monitor.tick(T0 + 3600), 0)
+
+    def test_a_finished_run_leaves_the_abnormal_state(self):
+        self.stalled()
+        self.assertEqual(self.monitor.tick(T0 + 1801), 1)   # lost/stalled alert
+        self.assertEqual(self.store.run_health("r1")["state"], "suspected_stalled")
+
+        self.pc.runs["r1"]["status"] = "succeeded"
+        self.pc.live = []
+        emitted = self.monitor.tick(T0 + 1900)
+
+        self.assertEqual(emitted, 0)                        # cleared silently
+        self.assertEqual(self.store.run_health("r1")["state"], "healthy")
+        self.assertEqual(self.store.audit_rows()[-1]["action"], "run_health_cleared")
 
     def test_no_cancel_is_ever_requested(self):
         self.stalled()

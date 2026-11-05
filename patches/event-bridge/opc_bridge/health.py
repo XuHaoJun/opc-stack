@@ -71,7 +71,15 @@ def classify(
         if now - issue_terminal_at > terminal_grace and silent_for >= slow:
             return "lost"
     if agent_status in ("paused", "terminated"):
-        return "lost"
+        # A hard lock pauses agents on purpose while their in-flight run is
+        # allowed to finish. Without silence evidence this is not an
+        # inconsistency — alerting here pages the owner for the bridge's own
+        # action.
+        progress_hint = last_output_at if last_output_at is not None else _progress_at(run)
+        if progress_hint is None:
+            return "unknown"
+        if now - progress_hint >= slow:
+            return "lost"
 
     silence = run.get("outputSilence") or {}
     level = str(silence.get("level") or "")
@@ -130,6 +138,33 @@ class HealthMonitor:
                 self.cfg.terminal_grace_seconds,
             )
             emitted += int(self._apply(run_id, state, run, issue, now))
+        emitted += self._reap(now)
+        return emitted
+
+    def _reap(self, now: float) -> int:
+        """Clear alert state for runs that ended.
+
+        `tick` only iterates live (running) runs, so a run that was flagged and
+        then finished never leaves the abnormal state — and every later boot
+        would keep believing it is still alerting.
+        """
+        live = {str(run.get("id")) for run in self.pc.live_runs()}
+        emitted = 0
+        for row in self.store.abnormal_run_health():
+            run_id = str(row["run_id"])
+            if run_id in live:
+                continue
+            try:
+                run = self.pc.run(run_id)
+            except Exception:
+                continue
+            if str(run.get("status")) == "running":
+                continue
+            # Clear silently: the run ended, which is not "progress resumed".
+            # Emitting here would replay a recovered alert for every historical
+            # abnormal row the moment this upgrade boots.
+            self.store.set_run_health(run_id, "healthy", now, None, 0, now)
+            self.store.audit("bridge", "run_health_cleared", run_id, {"previous": row["state"]})
         return emitted
 
     def _apply(self, run_id: str, state: str, run: Mapping[str, Any], issue: Mapping[str, Any], now: float) -> bool:

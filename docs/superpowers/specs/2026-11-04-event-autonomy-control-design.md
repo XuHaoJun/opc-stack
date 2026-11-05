@@ -671,15 +671,22 @@ keeps working; the new patches fail the build loudly if upstream moves the hunks
 7. Allocation above zero is approximated by slots and measured by wall-clock run
    time; token/cost weighting waits for a Paperclip aggregate we can trust.
 8. `Lab 0%` cancels Lab runs that were queued but never started (Paperclip's claim
-   gate cancels instead of parking them). Running work always finishes; the
-   cancellation is reported, not silent.
+   gate cancels instead of parking them). Running work always finishes. Those
+   cancellations are visible in Paperclip (`errorCode: agent_not_invokable`) and
+   in the allocation result's audit row, but the bridge does not yet emit a
+   separate `opc.run.admission_cancelled` event — a known gap, stated rather
+   than implied.
 9. Expert agents' chat messages no longer wake the chief of staff (deterministic
    loop breaker, §8). Their findings still reach the thread they posted in; set
    `BUZZ_ACP_IGNORE_AGENT_AUTHORS=false` to restore the old wake lane.
 10. Cutover does not replay history by default. Tickets completed before the
     bridge existed are not re-announced; `opc-control backfill --since` is the
     explicit, audited way to deliver them.
-11. `docker-compose.yml` still passes `PAPERCLIP_BUILD_VERSION: v2026.1012.0`
+11. Run-failure scanning only covers issues touched by the current poll page, so
+    with more than 100 issue updates in one tick a failed run on an issue that
+    fell off the page waits for the reconcile pass (which does not scan runs) or
+    the next update to that issue.
+12. `docker-compose.yml` still passes `PAPERCLIP_BUILD_VERSION: v2026.1012.0`
     while the submodule HEAD is `v2026.1023.0` (same commit also tagged
     `beta/v2026.1012.1-beta.0`). Pre-existing, unrelated to this change, and it
     only misreports the version in the UI; noted so the next upgrade does not

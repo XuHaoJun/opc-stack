@@ -72,7 +72,15 @@ class Routes:
         body = _body(params)
         scope_kind = str(body.get("scope_kind") or "track")
         scope_id = str(body.get("scope_id") or body.get("track") or "")
-        actor = self._authorize(body, "!opc mandate grant", [f"{scope_kind}={scope_id}"])
+        # Bind the grant's authority, not just its scope: an owner message that
+        # only says "grant track=lab" must not authorize follow-ups or a style
+        # they never named.
+        tokens = [
+            f"{scope_kind}={scope_id}",
+            f"style={body.get('style') or 'blueprint'}",
+            f"followups={'on' if body.get('followups_allowed') else 'off'}",
+        ]
+        actor = self._authorize(body, "!opc mandate grant", tokens)
         try:
             row = control.grant_mandate(
                 self.store, body, actor, body.get("authorization_event_id"), self._now()

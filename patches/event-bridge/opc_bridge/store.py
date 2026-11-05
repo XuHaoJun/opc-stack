@@ -260,7 +260,8 @@ class Store:
         with self._lock:
             self._db.execute(
                 "INSERT INTO cursor(id, updated_since, bootstrapped_at) VALUES(1, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET updated_since = excluded.updated_since",
+                "ON CONFLICT(id) DO UPDATE SET updated_since = excluded.updated_since,"
+                " bootstrapped_at = COALESCE(excluded.bootstrapped_at, cursor.bootstrapped_at)",
                 (updated_since, bootstrapped_at),
             )
             self._db.commit()
@@ -659,6 +660,13 @@ class Store:
             self._db.commit()
 
     # ── run health ───────────────────────────────────────────────────────
+    def abnormal_run_health(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM run_health WHERE state IN ('slow','suspected_stalled','lost')"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def run_health(self, run_id: str) -> dict | None:
         with self._lock:
             row = self._db.execute(

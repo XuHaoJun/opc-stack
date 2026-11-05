@@ -17,7 +17,8 @@ NOW = "2026-11-04T02:00:00Z"
 class FakeAgentApi:
     def __init__(self):
         self.rows = [
-            {"id": "a-core", "name": "Fullstack Engineer", "role": "engineer", "status": "idle", "lifecycleState": "ready", "lifecycleHolds": []},
+            {"id": "a-core", "name": "Fullstack Engineer", "role": "engineer", "status": "idle", "lifecycleState": "ready", "lifecycleHolds": [],
+             "runtimeConfig": {"heartbeat": {"maxConcurrentRuns": 4, "enabled": False}, "debug": {"providerTrace": True}}},
             {"id": "a-proto", "name": "Prototyper", "role": "general", "status": "idle", "lifecycleState": "ready", "lifecycleHolds": []},
             {"id": "a-sci", "name": "Scientist", "role": "general", "status": "idle", "lifecycleState": "ready", "lifecycleHolds": []},
         ]
@@ -129,6 +130,14 @@ class AllocationTest(unittest.TestCase):
         result = self.apply(90, 10, adaptive=True)
         self.assertFalse(result["applied"])
         self.assertEqual(self.pc.agent("a-proto")["status"], "paused")
+
+    def test_slot_write_merges_runtime_config_instead_of_replacing_it(self):
+        self.apply(70, 30)
+        body = next(p for agent_id, p in self.pc.patches if agent_id == "a-core" and "runtimeConfig" in p)
+        config = body["runtimeConfig"]
+        self.assertEqual(config["heartbeat"]["maxConcurrentRuns"], 4)
+        self.assertFalse(config["heartbeat"]["enabled"])       # preserved
+        self.assertTrue(config["debug"]["providerTrace"])      # preserved
 
     def test_allocation_must_sum_to_one_hundred(self):
         with self.assertRaises(control.PolicyError):

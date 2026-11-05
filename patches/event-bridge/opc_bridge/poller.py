@@ -139,7 +139,10 @@ class Poller:
     def reconcile(self, now: float | None = None) -> int:
         now = self._clock() if now is None else now
         since = iso(now - self.cfg.reconcile_lookback_hours * 3600.0)
-        return self._recover(since, now)
+        # Pre-cutover history is not "missed work": the baseline deliberately
+        # recorded it as observed-not-delivered, and replaying it ten minutes
+        # after a first install would re-announce the board into old threads.
+        return self._recover(since, now, watermark=self.store.bootstrap_at())
 
     def issue_track(self, issue: Mapping[str, Any]) -> str:
         """Track from labels, falling back to the assignee (legacy tickets)."""
@@ -159,7 +162,12 @@ class Poller:
         for status in _OPEN_STATUSES:
             for issue in self.pc.issues_with_status(status, limit=PAGE_SIZE):
                 current = [str(i) for i in (issue.get("labelIds") or [])]
-                if any(i in ensured.values() for i in current):
+                track_ids = {label_id for name, label_id in ensured.items() if name.startswith("track:")}
+                present = [label_id for label_id in current if label_id in track_ids]
+                if len(present) > 1:
+                    self._policy_violation(issue, "conflicting_track")
+                    continue
+                if present:
                     continue
                 agent = self._agents_map().get(str(issue.get("assigneeAgentId") or ""))
                 track = labels.track_of(set(), agent)
@@ -236,6 +244,7 @@ class Poller:
                 "updatedAt": terminal,
             }
 
+        self._check_track_conflict(issue)
         event_type = events.classify_issue(previous_for_classify, issue)
         if event_type is None and previous is None:
             # First observation of an already-terminal issue. That is history
@@ -265,6 +274,12 @@ class Poller:
         seen_at = str(issue.get("createdAt") or issue.get("updatedAt") or "")
         return event_type if seen_at and seen_at > watermark else None
 
+    def _check_track_conflict(self, issue: Mapping[str, Any]) -> None:
+        names = {self._label_names_by_id().get(str(i), "") for i in (issue.get("labelIds") or [])}
+        track_names = {name for name in names if name.startswith("track:")}
+        if len(track_names) > 1:
+            self._policy_violation(issue, "conflicting_track")
+
     def _policy_violation(self, issue: Mapping[str, Any], reason: str) -> None:
         issue_id = str(issue["id"])
         now = self._clock()
@@ -282,7 +297,7 @@ class Poller:
             occurred_at=str(issue.get("updatedAt") or iso(now)),
             observed_at=iso(now),
             artifact_url=None,
-            origin_channel_id=self.store.get_origin(issue_id) or (None, None)[0],
+            origin_channel_id=(self.store.get_origin(issue_id) or (None, None))[0],
             origin_event_id=(self.store.get_origin(issue_id) or (None, None))[1],
             correlation_id=f"{issue.get('identifier') or issue_id}-{reason}",
             track="unknown",
@@ -314,6 +329,11 @@ class Poller:
             for run in self.pc.runs_for_issue(str(issue["id"])):
                 status = str(run.get("status") or "")
                 if status not in _RUN_FAILURES:
+                    continue
+                # `GET /api/issues/<id>/runs` selects the row id as `runId`; the
+                # `id` field is null on the wire. Reading `id` made every failed
+                # run share the event id "None".
+                if not str(run.get("runId") or run.get("id") or "").strip():
                     continue
                 event = self._run_event(issue, run, now)
                 emitted += int(self.store.enqueue_event(event, now))
@@ -358,30 +378,31 @@ class Poller:
         status = str(run.get("status") or "")
         occurred = str(run.get("finishedAt") or run.get("updatedAt") or iso(now))
         channel, anchor = self.resolve_origin(issue_id)
+        run_id_value = str(run.get("runId") or run.get("id") or "")
 
         return events.Event(
             schema_version=events.SCHEMA_VERSION,
-            event_id=events.run_event_id(str(run["id"]), status),
+            event_id=events.run_event_id(run_id_value, status),
             event_type=events.ISSUE_FAILED,
             source="paperclip",
             company_id=self._company(),
             project_id=issue.get("projectId"),
             issue_id=issue_id,
             issue_identifier=identifier,
-            run_id=str(run["id"]),
+            run_id=run_id_value,
             status=status,
             occurred_at=occurred,
             observed_at=iso(now),
             artifact_url=None,
             origin_channel_id=channel,
             origin_event_id=anchor,
-            correlation_id=f"{identifier or issue_id}-run-{str(run['id'])[:8]}",
+            correlation_id=f"{identifier or issue_id}-run-{run_id_value[:8]}",
             track=self.issue_track(issue),
             issue_title=issue.get("title"),
         )
 
     # ── recovery ─────────────────────────────────────────────────────────
-    def _recover(self, since_iso: str, now: float) -> int:
+    def _recover(self, since_iso: str, now: float, watermark: str | None = None) -> int:
         emitted = 0
         offset = 0
         for _ in range(MAX_PAGES):
@@ -395,7 +416,8 @@ class Poller:
                     "blocked": events.ISSUE_BLOCKED,
                     "cancelled": events.ISSUE_CANCELLED,
                 }.get(status)
-                if event_type is not None:
+                fresh = watermark is None or (events.terminal_ts(issue) or "") > watermark
+                if event_type is not None and fresh:
                     emitted += int(
                         self.store.enqueue_event(self._issue_event(issue, event_type, now), now)
                     )

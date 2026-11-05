@@ -58,7 +58,18 @@ class Deliverer:
             if isinstance(payload, str):
                 payload = json.loads(payload)
             event = events.Event.from_dict(payload)
-            delivered += int(self._deliver(row, event, now))
+            try:
+                delivered += int(self._deliver(row, event, now))
+            except Exception as exc:  # noqa: BLE001 — one bad row must not wedge the batch
+                # A programming error (a wrongly typed origin, a shape change)
+                # used to leave the row and every other claimed row in
+                # `sending` until the next restart. Treat it as a delivery
+                # failure: back off, then fail loudly via the attempt cap.
+                attempts = int(row.get("attempts") or 0)
+                self.log(f"[deliver] internal error on {event.event_id}: {exc!r}")
+                self.store.reschedule(
+                    event.event_id, now + self.next_backoff(attempts), f"internal: {exc}", now
+                )
         return delivered
 
     def _deliver(self, row: Mapping[str, Any], event: events.Event, now: float) -> bool:

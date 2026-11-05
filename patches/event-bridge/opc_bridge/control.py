@@ -345,10 +345,18 @@ def apply_allocation(
             for agent in agents:
                 metadata = dict(agent.get("metadata") or {})
                 metadata["opcBridgeAllocation"] = {"maxConcurrentRuns": slots}
+                # A board-authenticated PATCH assigns `runtimeConfig` wholesale
+                # (routes/agents.ts), so sending only `heartbeat` would drop the
+                # agent's other runtime settings. Merge, like the helper does.
+                runtime_config = dict(agent.get("runtimeConfig") or {})
+                runtime_config["heartbeat"] = {
+                    **(runtime_config.get("heartbeat") or {}),
+                    "maxConcurrentRuns": slots,
+                }
                 pc.patch_agent(
                     str(agent["id"]),
                     {
-                        "runtimeConfig": {"heartbeat": {"maxConcurrentRuns": slots}},
+                        "runtimeConfig": runtime_config,
                         "metadata": metadata,
                     },
                 )

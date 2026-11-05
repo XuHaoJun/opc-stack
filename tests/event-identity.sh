@@ -52,9 +52,12 @@ CTL="$(docker compose exec -T event-bridge python3 -c "
 from opc_bridge import config, store
 print(store.Store(config.load().db_path).get_meta('control_channel') or '')
 ")"
-JOINED_OTHER="$(docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" channels list --member" \
-    | jq -r --arg ctl "$CTL" '[.[] | select(.channel_id != $ctl)] | length' 2>/dev/null || echo 0)"
-[ "${JOINED_OTHER:-0}" = "0" ] || fail "paperclip joined $JOINED_OTHER non-control channel(s); it must stay undiscoverable as an agent"
+MEMBERSHIP_JSON="$(docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" channels list --member" 2>/dev/null)" \
+    || fail "paperclip membership query failed — the gate cannot verify identity separation"
+jq -e 'type == "array"' <<<"$MEMBERSHIP_JSON" >/dev/null 2>&1 \
+    || fail "paperclip membership query returned non-JSON: $MEMBERSHIP_JSON"
+JOINED_OTHER="$(jq -c --arg ctl "$CTL" '[.[] | select(.channel_id != $ctl) | .channel_id]' <<<"$MEMBERSHIP_JSON")"
+[ "$JOINED_OTHER" = "[]" ] || fail "paperclip joined non-control channel(s): $JOINED_OTHER (it must stay undiscoverable as an agent)"
 pass "paperclip is not a channel member (invisible to buzz-acp)"
 
 grep -q 'paperclip|paperclip|Paperclip work events and notifications|profile' patches/buzz/opc-register-agent.sh \

@@ -168,6 +168,25 @@ class DelivererTest(unittest.TestCase):
         self.assertEqual(self.buzz.sent[-1]["channel"], "fallback-uuid")
         self.assertIn("投遞失敗", self.buzz.sent[-1]["content"])
 
+    def test_one_internal_error_does_not_wedge_the_batch(self):
+        self.enqueue(_event("evt_bad"))
+        self.enqueue(_event("evt_ok"))
+
+        original = self.buzz.send
+
+        def explode_for_bad(channel, content, reply_to=None, tags=None):
+            if tags and tags.get("opc-event") == "evt_bad":
+                raise TypeError("badly typed origin")
+            return original(channel, content, reply_to=reply_to, tags=tags)
+
+        self.buzz.send = explode_for_bad
+        self.d.run_once()
+
+        self.assertEqual(self.store.delivery("evt_ok")["state"], "sent")
+        bad = self.store.delivery("evt_bad")
+        self.assertEqual(bad["state"], "pending")
+        self.assertIn("internal", bad["last_error"])
+
     def test_backoff_grows_and_is_capped(self):
         self.assertEqual(self.d.next_backoff(0), 5)
         self.assertEqual(self.d.next_backoff(1), 10)
