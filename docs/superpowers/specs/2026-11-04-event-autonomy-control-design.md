@@ -511,7 +511,7 @@ Signals, in order of authority: run row status, `lastOutputAt` (decorated run),
 | `healthy` | progress within `OPC_SLOW_SECONDS` |
 | `slow` | no progress for ≥ 900 s, run still `running` |
 | `suspected_stalled` | no progress for ≥ 1800 s **and** `outputSilence.level` ∈ {suspicious, critical} |
-| `lost` | definitive inconsistency only: run `running` while its issue is terminal; or agent `paused`/`terminated` while its run is `running`; or run present in the run table but absent from `live-runs` |
+| `lost` | definitive inconsistency only: run `running` more than `OPC_TERMINAL_GRACE_SECONDS` (120) after its issue became terminal **and** silent for at least `slow`; or agent `paused`/`terminated` while its run is `running`; or the run row carries `finishedAt` while still `running`. A ticket closing a few seconds before its run finishes is Paperclip's normal completion order and is **not** an alert (measured false positive: `opc.run.lost` fired 3s before a successful run ended) |
 | `unknown` | no pid visibility and no silence signal (e.g. `hermes_gateway` runs) — reported as "cannot confirm", never as stalled |
 
 Notifications: first crossing of `suspected_stalled`/`lost`, then a reminder
@@ -579,6 +579,7 @@ memory or on a container still being alive.
 | `OPC_SLOT_BUDGET` | 6 | slots for non-zero shares |
 | `OPC_SLOW_SECONDS` | 900 | slow threshold |
 | `OPC_STALL_SECONDS` | 1800 | stalled threshold |
+| `OPC_TERMINAL_GRACE_SECONDS` | 120 | a run may outlive its ticket this long without being "lost" |
 | `OPC_HEALTH_INTERVAL` | 30 | poll interval |
 | `OPC_HEALTH_REMINDER_SECONDS` | 1800 | reminder cadence |
 | `OPC_API_LISTEN` | `0.0.0.0:8645` | internal only |

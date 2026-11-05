@@ -573,8 +573,10 @@ docker compose exec event-bridge python3 -m opc_bridge.cli force-stop \
 ### 健康監控
 
 `>OPC_SLOW_SECONDS`（900s）沒有進展 = slow；`>OPC_STALL_SECONDS`（1800s）且
-`outputSilence.level` 異常 = suspected_stalled；狀態明顯不一致（issue 已終結但 run 仍在跑、
-agent 已暫停但 run 仍在跑）= lost；沒有 pid 且沒有訊號 = unknown（會說「無法確認」）。
+`outputSilence.level` 異常 = suspected_stalled；**真正的**不一致才叫 lost：issue 終結超過
+`OPC_TERMINAL_GRACE_SECONDS`（120s）而 run 仍無輸出地活著、agent 已暫停但 run 仍在跑、或 run
+已標記 finishedAt 卻仍是 running。ticket 收尾時 run 多跑幾秒是 Paperclip 的正常順序，不算異常。
+沒有 pid 且沒有訊號 = unknown（會說「無法確認」）。
 第一次異常通知，之後每 `OPC_HEALTH_REMINDER_SECONDS`（1800s）提醒一次，恢復時一則 recovered。
 **任何情況都不會自動終止 run。**
 

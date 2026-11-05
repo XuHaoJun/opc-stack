@@ -141,17 +141,23 @@ def classify_issue(
 
 
 def render_message(event: Event, issue: Mapping[str, Any], public_url: str) -> str:
-    identifier = str(issue.get("identifier") or event.issue_identifier or event.correlation_id)
+    identifier = str(issue.get("identifier") or event.issue_identifier or "").strip() or None
     title = str(issue.get("title") or event.issue_title or "").strip()
     label = _LABEL.get(event.event_type, event.event_type)
 
-    lines = [f"Paperclip 事件 · {identifier} · {label}"]
+    # The header and the Ticket line only name a ticket when there *is* one.
+    # A run-scoped event has no identifier; falling back to the correlation id
+    # printed `Ticket: …/issues/<run-id>-lost`, a dead link (real incident).
+    header = f"Paperclip 事件 · {identifier} · {label}" if identifier else f"Paperclip 事件 · {label}"
+    lines = [header]
     if title:
         lines.append(title)
-    if public_url:
-        lines.append(f"Ticket: {public_url}/issues/{identifier}")
-    else:
-        lines.append(f"Ticket: {identifier}")
+    if identifier:
+        lines.append(f"Ticket: {public_url}/issues/{identifier}" if public_url else f"Ticket: {identifier}")
+    elif event.issue_id:
+        lines.append(f"Issue: {event.issue_id}")
+    if event.run_id:
+        lines.append(f"Run: {event.run_id}")
     if event.artifact_url:
         lines.append(f"成果: {event.artifact_url}")
     lines.append("")
@@ -160,9 +166,14 @@ def render_message(event: Event, issue: Mapping[str, Any], public_url: str) -> s
 
 
 def event_tags(event: Event) -> dict[str, str]:
-    return {
+    tags = {
         "opc-event": event.event_id,
         "opc-event-type": event.event_type,
-        "opc-issue": str(event.issue_identifier or event.issue_id or ""),
-        "opc-track": event.track,
+        "opc-track": event.track or "unknown",
     }
+    # The CLI rejects empty tag values, and an empty `opc-issue` used to make
+    # every run-scoped alert fail delivery twelve times over.
+    identifier = event.issue_identifier or event.issue_id
+    if identifier:
+        tags["opc-issue"] = str(identifier)
+    return tags

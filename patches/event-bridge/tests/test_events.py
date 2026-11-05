@@ -128,6 +128,27 @@ class RenderTest(unittest.TestCase):
         msg = events.render_message(evt, {}, "")
         self.assertIn("Build the thing", msg)
 
+    def test_a_run_only_event_never_fabricates_a_ticket_link(self):
+        # Real incident: a health event with issue_identifier=null printed
+        # `Ticket: …/issues/<run-id>-lost`, a dead link. With no identifier
+        # there is no ticket URL to show.
+        evt = _event(
+            event_type="opc.run.lost",
+            issue_id="6b0fef19-0000-0000-0000-000000000000",
+            issue_identifier=None,
+            run_id="0a4441ad-7452-4ccb-b53f-d86800c0d6e2",
+            correlation_id="0a4441ad-7452-4ccb-b53f-d86800c0d6e2-lost",
+        )
+        msg = events.render_message(evt, {}, "https://board.example")
+
+        self.assertNotIn("/issues/", msg)
+        self.assertNotIn("Ticket:", msg)
+        self.assertIn("Run: 0a4441ad-7452-4ccb-b53f-d86800c0d6e2", msg)
+
+    def test_event_without_an_issue_identifier_omits_the_issue_tag(self):
+        evt = _event(issue_id=None, issue_identifier=None, run_id="r1")
+        self.assertNotIn("opc-issue", events.event_tags(evt))
+
     def test_tags_are_stable_and_scoped(self):
         evt = _event()
         tags = events.event_tags(evt)

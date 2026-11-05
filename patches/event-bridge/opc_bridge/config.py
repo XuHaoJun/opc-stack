@@ -56,6 +56,7 @@ class Config:
     # health
     slow_seconds: int
     stall_seconds: int
+    terminal_grace_seconds: int
     health_interval: float
     health_reminder_seconds: int
     # tests
@@ -131,6 +132,7 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         slot_budget=_int(env, "OPC_SLOT_BUDGET", 6),
         slow_seconds=_int(env, "OPC_SLOW_SECONDS", 900),
         stall_seconds=_int(env, "OPC_STALL_SECONDS", 1800),
+        terminal_grace_seconds=_int(env, "OPC_TERMINAL_GRACE_SECONDS", 120),
         health_interval=_float(env, "OPC_HEALTH_INTERVAL", 30.0),
         health_reminder_seconds=_int(env, "OPC_HEALTH_REMINDER_SECONDS", 1800),
         test_now=float(test_now) if test_now else None,

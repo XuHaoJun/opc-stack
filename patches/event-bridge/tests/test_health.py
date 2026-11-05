@@ -50,10 +50,34 @@ class ClassifyTest(unittest.TestCase):
         run = {"id": "r", "status": "running", "startedAt": T0}
         self.assertEqual(health.classify(run, T0, "idle", T0 + 1801, 900, 1800), "unknown")
 
-    def test_running_while_issue_terminal_is_lost(self):
+    def test_a_run_finishing_just_after_its_ticket_closes_is_not_lost(self):
+        # Real incident: the agent sets `done`, then finishes the run a few
+        # seconds later. That overlap is Paperclip's normal flow, not an
+        # inconsistency.
+        run = {"id": "r", "status": "running", "issueId": "i1", "startedAt": T0}
+        self.assertNotEqual(
+            health.classify(
+                run, T0 + 7, "idle", T0 + 10, 900, 1800,
+                issue_status="done", issue_terminal_at=T0 + 7,
+            ),
+            "lost",
+        )
+
+    def test_a_run_still_running_long_after_its_ticket_closed_is_lost(self):
         run = {"id": "r", "status": "running", "issueId": "i1", "startedAt": T0}
         self.assertEqual(
-            health.classify(run, T0, "idle", T0 + 10, 900, 1800, issue_status="done"), "lost"
+            health.classify(
+                run, T0, "idle", T0 + 2000, 900, 1800,
+                issue_status="done", issue_terminal_at=T0, terminal_grace=120,
+            ),
+            "lost",
+        )
+
+    def test_terminal_issue_without_a_timestamp_is_not_called_lost(self):
+        run = {"id": "r", "status": "running", "issueId": "i1", "startedAt": T0}
+        self.assertNotEqual(
+            health.classify(run, None, "idle", T0 + 2000, 900, 1800, issue_status="done"),
+            "lost",
         )
 
     def test_running_under_a_paused_agent_is_lost(self):
@@ -102,9 +126,24 @@ class MonitorTest(unittest.TestCase):
     def test_monitor_reads_the_issue_status_from_the_api(self):
         self.stalled()
         self.pc.runs["r1"]["issueId"] = "i1"
-        self.pc.issues["i1"] = {"status": "done"}
+        # Silent for well past the thresholds, ticket long closed.
+        self.pc.runs["r1"]["outputSilence"]["lastOutputAt"] = T0 - 3000
+        self.pc.issues["i1"] = {"status": "done", "identifier": "OPC-9", "completedAt": T0 - 1000}
         self.assertEqual(self.monitor.tick(T0 + 10), 1)
-        self.assertEqual(self.store.recent_events(1)[0]["event_type"], "opc.run.lost")
+        row = self.store.recent_events(1)[0]
+        self.assertEqual(row["event_type"], "opc.run.lost")
+        self.assertEqual(row["issue_identifier"], "OPC-9")
+
+    def test_the_reported_false_lost_is_gone(self):
+        # The incident, replayed: ticket closed 3s before the run finished.
+        self.pc.runs["r1"] = {
+            "id": "r1", "status": "running", "startedAt": T0, "agentId": "a1",
+            "issueId": "i1", "outputSilence": {"level": "ok", "lastOutputAt": T0 + 7},
+        }
+        self.pc.live = [{"id": "r1", "status": "running"}]
+        self.pc.agents_rows = [{"id": "a1", "status": "idle"}]
+        self.pc.issues["i1"] = {"status": "done", "identifier": "OPC-191", "completedAt": T0 + 7}
+        self.assertEqual(self.monitor.tick(T0 + 10), 0)
 
     def test_unknown_is_not_notified(self):
         self.pc.runs["r1"] = {"id": "r1", "status": "running", "agentId": "a1", "startedAt": T0}

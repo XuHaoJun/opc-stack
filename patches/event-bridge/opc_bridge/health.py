@@ -52,6 +52,8 @@ def classify(
     slow: int,
     stall: int,
     issue_status: str | None = None,
+    issue_terminal_at: float | None = None,
+    terminal_grace: int = 120,
 ) -> str:
     status = str(run.get("status") or "")
     if status != "running":
@@ -59,8 +61,15 @@ def classify(
 
     if run.get("finishedAt"):
         return "lost"
-    if issue_status in ("done", "cancelled", "blocked"):
-        return "lost"
+    # A terminal issue with a still-running run is the NORMAL completion
+    # sequence: the agent sets `done`, then finishes its turn a few seconds
+    # later. Only a run that keeps going well past that grace window, with no
+    # output, is an inconsistency worth paging about.
+    if issue_status in ("done", "cancelled", "blocked") and issue_terminal_at is not None:
+        progress_hint = last_output_at if last_output_at is not None else _progress_at(run)
+        silent_for = float("inf") if progress_hint is None else now - progress_hint
+        if now - issue_terminal_at > terminal_grace and silent_for >= slow:
+            return "lost"
     if agent_status in ("paused", "terminated"):
         return "lost"
 
@@ -102,13 +111,13 @@ class HealthMonitor:
                 continue
             run = self.pc.run(run_id)
             agent = agents.get(str(run.get("agentId") or ""))
-            issue_status = None
+            issue: dict = {}
             issue_id = run.get("issueId")
             if issue_id:
                 try:
-                    issue_status = str(self.pc.issue(str(issue_id)).get("status") or "")
+                    issue = dict(self.pc.issue(str(issue_id)))
                 except Exception:
-                    issue_status = None
+                    issue = {}
             state = classify(
                 run,
                 _progress_at(run),
@@ -116,12 +125,14 @@ class HealthMonitor:
                 now,
                 self.cfg.slow_seconds,
                 self.cfg.stall_seconds,
-                issue_status,
+                str(issue.get("status") or "") or None,
+                _terminal_at(issue),
+                self.cfg.terminal_grace_seconds,
             )
-            emitted += int(self._apply(run_id, state, run, now))
+            emitted += int(self._apply(run_id, state, run, issue, now))
         return emitted
 
-    def _apply(self, run_id: str, state: str, run: Mapping[str, Any], now: float) -> bool:
+    def _apply(self, run_id: str, state: str, run: Mapping[str, Any], issue: Mapping[str, Any], now: float) -> bool:
         row = self.store.run_health(run_id)
         previous = (row or {}).get("state")
         if row is None:
@@ -131,7 +142,7 @@ class HealthMonitor:
         if state == "healthy":
             if previous and previous != "healthy":
                 self.store.set_run_health(run_id, "healthy", now, None, 0, now)
-                return self._emit(run_id, run, events.HEALTH_RECOVERED, now)
+                return self._emit(run_id, run, issue, events.HEALTH_RECOVERED, now)
             return False
 
         if state not in ("slow", "suspected_stalled", "lost"):
@@ -147,29 +158,49 @@ class HealthMonitor:
                 "suspected_stalled": events.HEALTH_STALLED,
                 "lost": events.HEALTH_LOST,
             }[state]
-            return self._emit(run_id, run, kind, now)
+            return self._emit(run_id, run, issue, kind, now)
         self.store.set_run_health(run_id, state, now, last_notified, int((row or {}).get("notify_count") or 0), now)
         return False
 
-    def _emit(self, run_id: str, run: Mapping[str, Any], event_type: str, now: float) -> bool:
+    def _emit(self, run_id: str, run: Mapping[str, Any], issue: Mapping[str, Any], event_type: str, now: float) -> bool:
         bucket = int(now // self.cfg.health_reminder_seconds)
+        issue_id = str(run.get("issueId") or issue.get("id") or "") or None
+        channel, anchor = (None, None)
+        if issue_id:
+            origin = self.store.get_origin(issue_id)
+            if origin is not None:
+                channel, anchor = origin
         event = events.Event(
             schema_version=events.SCHEMA_VERSION,
             event_id=events.health_event_id(run_id, event_type, bucket),
             event_type=event_type,
             source="opc",
-            company_id="",
-            project_id=None,
-            issue_id=run.get("issueId"),
-            issue_identifier=None,
+            company_id=self.cfg.company_id or "",
+            project_id=issue.get("projectId"),
+            issue_id=issue_id,
+            issue_identifier=issue.get("identifier"),
+            issue_title=issue.get("title"),
             run_id=run_id,
             status=str(run.get("status") or ""),
             occurred_at=config.iso(now),
             observed_at=config.iso(now),
             artifact_url=None,
-            origin_channel_id=None,
-            origin_event_id=None,
+            origin_channel_id=channel,
+            origin_event_id=anchor,
             correlation_id=f"{run_id}-{event_type.rsplit('.', 1)[-1]}",
-            track="unknown",
+            track=run.get("track") or "unknown",
         )
         return bool(self.store.enqueue_event(event, now))
+
+
+def _terminal_at(issue: Mapping[str, Any]) -> float | None:
+    for key in ("completedAt", "cancelledAt", "blockedTransitionAt", "updatedAt"):
+        value = issue.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value:
+            try:
+                return config.parse_iso(value)
+            except ValueError:
+                continue
+    return None
