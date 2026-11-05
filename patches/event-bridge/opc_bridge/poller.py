@@ -31,6 +31,10 @@ MAX_PAGES = 50
 ORIGIN_CACHE_SECONDS = 3600.0
 
 _TERMINAL_STATUSES = {"done", "blocked", "cancelled"}
+# A failed run on a blocked ticket is exactly the event Hermes needs: Paperclip
+# blocks the ticket *because* the run failed. Only a successful or abandoned
+# ticket makes a failure historical.
+_QUIET_FAILURE_STATUSES = {"done", "cancelled"}
 _OPEN_STATUSES = ("backlog", "todo", "in_progress", "in_review")
 _RUN_FAILURES = {"failed", "timed_out"}
 
@@ -133,7 +137,7 @@ class Poller:
         self._comments_cache.clear()
         now = self._clock() if now is None else now
         emitted = self._poll_transitions(now)
-        emitted += self._observe_runs(now)
+        emitted += self._sweep_runs(now)
         return emitted
 
     def reconcile(self, now: float | None = None) -> int:
@@ -215,7 +219,6 @@ class Poller:
             if not rows:
                 break
 
-            self._touched = rows
             for issue in rows:
                 emitted += self._observe_issue(issue, now)
                 updated = str(issue.get("updatedAt") or "")
@@ -316,31 +319,60 @@ class Poller:
             self._agents_by_id = {str(a.get("id")): a for a in self.pc.agents()}
         return self._agents_by_id
 
-    def _observe_runs(self, now: float) -> int:
-        """A run that failed leaves the issue open; that is its own event.
+    def _sweep_runs(self, now: float) -> int:
+        """`paperclip.issue.failed`, independent of the issue-poll page.
 
-        Bounded to issues the batch already touched, because runs are only
-        interesting when something just changed.
+        Requirement §3.5 lists this event; §3.7 forbids losing events. Scanning
+        only the issues touched by the current issue page silently missed a
+        failed run whose ticket row never changed, so the source is the company
+        run list, cursor-bounded (with overlap) and deduped by event id.
+
+        The list row names the id `id` (`runId` is null there); both shapes are
+        accepted, and a row without either is skipped.
         """
-        emitted = 0
-        for issue in self._last_touched():
-            if issue.get("status") in _TERMINAL_STATUSES:
-                continue
-            for run in self.pc.runs_for_issue(str(issue["id"])):
-                status = str(run.get("status") or "")
-                if status not in _RUN_FAILURES:
-                    continue
-                # `GET /api/issues/<id>/runs` selects the row id as `runId`; the
-                # `id` field is null on the wire. Reading `id` made every failed
-                # run share the event id "None".
-                if not str(run.get("runId") or run.get("id") or "").strip():
-                    continue
-                event = self._run_event(issue, run, now)
-                emitted += int(self.store.enqueue_event(event, now))
-        return emitted
+        cursor = self.store.get_meta("run_sweep_cursor")
+        rows = self.pc.heartbeat_runs(limit=self.cfg.run_sweep_limit)
+        finished = [str(row.get("finishedAt") or "") for row in rows]
+        finished = [value for value in finished if value]
 
-    def _last_touched(self) -> list[dict]:
-        return getattr(self, "_touched", [])
+        if cursor is None:
+            # First run is a baseline: remember where we are, emit nothing.
+            if finished:
+                self.store.set_meta("run_sweep_cursor", max(finished))
+            return 0
+
+        since = iso(parse_iso(cursor) - self.cfg.run_sweep_overlap_seconds)
+        latest = cursor
+        emitted = 0
+        issues: dict[str, dict] = {}
+
+        for run in rows:
+            observed = str(run.get("finishedAt") or "")
+            if not observed or observed < since:
+                continue
+            if observed > latest:
+                latest = observed
+            status = str(run.get("status") or "")
+            if status not in _RUN_FAILURES:
+                continue
+            if not str(run.get("runId") or run.get("id") or "").strip():
+                continue
+            issue_id = str(run.get("issueId") or "")
+            if not issue_id:
+                continue  # company-scope run: no ticket to report against
+            if issue_id not in issues:
+                try:
+                    issues[issue_id] = dict(self.pc.issue(issue_id))
+                except Exception:
+                    issues[issue_id] = {}
+            issue = issues[issue_id]
+            if not issue or str(issue.get("status")) in _QUIET_FAILURE_STATUSES:
+                continue
+            emitted += int(self.store.enqueue_event(self._run_event(issue, run, now), now))
+
+        if latest != cursor:
+            self.store.set_meta("run_sweep_cursor", latest)
+        return emitted
 
     # ── events ───────────────────────────────────────────────────────────
     def _issue_event(self, issue: Mapping[str, Any], event_type: str, now: float):

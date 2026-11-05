@@ -86,6 +86,7 @@ an upgrade.
 | 16 | Health data already exposed: `live-runs` carries `outputSilence{level,lastOutputAt,...}`, `livenessState`, `lastEventAt`; `process_pid` is set for `claude_local` (omp) and `NULL` for `hermes_gateway` | `routes/agents.ts:6680-6759,7357-7366`, `acp-engine/execute.ts:4305-4351`, `packages/adapters/hermes/src/gateway/server/execute.ts:936-1055` |
 | 17 | Agent inventory (*live*): `Fullstack Engineer` (role `engineer`, `claude_local`, slots 4), `Prototyper` (name, slots 20), `Scientist` (name, `hermes_gateway`, slots 20) | `GET /api/companies/:c/agents` on the running stack |
 | 18 | `buzz messages send` hardcodes tags — no `--tag`; relay accepts arbitrary kind:9 tags | `buzz-cli/src/lib.rs:415-441`, `buzz-sdk/src/builders.rs:240-266`, `handlers/ingest.rs:3180-3183` |
+| 19 | The two run endpoints name the id differently: `GET /api/companies/:c/heartbeat-runs` returns `id` (plus `status`, `finishedAt`, `agentId`, `issueId`, newest first), while `GET /api/issues/:id/runs` returns `runId` with `id: null` | `routes/agents.ts:6608-6618` + `serializeRunListRow`; `services/activity.ts:409-420`; *live* both shapes |
 
 ## 4. Approaches considered and decisions
 
@@ -227,7 +228,7 @@ Mapping
 | status `done` (previous ≠ done) | `paperclip.issue.completed` |
 | status `blocked` (previous ≠ blocked, or `blockedTransitionAt` changed) | `paperclip.issue.blocked` |
 | status `cancelled` (previous ≠ cancelled) | `paperclip.issue.cancelled` |
-| run `failed` or `timed_out` on a non-terminal issue | `paperclip.issue.failed` |
+| run `failed` or `timed_out` whose issue is not `done`/`cancelled` (a blocked ticket is reported), seen by the run sweep (§7) | `paperclip.issue.failed` |
 
 ## 7. Reliable delivery
 
@@ -246,6 +247,17 @@ Mapping
 - **Reconcile pass** every 10 min re-reads terminal issues updated in the last
   24 h and re-enqueues anything missing. This is the answer to "the bridge was
   down for an hour", not a second source of truth.
+- **Run-failure sweep** (§3.5's `paperclip.issue.failed`) reads
+  `GET /api/companies/:c/heartbeat-runs?limit=OPC_RUN_SWEEP_LIMIT` every tick and
+  emits for `failed`/`timed_out` runs whose `finishedAt` is newer than the
+  persisted `run_sweep_cursor` (minus `OPC_RUN_SWEEP_OVERLAP_SECONDS`). It reads
+  `id` there (`runId` on that list is null), skips runs whose issue is `done` or
+  `cancelled` (**not** `blocked` — Paperclip blocks a ticket *because* its run
+  failed, and that failure is the event Hermes needs), skips company-scope runs
+  with no issue, and lets the `event_id` dedupe absorb the overlap. This replaces scanning only the issues of the
+  current issue-poll page, which could miss a failure forever when an issue's own
+  row never changed (requirement §3.5/§3.7: a required event type must not
+  depend on an unrelated row being touched).
 - **Outbox**: `events` (contract JSON) + `deliveries`
   (`pending|sending|sent|fallback_sent|failed|expired`), attempts, `next_attempt_at`,
   last error, message event id after send.
@@ -567,6 +579,8 @@ memory or on a container still being alive.
 | `OPC_EVENT_CUTOVER_LOOKBACK_HOURS` | 0 | first-boot baseline (0 = now) |
 | `OPC_EVENT_MAX_ATTEMPTS` | 12 | delivery attempts |
 | `OPC_EVENT_MAX_AGE_HOURS` | 168 | expire stale events |
+| `OPC_RUN_SWEEP_LIMIT` | 100 | newest heartbeat runs read per tick |
+| `OPC_RUN_SWEEP_OVERLAP_SECONDS` | 300 | cursor overlap for the run sweep (dedupe absorbs repeats) |
 | `OPC_EVENT_FALLBACK_CHANNEL` | empty | second rung of the destination ladder |
 | `OPC_NOTIFIER_JOIN_CHANNELS` | empty | opt-in membership list |
 | `OPC_CONTROL_CHANNEL` | auto (`opc-control`) | the only channel owner commands are read from |
@@ -602,6 +616,10 @@ Offline (no live stack; run in the image):
   track resolution.
 - `tests/health-monitor.sh` — classification with injected clock, reminder
   dedupe, recovery, "unknown is not stalled", and **no cancel call is ever made**.
+- Run-failure sweep (inside `tests/event-bridge.sh`): reads the list-row shape
+  (`id`), emits once per failed run on a non-terminal issue, skips terminal
+  issues and company-scope runs, persists the cursor in `meta`, and survives a
+  restart without re-emitting (dedupe + overlap).
 
 Live (stack running):
 
@@ -621,6 +639,9 @@ Live (stack running):
   command; owner command cancels exactly that run; non-owner is rejected; a
   command outside the control channel is rejected; a replayed command id is
   rejected; other runs untouched; workspace retained; status `interrupted`.
+- `tests/event-failed.sh` — a throwaway `process` agent whose command exits 1 is
+  woken on a real ticket; the sweep emits `paperclip.issue.failed` for that run
+  (read back from `GET /v1/events`), and the agent/ticket are cleaned up.
 - `tests/audit-bootstrap.sh` (extended) — every new state has an idempotent
   producer; no watcher leftovers; identity key producer present; label backfill
   producer present.
@@ -682,11 +703,7 @@ keeps working; the new patches fail the build loudly if upstream moves the hunks
 10. Cutover does not replay history by default. Tickets completed before the
     bridge existed are not re-announced; `opc-control backfill --since` is the
     explicit, audited way to deliver them.
-11. Run-failure scanning only covers issues touched by the current poll page, so
-    with more than 100 issue updates in one tick a failed run on an issue that
-    fell off the page waits for the reconcile pass (which does not scan runs) or
-    the next update to that issue.
-12. `docker-compose.yml` still passes `PAPERCLIP_BUILD_VERSION: v2026.1012.0`
+11. `docker-compose.yml` still passes `PAPERCLIP_BUILD_VERSION: v2026.1012.0`
     while the submodule HEAD is `v2026.1023.0` (same commit also tagged
     `beta/v2026.1012.1-beta.0`). Pre-existing, unrelated to this change, and it
     only misreports the version in the UI; noted so the next upgrade does not

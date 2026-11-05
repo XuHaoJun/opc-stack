@@ -19,6 +19,7 @@ class StubPaperclip:
         self.issues: list[dict] = []
         self.comments_by_issue: dict[str, list[dict]] = {}
         self.runs_by_issue: dict[str, list[dict]] = {}
+        self.runs_recent: list[dict] = []
         self.comment_calls: list[str] = []
         self.label_rows: list[dict] = []
         self.agent_rows: list[dict] = []
@@ -37,6 +38,12 @@ class StubPaperclip:
 
     def runs_for_issue(self, issue_id):
         return self.runs_by_issue.get(issue_id, [])
+
+    def heartbeat_runs(self, limit=100):
+        return self.runs_recent[:limit]
+
+    def issue(self, issue_id):
+        return next(i for i in self.issues if i["id"] == issue_id)
 
     def company(self):
         return "c1"
@@ -65,6 +72,7 @@ def _issue(issue_id="i1", identifier="OPC-1", status="todo", updated="2026-11-04
 
 class PollerTest(unittest.TestCase):
     def setUp(self):
+        self.runs_recent = []
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.cfg = config.load(
@@ -180,23 +188,69 @@ class PollerTest(unittest.TestCase):
         row = self.store.event_for_issue("i1")
         self.assertEqual(row["event_type"], "paperclip.issue.cancelled")
 
-    def test_failed_run_on_an_open_issue_emits_once(self):
-        self.p.bootstrap()
-        self.store.upsert_issue_state(_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z"))
-        self.store.set_cursor("2026-11-04T00:00:00Z")
-        self.pc.issues = [
-            _issue("i1", status="in_progress", updated="2026-11-04T01:00:00Z")
-        ]
-        self.pc.runs_by_issue["i1"] = [
-            {"id": None, "runId": "r1", "status": "failed", "error": "boom"}
+    def test_run_sweep_emits_once_for_a_failed_run_on_an_open_issue(self):
+        self.store.set_meta("run_sweep_cursor", "2026-11-04T00:00:00Z")
+        self.pc.issues = [_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z")]
+        self.pc.runs_recent = [
+            {"id": "r1", "runId": None, "status": "failed", "finishedAt": "2026-11-04T01:00:00Z", "issueId": "i1"}
         ]
 
         self.assertEqual(self.p.tick(), 1)
         self.assertEqual(self.p.tick(), 0)
+
         row = self.store.event_for_issue("i1")
         self.assertEqual(row["event_type"], "paperclip.issue.failed")
         self.assertEqual(row["event_id"], events.run_event_id("r1", "failed"))
         self.assertEqual(json.loads(row["payload"])["run_id"], "r1")
+
+    def test_run_sweep_baselines_on_first_run(self):
+        self.pc.runs_recent = [
+            {"id": "r1", "status": "failed", "finishedAt": "2026-11-04T01:00:00Z", "issueId": "i1"}
+        ]
+        self.pc.issues = [_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z")]
+
+        self.assertEqual(self.p.tick(), 0)
+        self.assertEqual(self.store.get_meta("run_sweep_cursor"), "2026-11-04T01:00:00Z")
+
+    def test_run_sweep_reports_a_failure_on_a_blocked_ticket(self):
+        # Paperclip blocks the ticket because the run failed; that must not
+        # suppress the failure event (the first version of the sweep did).
+        self.store.set_meta("run_sweep_cursor", "2026-11-04T00:00:00Z")
+        self.pc.issues = [
+            _issue("i1", status="blocked", updated="2026-11-04T01:30:00Z", blockedTransitionAt="2026-11-04T01:30:00Z")
+        ]
+        self.pc.runs_recent = [
+            {"id": "r1", "status": "failed", "finishedAt": "2026-11-04T01:00:00Z", "issueId": "i1"}
+        ]
+
+        self.assertEqual(self.p.tick(), 1)
+
+    def test_run_sweep_skips_done_or_cancelled_issues_and_company_runs(self):
+        self.store.set_meta("run_sweep_cursor", "2026-11-04T00:00:00Z")
+        self.pc.issues = [
+            _issue("i1", status="done", updated="2026-11-04T01:30:00Z", completedAt="2026-11-04T01:30:00Z"),
+            _issue("i2", status="cancelled", updated="2026-11-04T01:30:00Z", cancelledAt="2026-11-04T01:30:00Z"),
+        ]
+        self.pc.runs_recent = [
+            {"id": "r1", "status": "failed", "finishedAt": "2026-11-04T01:00:00Z", "issueId": "i1"},
+            {"id": "r2", "status": "failed", "finishedAt": "2026-11-04T01:05:00Z", "issueId": "i2"},
+            {"id": "r3", "status": "failed", "finishedAt": "2026-11-04T01:10:00Z", "issueId": None},
+        ]
+
+        self.assertEqual(self.p.tick(), 0)
+
+    def test_run_sweep_advances_and_survives_a_restart(self):
+        self.store.set_meta("run_sweep_cursor", "2026-11-04T00:00:00Z")
+        self.pc.issues = [_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z")]
+        self.pc.runs_recent = [
+            {"id": "r1", "status": "failed", "finishedAt": "2026-11-04T01:00:00Z", "issueId": "i1"}
+        ]
+        self.assertEqual(self.p.tick(), 1)
+        self.assertEqual(self.store.get_meta("run_sweep_cursor"), "2026-11-04T01:00:00Z")
+
+        # A restart re-reads the overlap window; dedupe must absorb it.
+        self.pc.issues = [_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z")]
+        self.assertEqual(self.p.tick(), 0)
 
     # ── origin ───────────────────────────────────────────────────────────
     def test_origin_markers_only_from_trusted_authors_and_cached(self):

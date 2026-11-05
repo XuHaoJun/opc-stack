@@ -42,6 +42,8 @@ class Config:
     cutover_lookback_hours: float
     max_attempts: int
     max_age_hours: float
+    run_sweep_limit: int
+    run_sweep_overlap_seconds: int
     # destinations / authorization
     fallback_channel: str | None
     control_channel: str | None
@@ -121,6 +123,8 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         cutover_lookback_hours=_float(env, "OPC_EVENT_CUTOVER_LOOKBACK_HOURS", 0.0),
         max_attempts=_int(env, "OPC_EVENT_MAX_ATTEMPTS", 12),
         max_age_hours=_float(env, "OPC_EVENT_MAX_AGE_HOURS", 168.0),
+        run_sweep_limit=_int(env, "OPC_RUN_SWEEP_LIMIT", 100),
+        run_sweep_overlap_seconds=_int(env, "OPC_RUN_SWEEP_OVERLAP_SECONDS", 300),
         fallback_channel=_optional(env, "OPC_EVENT_FALLBACK_CHANNEL"),
         control_channel=_optional(env, "OPC_CONTROL_CHANNEL"),
         command_max_age_seconds=_int(env, "OPC_CONTROL_COMMAND_MAX_AGE_SECONDS", 900),
