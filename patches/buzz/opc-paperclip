@@ -175,6 +175,61 @@ agent_by_role() {
     esac
 }
 
+# ── track/style labels ──────────────────────────────────────────────────
+# OPC policy reads labels, never prose. These two functions are the only writer
+# of the four labels; the description markers are inputs for humans.
+label_marker() { # <description-file> <Key> → value or empty
+    sed -n "s/^[[:space:]]*$2[[:space:]]*:[[:space:]]*\([A-Za-z_-]*\).*/\1/p" "$1" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]'
+}
+
+# ── admission gate ──────────────────────────────────────────────────────
+# A locked track must refuse new work before anything is created. This is the
+# deterministic half of the policy; the other half is Paperclip's own agent
+# pause, which is what actually stops an execution from starting.
+admission_check() { # <track>
+    [ -n "${OPC_API_URL:-}" ] || return 0
+    _key="${OPC_API_KEY:-}"
+    if [ -z "$_key" ]; then
+        for _f in "${HERMES_HOME:-/opt/data}/.opc-control.key" /keys/opc-control.key; do
+            if [ -r "$_f" ]; then _key="$(cat "$_f")"; break; fi
+        done
+    fi
+    [ -n "$_key" ] || die "no OPC control key available — cannot verify admission" 4
+    _resp="$(curl -fsS --max-time 10 -H "Authorization: Bearer $_key" \
+        "$OPC_API_URL/v1/policy/effective?track=$1" 2>/dev/null)" ||
+        die "OPC policy lookup failed ($OPC_API_URL)" 4
+    _locked="$(printf '%s' "$_resp" | jq -r '.values.track_locked // false')" ||
+        die "OPC policy response is not JSON" 4
+    [ "$_locked" != "true" ] ||
+        die "track $1 is locked by the operator — no new ticket admitted (unlock it first)" 3
+}
+
+ensure_ticket_labels_json() { # <track> <style> → JSON array of label ids
+    _labels="$(api_request GET "/companies/$(company_id)/labels")" ||
+        die "failed to list Paperclip labels" 4
+    printf '%s' "$_labels" | jq -e 'type == "array"' >/dev/null 2>&1 ||
+        die "Paperclip labels response is not an array" 4
+    _wanted="[\"track:$1\",\"style:$2\"]"
+    _ids=""
+    for _name in "track:$1" "style:$2"; do
+        _id="$(printf '%s' "$_labels" | jq -r --arg n "$_name" '[.[] | select(.name == $n)][0].id // empty')"
+        if [ -z "$_id" ]; then
+            case "$_name" in
+                track:core) _color="#2563eb" ;;
+                track:lab) _color="#7c3aed" ;;
+                style:blueprint) _color="#0f766e" ;;
+                *) _color="#b45309" ;;
+            esac
+            _id="$(api_request POST "/companies/$(company_id)/labels" \
+                "$(jq -nc --arg n "$_name" --arg c "$_color" '{name:$n,color:$c}')" \
+                | jq -r '.id // empty')" || die "failed to create label $_name" 4
+            [ -n "$_id" ] || die "Paperclip label create returned no id for $_name" 4
+        fi
+        _ids="${_ids}${_ids:+,}\"$_id\""
+    done
+    printf '[%s]' "$_ids"
+}
+
 validate_concurrency_max() {
     _max="$1"
     if ! jq -en --arg value "$_max" \
@@ -190,8 +245,17 @@ concurrency_show_json() {
     case "$_current" in
         ''|*[!0-9]*) die "agent has no valid runtimeConfig heartbeat maxConcurrentRuns" 4 ;;
     esac
+    # A third source: the event bridge writes its adaptive slot plan under its
+    # own metadata key. Without this branch, the first adaptive write would look
+    # like an operator_override (current != marker) and silently freeze
+    # adaptation forever.
+    _bridge="$(printf '%s' "$_agent" | jq -r \
+        '.metadata.opcBridgeAllocation.maxConcurrentRuns // empty')"
     _marker="$(printf '%s' "$_agent" | jq -r \
         '.metadata.opcManagedDefaults.fullstackMaxConcurrentRuns // empty')"
+    if [ -n "$_bridge" ] && [ "$_bridge" = "$_current" ]; then
+        _source=bridge_adaptive
+    else
     case "$_marker" in
         ''|"$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT")
             if [ "$_current" = "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" ]; then
@@ -202,6 +266,7 @@ concurrency_show_json() {
             ;;
         *) _source=operator_override ;;
     esac
+    fi
     jq -nc --argjson agent "$_agent" \
         --argjson max "$_current" \
         --argjson managed "$FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT" \
@@ -864,6 +929,11 @@ prototype_ticket_create() {
     _first_line="$(sed -n '1p' "$_description_file")"
     [ "$_first_line" = "Prototype: $_name" ] ||
         die "description must start with exactly 'Prototype: $_name'" 2
+    _track="$(label_marker "$_description_file" Track)"
+    [ -n "$_track" ] || _track=lab
+    _style="$(label_marker "$_description_file" Style)"
+    [ -n "$_style" ] || _style=exploration
+    admission_check "$_track" || exit $?
 
     _company="$(company_id)"
     _matches="$(prototype_project_matches "$_name")" ||
@@ -926,17 +996,12 @@ prototype_ticket_create() {
     _agent="$(prototyper_agent)"
     _agent_id="$(printf '%s' "$_agent" | jq -r '.id // empty')"
     [ -n "$_agent_id" ] || die "Prototyper agent has no id" 4
-    _payload="$(jq -nc --rawfile description "$_description_file" \
-        --arg title "$_title" --arg priority "$_priority" --arg agent "$_agent_id" \
-        --arg project "$_project_id" --arg workspace "$_workspace_id" \
-        --arg idempotency "$_idempotency_key" --arg terminal_title "Prototype: $_name" \
-        --argjson terminal_epoch "$_terminal_epoch" --argjson allow_duplicate "$_allow_duplicate" '
-        {title:(if $terminal_epoch == 1 then $terminal_title else $title end),
-         description:$description,assigneeAgentId:$agent,allowDuplicate:$allow_duplicate}
-        | if $priority == "" then . else .priority=$priority end
-        | if $project == "" then . else .projectId=$project | .projectWorkspaceId=$workspace end
-        | if $idempotency == "" then . else .idempotencyKey=$idempotency end
-    ')"
+    case "$_track" in core|lab) ;; *) die "unknown Track: $_track (core|lab)" 2 ;; esac
+    case "$_style" in blueprint|exploration) ;; *) die "unknown Style: $_style (blueprint|exploration)" 2 ;; esac
+    _labels_json="$(ensure_ticket_labels_json "$_track" "$_style")" || exit $?
+    _payload="$(prototype_payload_json "$_description_file" "$_title" "$_priority" \
+        "$_agent_id" "$_project_id" "$_workspace_id" "$_idempotency_key" \
+        "Prototype: $_name" "$_terminal_epoch" "$_allow_duplicate" "$_labels_json")"
     _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
         die "failed to create prototype ticket" 4
     rm -f "$_description_file"
@@ -970,6 +1035,51 @@ active_engineer() {
         1) printf '%s' "$_matches" | jq -c '.[0]' ;;
         *) die "multiple active Paperclip agents match role engineer" 3 ;;
     esac
+}
+
+# Payload builders are functions so the JSON can be validated without touching
+# the API: `tests/opc-paperclip.sh` sources this file (OPC_PAPERCLIP_SOURCE_ONLY)
+# and pipes each builder through `jq -e`. A malformed payload used to reach the
+# board as a jq compile error at create time and nothing caught it.
+engineering_payload_json() { # desc title priority status mode exec-ws agent project workspace settings labels
+    jq -nc --rawfile description "$1" \
+        --arg title "$2" --arg priority "$3" --arg status "$4" \
+        --arg mode "$5" --arg execution_workspace_id "$6" \
+        --arg agent "$7" --arg project "$8" --arg workspace "$9" \
+        --argjson settings "${10}" --argjson labels "${11}" '
+        {title:$title,description:$description,assigneeAgentId:$agent,
+         projectId:$project,projectWorkspaceId:$workspace,labelIds:$labels,
+         executionWorkspacePreference:$mode,
+         executionWorkspaceSettings:$settings}
+        | if $priority == "" then . else .priority=$priority end
+        | if $status == "" then . else .status=$status end
+        | if $mode == "reuse_existing"
+          then .executionWorkspaceId=$execution_workspace_id
+          | .executionWorkspacePreference="reuse_existing"
+          else . end
+    '
+}
+
+prototype_payload_json() { # desc title priority agent project workspace idempotency terminal_title terminal_epoch allow_duplicate labels
+    jq -nc --rawfile description "$1" \
+        --arg title "$2" --arg priority "$3" --arg agent "$4" \
+        --arg project "$5" --arg workspace "$6" \
+        --arg idempotency "$7" --arg terminal_title "$8" \
+        --argjson terminal_epoch "$9" --argjson allow_duplicate "${10}" \
+        --argjson labels "${11}" '
+        {title:(if $terminal_epoch == 1 then $terminal_title else $title end),
+         description:$description,assigneeAgentId:$agent,allowDuplicate:$allow_duplicate,
+         labelIds:$labels}
+        | if $priority == "" then . else .priority=$priority end
+        | if $project == "" then . else .projectId=$project | .projectWorkspaceId=$workspace end
+        | if $idempotency == "" then . else .idempotencyKey=$idempotency end
+    '
+}
+
+cmd_labels_ensure() {
+    _first="$(ensure_ticket_labels_json core blueprint)" || exit $?
+    _second="$(ensure_ticket_labels_json lab exploration)" || exit $?
+    jq -n --argjson a "$_first" --argjson b "$_second" '$a + $b | unique'
 }
 
 cmd_engineering_ticket_create() {
@@ -1007,6 +1117,9 @@ cmd_engineering_ticket_create() {
     _description_file="$(mktemp "${TMPDIR:-/tmp}/opc-paperclip-description.XXXXXX")" ||
         die "failed to allocate description buffer" 4
     cat >"$_description_file"
+    _track="$(label_marker "$_description_file" Track)"
+    [ -n "$_track" ] || _track=core
+    admission_check "$_track" || exit $?
     _canonical="$(canonical_repo_json "$_repo")"
     _project="$(engineering_project "$_canonical")"
     _project_id="$(printf '%s' "$_project" | jq -r '.id // empty')"
@@ -1025,22 +1138,14 @@ cmd_engineering_ticket_create() {
         agent_default) _settings="$(jq -nc '{mode:"agent_default",workspaceStrategy:{type:"adapter_managed"}}')" ;;
         reuse_existing) _settings="$(jq -nc '{mode:"reuse_existing"}')" ;;
     esac
-    _payload="$(jq -nc --rawfile description "$_description_file" \
-        --arg title "$_title" --arg priority "$_priority" --arg status "$_status" \
-        --arg mode "$_mode" --arg execution_workspace_id "$_execution_workspace_id" \
-        --arg agent "$_agent_id" --arg project "$_project_id" --arg workspace "$_workspace_id" \
-        --argjson settings "$_settings" '
-        {title:$title,description:$description,assigneeAgentId:$agent,
-         projectId:$project,projectWorkspaceId:$workspace,
-         executionWorkspacePreference:$mode,
-         executionWorkspaceSettings:$settings}
-        | if $priority == "" then . else .priority=$priority end
-        | if $status == "" then . else .status=$status end
-        | if $mode == "reuse_existing"
-          then .executionWorkspaceId=$execution_workspace_id
-          | .executionWorkspacePreference="reuse_existing"
-          else . end
-    ')"
+    _style="$(label_marker "$_description_file" Style)"
+    [ -n "$_style" ] || _style=blueprint
+    case "$_track" in core|lab) ;; *) die "unknown Track: $_track (core|lab)" 2 ;; esac
+    case "$_style" in blueprint|exploration) ;; *) die "unknown Style: $_style (blueprint|exploration)" 2 ;; esac
+    _labels_json="$(ensure_ticket_labels_json "$_track" "$_style")" || exit $?
+    _payload="$(engineering_payload_json "$_description_file" "$_title" "$_priority" \
+        "$_status" "$_mode" "$_execution_workspace_id" "$_agent_id" "$_project_id" \
+        "$_workspace_id" "$_settings" "$_labels_json")"
     rm -f "$_description_file"
     _company="$(company_id)"
     _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
@@ -1113,6 +1218,12 @@ main() {
             shift
             prototype_ticket_create "$@"
             ;;
+        labels)
+            shift
+            [ "${1-}" = ensure ] || die "usage: opc-paperclip labels ensure" 2
+            shift
+            cmd_labels_ensure
+            ;;
         engineering-ticket)
             shift
             [ "${1-}" = create ] || die "usage: opc-paperclip engineering-ticket create ..." 2
@@ -1122,5 +1233,9 @@ main() {
         *) die "unknown command: $1" 2 ;;
     esac
 }
+
+if [ "${OPC_PAPERCLIP_SOURCE_ONLY:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 main "$@"

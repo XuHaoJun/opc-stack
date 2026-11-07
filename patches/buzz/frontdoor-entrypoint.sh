@@ -118,8 +118,8 @@ fi
 : "${BUZZ_ACP_AGENT_COMMAND:=/usr/local/libexec/hermes}"
 : "${BUZZ_ACP_AGENT_ARGS:=acp}"
 export BUZZ_RELAY_URL BUZZ_ACP_AGENT_COMMAND BUZZ_ACP_AGENT_ARGS
-# Persist the resolved relay URL for the issue watcher (the agent's terminal
-# children get a sanitized env without it).
+# Persist the resolved relay URL (the agent's terminal children get a sanitized
+# env without it, and ad-hoc tooling reads the file).
 mkdir -p /opt/data
 printf '%s' "$BUZZ_RELAY_URL" > /opt/data/buzz-relay-url
 echo "[frontdoor] relay=${BUZZ_RELAY_URL} agent=${BUZZ_ACP_AGENT_COMMAND} ${BUZZ_ACP_AGENT_ARGS}"
@@ -192,6 +192,50 @@ if [ -f "${BUZZ_KEYS_DIR:-/keys}/paperclip-api.key" ]; then
     chmod 600 "$HH/.paperclip-api.key"
     echo "[frontdoor] board key copied to $HH/.paperclip-api.key for runtime uid"
 fi
+
+# OPC control key: read-API calls to event-bridge (policy, control state,
+# events). Mirrored for the same reason as the board key — the agent runs as
+# uid 10000 and /keys is 600-root. Mutations additionally need an owner-signed
+# Buzz command, so this file alone cannot pause or stop anything.
+if [ -f "${BUZZ_KEYS_DIR:-/keys}/opc-control.key" ]; then
+    mkdir -p "$HH"
+    cp "${BUZZ_KEYS_DIR:-/keys}/opc-control.key" "$HH/.opc-control.key"
+    chown "${HERMES_UID:-10000}:${HERMES_GID:-10000}" "$HH/.opc-control.key" 2>/dev/null || true
+    chmod 600 "$HH/.opc-control.key"
+    export OPC_API_KEY="$(cat "$HH/.opc-control.key")"
+    echo "[frontdoor] control key copied to $HH/.opc-control.key for runtime uid"
+fi
+: "${OPC_API_URL:=http://event-bridge:8645}"
+export OPC_API_URL
+
+# Deterministic loop breaker seed: every agent identity except the relay, the
+# front door itself, and the system-event author. buzz-acp drops untagged chat
+# from these pubkeys (the NIP-OA sibling test does not identify them — only the
+# front door carries an attestation), so two agents cannot answer each other
+# forever. Names come from the keys volume, so a new expert is covered with no
+# second place to edit.
+if [ -z "${BUZZ_ACP_AGENT_AUTHORS:-}" ]; then
+    _authors=""
+    for _pub in "${BUZZ_KEYS_DIR:-/keys}"/*.pub; do
+        [ -s "$_pub" ] || continue
+        case "$(basename "$_pub")" in
+            relay.pub|agent.pub|paperclip.pub) continue ;;
+        esac
+        _val="$(cat "$_pub")"
+        _authors="${_authors:+$_authors,}$_val"
+    done
+    export BUZZ_ACP_AGENT_AUTHORS="$_authors"
+    unset _authors _pub _val
+fi
+: "${BUZZ_ACP_OPC_EVENT_TAG:=opc-event}"
+: "${BUZZ_ACP_OPC_EVENT_AUTHORS:=}"
+if [ -z "${BUZZ_ACP_OPC_EVENT_AUTHORS}" ] && [ -s "${BUZZ_KEYS_DIR:-/keys}/paperclip.pub" ]; then
+    export BUZZ_ACP_OPC_EVENT_AUTHORS="$(cat "${BUZZ_KEYS_DIR:-/keys}/paperclip.pub")"
+fi
+: "${BUZZ_ACP_OPC_SEEN_FILE:=$HH/.buzz-acp/opc-events.seen}"
+mkdir -p "$HH/.buzz-acp"
+export BUZZ_ACP_OPC_EVENT_TAG BUZZ_ACP_OPC_EVENT_AUTHORS BUZZ_ACP_OPC_SEEN_FILE
+echo "[frontdoor] agent-author gate seeded (${BUZZ_ACP_AGENT_AUTHORS:-none}); system event author=${BUZZ_ACP_OPC_EVENT_AUTHORS:-none}"
 
 # TencentDB Knowledge Plane (PRD v10.1): sync the memory_tencentdb Hermes
 # MemoryProvider into $HERMES_HOME/plugins/ (user-plugin discovery path) on
@@ -351,11 +395,20 @@ if [ -d "$SK_SRC" ]; then
     echo "[frontdoor] synced skill: paperclip-api"
 fi
 
-# Re-attach paperclip issue watchers after a restart (self-heal). The watcher
-# posts GitHub links to Buzz when tickets complete; spawned per ticket by the
-# agent, re-attached here for any that survived the restart.
-mkdir -p /opt/data/issue-watchers
-/usr/local/bin/opc-issue-watcher.sh sweep >> /opt/data/issue-watchers/sweep.log 2>&1 &
+# Runtime-authored skills are not version-controlled, and one of them taught the
+# agent to spawn the watcher this image retired plus a python fallback — a
+# second delivery writer that duplicates every notice. Quarantine any skill that
+# names the retired binary, every boot, so old volumes converge instead of
+# relying on somebody deleting the directory.
+for _skill in "$HH"/skills/*/ "$HH"/skills/*/*/; do
+    [ -f "$_skill/SKILL.md" ] || continue
+    case "$_skill" in *.retired.*) continue ;; esac   # already quarantined; do not churn
+    if grep -q "opc-issue-watcher" "$_skill/SKILL.md"; then
+        mv "$_skill" "${_skill%/}.retired.$(date +%s)" 2>/dev/null || true
+        echo "[frontdoor] quarantined obsolete skill ${_skill} (names the retired watcher)"
+    fi
+done
+unset _skill
 
 # Single-owner shared home: every hermes process touching this volume runs
 # as uid 10000 (the ACP agent via the setpriv wrapper, and hermes-dashboard).

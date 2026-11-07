@@ -1,0 +1,241 @@
+"""Run health classification and reminders.
+
+The rule that matters most is the negative one: **this module never cancels
+anything**. Suspected staleness, timeout and missing output are reasons to tell
+a human, not reasons to kill a run. The code path that emits a health event has
+no access to the cancel API, and a test asserts the name never appears here.
+
+States and their evidence:
+  healthy            progress within `slow`
+  slow               no progress for >= slow
+  suspected_stalled  no progress for >= stall AND an abnormal silence signal
+  lost               definitive inconsistency (run running while its issue is
+                     terminal, agent paused/terminated under a running run, or
+                     the run is finished but still marked running)
+  unknown            not enough visibility to say anything — `hermes_gateway`
+                     runs have no pid, and guessing would page a human for a
+                     healthy long-running task
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Mapping
+
+from . import config, events
+
+ABNORMAL = {"suspicious", "critical"}
+
+
+def _progress_at(run: Mapping[str, Any]) -> float | None:
+    silence = run.get("outputSilence") or {}
+    for value in (
+        silence.get("lastOutputAt"),
+        run.get("lastOutputAt"),
+        run.get("lastEventAt"),
+        run.get("startedAt"),
+    ):
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return config.parse_iso(value)
+            except ValueError:
+                continue
+    return None
+
+
+def classify(
+    run: Mapping[str, Any],
+    last_output_at: float | None,
+    agent_status: str | None,
+    now: float,
+    slow: int,
+    stall: int,
+    issue_status: str | None = None,
+    issue_terminal_at: float | None = None,
+    terminal_grace: int = 120,
+) -> str:
+    status = str(run.get("status") or "")
+    if status != "running":
+        return "healthy"
+
+    if run.get("finishedAt"):
+        return "lost"
+    # A terminal issue with a still-running run is the NORMAL completion
+    # sequence: the agent sets `done`, then finishes its turn a few seconds
+    # later. Only a run that keeps going well past that grace window, with no
+    # output, is an inconsistency worth paging about.
+    if issue_status in ("done", "cancelled", "blocked") and issue_terminal_at is not None:
+        progress_hint = last_output_at if last_output_at is not None else _progress_at(run)
+        silent_for = float("inf") if progress_hint is None else now - progress_hint
+        if now - issue_terminal_at > terminal_grace and silent_for >= slow:
+            return "lost"
+    if agent_status in ("paused", "terminated"):
+        # A hard lock pauses agents on purpose while their in-flight run is
+        # allowed to finish. Without silence evidence this is not an
+        # inconsistency — alerting here pages the owner for the bridge's own
+        # action.
+        progress_hint = last_output_at if last_output_at is not None else _progress_at(run)
+        if progress_hint is None:
+            return "unknown"
+        if now - progress_hint >= slow:
+            return "lost"
+
+    silence = run.get("outputSilence") or {}
+    level = str(silence.get("level") or "")
+    progress = last_output_at if last_output_at is not None else _progress_at(run)
+
+    if progress is None:
+        return "unknown"
+
+    age = now - progress
+    if age >= stall:
+        if level in ABNORMAL:
+            return "suspected_stalled"
+        if run.get("processPid") or silence.get("lastOutputAt"):
+            return "slow"
+        return "unknown"
+    if age >= slow:
+        return "slow"
+    return "healthy"
+
+
+class HealthMonitor:
+    def __init__(self, cfg: config.Config, store, pc, clock: Callable[[], float] | None = None,
+                 log: Callable[..., Any] = print) -> None:
+        self.cfg = cfg
+        self.store = store
+        self.pc = pc
+        self._clock = clock or (lambda: config.now(cfg))
+        self.log = log
+
+    def tick(self, now: float | None = None) -> int:
+        now = self._clock() if now is None else now
+        agents = {str(a["id"]): a for a in self.pc.agents()}
+        emitted = 0
+        for live in self.pc.live_runs():
+            run_id = str(live.get("id") or "")
+            if not run_id or str(live.get("status")) != "running":
+                continue
+            run = self.pc.run(run_id)
+            agent = agents.get(str(run.get("agentId") or ""))
+            issue: dict = {}
+            issue_id = run.get("issueId")
+            if issue_id:
+                try:
+                    issue = dict(self.pc.issue(str(issue_id)))
+                except Exception:
+                    issue = {}
+            state = classify(
+                run,
+                _progress_at(run),
+                str(agent.get("status")) if agent else None,
+                now,
+                self.cfg.slow_seconds,
+                self.cfg.stall_seconds,
+                str(issue.get("status") or "") or None,
+                _terminal_at(issue),
+                self.cfg.terminal_grace_seconds,
+            )
+            emitted += int(self._apply(run_id, state, run, issue, now))
+        emitted += self._reap(now)
+        return emitted
+
+    def _reap(self, now: float) -> int:
+        """Clear alert state for runs that ended.
+
+        `tick` only iterates live (running) runs, so a run that was flagged and
+        then finished never leaves the abnormal state — and every later boot
+        would keep believing it is still alerting.
+        """
+        live = {str(run.get("id")) for run in self.pc.live_runs()}
+        emitted = 0
+        for row in self.store.abnormal_run_health():
+            run_id = str(row["run_id"])
+            if run_id in live:
+                continue
+            try:
+                run = self.pc.run(run_id)
+            except Exception:
+                continue
+            if str(run.get("status")) == "running":
+                continue
+            # Clear silently: the run ended, which is not "progress resumed".
+            # Emitting here would replay a recovered alert for every historical
+            # abnormal row the moment this upgrade boots.
+            self.store.set_run_health(run_id, "healthy", now, None, 0, now)
+            self.store.audit("bridge", "run_health_cleared", run_id, {"previous": row["state"]})
+        return emitted
+
+    def _apply(self, run_id: str, state: str, run: Mapping[str, Any], issue: Mapping[str, Any], now: float) -> bool:
+        row = self.store.run_health(run_id)
+        previous = (row or {}).get("state")
+        if row is None:
+            self.store.set_run_health(run_id, state, now, None, 0, now)
+            row = self.store.run_health(run_id)
+
+        if state == "healthy":
+            if previous and previous != "healthy":
+                self.store.set_run_health(run_id, "healthy", now, None, 0, now)
+                return self._emit(run_id, run, issue, events.HEALTH_RECOVERED, now)
+            return False
+
+        if state not in ("slow", "suspected_stalled", "lost"):
+            return False
+
+        last_notified = (row or {}).get("last_notified_at")
+        due = last_notified is None or now - float(last_notified) >= self.cfg.health_reminder_seconds
+        first = previous != state
+        if first or due:
+            self.store.set_run_health(run_id, state, now, now, int((row or {}).get("notify_count") or 0) + 1, now)
+            kind = {
+                "slow": events.HEALTH_SLOW,
+                "suspected_stalled": events.HEALTH_STALLED,
+                "lost": events.HEALTH_LOST,
+            }[state]
+            return self._emit(run_id, run, issue, kind, now)
+        self.store.set_run_health(run_id, state, now, last_notified, int((row or {}).get("notify_count") or 0), now)
+        return False
+
+    def _emit(self, run_id: str, run: Mapping[str, Any], issue: Mapping[str, Any], event_type: str, now: float) -> bool:
+        bucket = int(now // self.cfg.health_reminder_seconds)
+        issue_id = str(run.get("issueId") or issue.get("id") or "") or None
+        channel, anchor = (None, None)
+        if issue_id:
+            origin = self.store.get_origin(issue_id)
+            if origin is not None:
+                channel, anchor = origin
+        event = events.Event(
+            schema_version=events.SCHEMA_VERSION,
+            event_id=events.health_event_id(run_id, event_type, bucket),
+            event_type=event_type,
+            source="opc",
+            company_id=self.cfg.company_id or "",
+            project_id=issue.get("projectId"),
+            issue_id=issue_id,
+            issue_identifier=issue.get("identifier"),
+            issue_title=issue.get("title"),
+            run_id=run_id,
+            status=str(run.get("status") or ""),
+            occurred_at=config.iso(now),
+            observed_at=config.iso(now),
+            artifact_url=None,
+            origin_channel_id=channel,
+            origin_event_id=anchor,
+            correlation_id=f"{run_id}-{event_type.rsplit('.', 1)[-1]}",
+            track=run.get("track") or "unknown",
+        )
+        return bool(self.store.enqueue_event(event, now))
+
+
+def _terminal_at(issue: Mapping[str, Any]) -> float | None:
+    for key in ("completedAt", "cancelledAt", "blockedTransitionAt", "updatedAt"):
+        value = issue.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value:
+            try:
+                return config.parse_iso(value)
+            except ValueError:
+                continue
+    return None

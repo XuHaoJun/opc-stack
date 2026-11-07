@@ -195,6 +195,51 @@ TDBEOF
 then ok "tencentdb: get before create"
 else bad "tencentdb: get before create"; fi
 
+# The agent's event handling is policy, not prose: the skill must name the
+# machine marker, and SOUL must carry the authorization boundary in every lane.
+has "skill documents the event marker" patches/buzz/skills/paperclip-api/SKILL.md 'OPC_EVENT'
+has "SOUL forbids treating events as authorization" patches/buzz/SOUL.md 'never authorization'
+
+# Event bridge: every piece of its state has a producer, and the control path
+# cannot be triggered without the owner-signed command.
+has "event bridge: compose service"            docker-compose.yml              'event-bridge:'
+has "event bridge: state volume"               docker-compose.yml              'opc-event-state:/var/lib/opc-bridge'
+has "event bridge: notifier key producer"      patches/buzz/generate-keys.sh   'gen paperclip'
+has "event bridge: control key producer"       patches/buzz/generate-keys.sh   'gen_token opc-control'
+has "event bridge: author-list seed"           patches/buzz/frontdoor-entrypoint.sh 'BUZZ_ACP_AGENT_AUTHORS'
+has "event bridge: adaptive controller"          patches/event-bridge/opc_bridge/adaptive.py 'insufficient samples'
+has "event bridge: adaptive thread"              patches/event-bridge/opc_bridge/main.py     'adaptive'
+has "event bridge: health never cancels"       patches/event-bridge/opc_bridge/health.py 'never cancels'
+has "event bridge: owner-only force stop"      patches/event-bridge/opc_bridge/control.py 'class OperatorAuth'
+has "event bridge: allocation uses agent pause" patches/event-bridge/opc_bridge/control.py '"status": "paused"'
+has "event bridge: system gate patch applied"  patches/buzz/Dockerfile         'opc-event-gate.patch'
+has "event bridge: live loop gate exists"      tests/event-loop.sh             'OPC_EVENT'
+
+# The ticket helper's payloads are code: a malformed jq program is invisible
+# until someone files a ticket (the prototype payload once shipped missing a
+# brace). The gate builds both payloads and validates them.
+has "ticket helper: payload regression gate"  tests/opc-paperclip.sh            'prototype_payload_json'
+has "ticket helper: source-only test hook"    patches/buzz/opc-paperclip       'OPC_PAPERCLIP_SOURCE_ONLY'
+has "frontdoor quarantines obsolete skills"   patches/buzz/frontdoor-entrypoint.sh 'opc-issue-watcher'
+has "hermes quarantines obsolete skills"      patches/hermes/hermes-entrypoint.sh 'opc-issue-watcher'
+if grep -rqs "opc-issue-watcher" patches/buzz/skills patches/hermes/skills; then
+    bad "shipped skills: no retired-watcher instruction"
+else
+    ok "shipped skills: no retired-watcher instruction"
+fi
+
+# Delivery must have exactly one writer. The old watcher posted as the front
+# door (identity impersonation) and could not hold a durable cursor; the event
+# bridge replaced it. A leftover reference means two writers for one event.
+# The binary is gone, and nothing may invoke it again. The quarantine logic in
+# the two entrypoints intentionally names the retired *marker* (without .sh) so
+# it can retire stale skills; what must not exist is an executable reference.
+if [ -e patches/buzz/opc-issue-watcher.sh ] || grep -rqs "opc-issue-watcher\.sh" patches docker-compose.yml; then
+    bad "watcher retired (an executable reference remains — two delivery writers)"
+else
+    ok "watcher retired (event-bridge is the only delivery writer)"
+fi
+
 echo
 printf 'result: %d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
