@@ -107,6 +107,22 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 if [ "$ready" -eq 1 ]; then pass "RustFS returns healthy"; else fail "RustFS returns healthy"; fi
+
+# /health answers before RustFS finishes startup_finalization, and in that window
+# every authenticated S3 call fails with "Service not ready: waiting for
+# startup_finalization" — which mc surfaces as "Object does not exist", so the
+# durability check below reads a lost object when nothing was lost. Wait for the
+# API itself, not the health endpoint.
+api_ready=0
+for _ in $(seq 1 30); do
+  if pc sh -ec '. /tmp/s3-gate-a.env; export MC_CONFIG_DIR=/tmp/mc-a; mc ls "tenant/$S3_BUCKET" >/dev/null 2>&1'; then
+    api_ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$api_ready" -eq 1 ]; then pass "RustFS S3 API serves requests after recreate"; else fail "RustFS S3 API serves requests after recreate"; fi
+
 check "object and IAM survive recreate" pc sh -ec '
   . /tmp/s3-gate-a.env; export MC_CONFIG_DIR=/tmp/mc-a
   mc stat "tenant/$S3_BUCKET/multipart" >/dev/null
