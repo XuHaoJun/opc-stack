@@ -179,11 +179,11 @@ for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
     grep -q 'cd "$(dirname "$0")/\.\."' "$REPO_ROOT/$g" || \
         die "$g does not cd to its own repo root — it would not follow the clone"
-    # audit-bootstrap.sh and memory-ingress.sh are pure file/offline checks and
-    # read no .env; the others drive a running stack and must resolve
-    # ports/project from the clone's.
+    # audit-bootstrap.sh, memory-ingress.sh and opc-paperclip.sh are pure
+    # file/offline checks and read no .env; the others drive a running stack and
+    # must resolve ports/project from the clone's.
     case "$g" in
-        tests/audit-bootstrap.sh | tests/memory-ingress.sh) ;;
+        tests/audit-bootstrap.sh | tests/memory-ingress.sh | tests/opc-paperclip.sh) ;;
         *) grep -q 'opc_load_env \./\.env' "$REPO_ROOT/$g" || \
                die "$g does not load ./.env — it would not follow the clone's ports" ;;
     esac
