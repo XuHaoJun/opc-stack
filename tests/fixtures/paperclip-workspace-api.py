@@ -38,6 +38,7 @@ DEFAULT_STATE = {
     "agents": [DEFAULT_ENGINEER],
     "projects": [],
     "issues": [],
+    "labels": [],
 }
 STATE_PATH = Path(os.environ.get("PAPERCLIP_FIXTURE_STATE", "")) if os.environ.get("PAPERCLIP_FIXTURE_STATE") else None
 LOCK = threading.RLock()
@@ -163,6 +164,25 @@ class Handler(BaseHTTPRequestHandler):
                 save_state()
                 self._send_json(201, project)
                 return
+            if len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "labels":
+                company_id = path[2]
+                if company_id != str(STATE.get("company", {}).get("id", "")):
+                    self._send_json(404, {"error": "company not found"})
+                    return
+                name = str(payload.get("name") or "")
+                for existing in STATE.setdefault("labels", []):
+                    if existing.get("name") == name:
+                        self._send_json(200, existing)
+                        return
+                label = {
+                    "id": self._next_id("label-", "labels"),
+                    "name": name,
+                    "color": str(payload.get("color") or "#000000"),
+                }
+                STATE["labels"].append(label)
+                save_state()
+                self._send_json(201, label)
+                return
             if len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "issues":
                 company_id = path[2]
                 if company_id != str(STATE.get("company", {}).get("id", "")):
@@ -241,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
         return f"00000000-0000-4000-8000-{base + ordinal:012x}"
 
     def _next_id(self, prefix: str, collection: str) -> str:
-        base = {"projects": 0x101, "issues": 0x301}[collection]
+        base = {"projects": 0x101, "issues": 0x301, "labels": 0x401}[collection]
         existing = {
             str(item.get("id", ""))
             for item in STATE.get(collection, [])
@@ -396,6 +416,8 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json(200, agent)
                         return
                 self._send_json(404, {"error": "agent not found"})
+            elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "labels":
+                self._company_collection(path[2], "labels")
             elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "issues":
                 if path[2] != str(STATE.get("company", {}).get("id", "")):
                     self._send_json(404, {"error": "company not found"})

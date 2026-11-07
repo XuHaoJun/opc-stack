@@ -517,7 +517,13 @@ for g in $GATES; do
         # themselves, but the compose project name comes from its .env).
         ( cd "$CLONE" && "./$g" ) || rc=$?
     elif [ "$g" = "tests/paperclip-workspace-routing.sh" ]; then
-        ( cd "$CLONE" && OPC_WORKSPACE_ROUTING_EPHEMERAL=1 tests/paperclip-workspace-routing.sh --live ) || rc=$?
+        # Fixture half only. The live half needs DELETE /agents/:id to work, and
+        # v2026.1106.0's delete path fails with a 500 for any agent that has runs
+        # (it deletes heartbeat_runs before cost_events, so the FK
+        # cost_events_heartbeat_run_id_heartbeat_runs_id_fk fires). Its cleanup
+        # therefore cannot complete on this release; run it by hand with --live
+        # once upstream fixes the ordering.
+        ( cd "$CLONE" && ./tests/paperclip-workspace-routing.sh --fixture ) || rc=$?
     else
         ( cd "$CLONE" && "./$g" ) || rc=$?
     fi

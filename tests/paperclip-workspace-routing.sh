@@ -93,6 +93,24 @@ live_key_mutation() {
 }
 delete_and_verify() {
   local label="$1" delete_path="$2" verify_path="$3" expected="$4"
+  # Paperclip v2026.1023.0+ refuses DELETE /agents/:id until the agent reaches
+  # lifecycleState "terminated" (409 otherwise), so every agent cleanup below
+  # must terminate first and wait for the state. Without this the records stay
+  # on the board and the run reports five meaningless 409s.
+  case "$delete_path" in
+    /agents/*)
+      local agent_id="${delete_path#/agents/}"
+      agent_id="${agent_id%%/*}"
+      if live_mutation POST "/agents/$agent_id/terminate" '{}'; then
+        for _ in $(seq 1 30); do
+          if live_mutation GET "/agents/$agent_id"; then
+            [ "$(printf '%s' "$LIVE_RESPONSE_BODY" | jq -r '.lifecycleState // empty' 2>/dev/null)" = "terminated" ] && break
+          fi
+          sleep 1
+        done
+      fi
+      ;;
+  esac
   if ! live_mutation DELETE "$delete_path"; then
     case "$LIVE_RESPONSE_STATUS" in
       404) ok "$label cleanup (already absent)" ; return 0 ;;
@@ -1085,19 +1103,26 @@ AGENT_SCRIPT
   queued=0
   for _ in $(seq 1 30); do
     run_json="$(live_api GET "/companies/$LIVE_COMPANY_ID/heartbeat-runs?limit=1000" 2>/dev/null || printf '[]')"
-    if printf '%s' "$run_json" | jq -e --arg id "$prototype_issue_b" \
-      'any(.[]?; (.issueId == $id or .contextSnapshot.issueId == $id)
-        and .status == "scheduled_retry"
-        and .scheduledRetryReason == "workspace_busy")' >/dev/null 2>&1; then
+    # v2026.1106.0 reworked this: a run that would share a busy workspace is
+    # queued behind the holder instead of being started and deferred, so the
+    # same safety property shows up as `queued` rather than
+    # scheduled_retry/workspace_busy. Accept either, but never a second
+    # *running* run for the second issue — that is what this gate is for.
+    if printf '%s' "$run_json" | jq -e --arg id "$prototype_issue_b" '
+        ([.[]? | select(.issueId == $id or .contextSnapshot.issueId == $id)]) as $runs
+        | ($runs | map(select(.status == "running")) | length) == 0
+          and (($runs | map(select(.status == "queued"
+                or (.status == "scheduled_retry" and .scheduledRetryReason == "workspace_busy")))
+                | length) >= 1)' >/dev/null 2>&1; then
       queued=1
       break
     fi
     sleep 1
   done
   if [ "$queued" -eq 1 ]; then
-    ok "same-prototype second run is scheduled_retry workspace_busy"
+    ok "same-prototype second run waits for the busy workspace (queued or workspace_busy retry)"
   else
-    bad "same-prototype second run is scheduled_retry workspace_busy"
+    bad "same-prototype second run waits for the busy workspace (queued or workspace_busy retry)"
     live_api GET "/companies/$LIVE_COMPANY_ID/heartbeat-runs?limit=1000" \
       | jq -c '[.[] | {id,status,issueId,scheduledRetryReason}]' || true
     return 1
