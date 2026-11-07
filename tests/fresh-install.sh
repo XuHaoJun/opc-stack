@@ -179,11 +179,20 @@ for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
     grep -q 'cd "$(dirname "$0")/\.\."' "$REPO_ROOT/$g" || \
         die "$g does not cd to its own repo root — it would not follow the clone"
-    # audit-bootstrap.sh, memory-ingress.sh and opc-paperclip.sh are pure
-    # file/offline checks and read no .env; the others drive a running stack and
-    # must resolve ports/project from the clone's.
+    # Two kinds of gate need no env file of their own:
+    #  - pure file/offline checks (audit-bootstrap, memory-ingress,
+    #    opc-paperclip, event-bridge, buzz-event-gate read no .env);
+    #  - gates that address the stack only through `docker compose exec`
+    #    (event-identity, event-loop, autonomy, admission, force-stop,
+    #    event-failed). Their 127.0.0.1 URLs are CONTAINER-internal, and compose
+    #    itself reads the clone's .env, so the project name and ports follow the
+    #    clone without an explicit load. Everything else curls the host and must
+    #    resolve ports through opc_load_env ./.env.
     case "$g" in
-        tests/audit-bootstrap.sh | tests/memory-ingress.sh | tests/opc-paperclip.sh) ;;
+        tests/audit-bootstrap.sh | tests/memory-ingress.sh | tests/opc-paperclip.sh | \
+        tests/event-bridge.sh | tests/buzz-event-gate.sh | \
+        tests/event-identity.sh | tests/event-loop.sh | tests/autonomy.sh | \
+        tests/admission.sh | tests/force-stop.sh | tests/event-failed.sh) ;;
         *) grep -q 'opc_load_env \./\.env' "$REPO_ROOT/$g" || \
                die "$g does not load ./.env — it would not follow the clone's ports" ;;
     esac
