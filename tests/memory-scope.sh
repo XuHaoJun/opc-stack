@@ -873,6 +873,22 @@ if [ "$(kv "$REPLY_OUT" STOP)" = "end_turn" ]; then
     REPLY_OK=1
   fi
 fi
+if [ "$REPLY_OK" != "1" ]; then
+  # One retry, because this is the only check that spends a live model turn over
+  # ACP stdio. A transient agent-side request failure surfaces as an opaque
+  # "acp.exceptions.RequestError: Invalid params" from a background task and
+  # kills the turn (seen once in six runs of this gate, on a healthy stack);
+  # retrying once distinguishes that from a reply path that is actually broken.
+  REPLY_OUT="$(run_driver "$GATE_AGENT" "$GATE_USER" acp_reply "{\"canary\":\"Memscope live-reply retry $RUN. Reply with exactly the single word PING and nothing else.\"}")"
+  REPLY_STREAM="$(kv "$REPLY_OUT" STREAM_CHARS)"
+  REPLY_HIST="$(kv "$REPLY_OUT" REPLY_LEN)"
+  if [ "$(kv "$REPLY_OUT" STOP)" = "end_turn" ] \
+    && { { [ -n "$REPLY_STREAM" ] && [ "$REPLY_STREAM" -ge 1 ]; } \
+         || { [ -n "$REPLY_HIST" ] && [ "$REPLY_HIST" -ge 1 ]; }; }; then
+    REPLY_OK=1
+    echo "note  the first ACP turn failed and the retry succeeded: $(printf '%s' "$REPLY_OUT" | tr '\n' ' ')"
+  fi
+fi
 if [ "$REPLY_OK" = "1" ]; then
   pass "frontdoor ACP turn returns a real agent reply"
 else
