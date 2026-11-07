@@ -126,7 +126,7 @@ async function runGate() {
   assert.ok(company, 'set OPC_TERMINAL_COMPANY_ID when more than one company exists');
   evidence.companyId = company.id;
   const agent = await api('POST', `/companies/${company.id}/agents`, {
-    name: marker, role: 'general', adapterType: 'claude_local',
+    name: marker, role: 'general', adapterType: 'claude_local', runner: 'legacy',
     adapterConfig: {engine: 'acp', agentCommand: `node ${directory}paperclip-terminal-agent.mjs`,
       mode: 'oneshot', permissionMode: 'approve-all', nonInteractivePermissions: 'deny',
       timeoutSec: 90, stateDir: `${directory}acpx-state`,

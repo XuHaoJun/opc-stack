@@ -4,8 +4,8 @@
        "agentServerVersion": "0.0.33",
        "agentRuntimePackage": "@earendil-works/pi-coding-agent",
        "agentRuntimeVersion": "1.0.0",
--      "commandDigest": "sha256:e92078bee3c23bec4100aa589013a44613d054cd686826534025d8019e9f39a9",
-+      "commandDigest": "sha256:fff690518b765a9a656f27398b3991fc1d3e045d64919411c8b52b0d1870b5d0",
+-      "commandDigest": "sha256:4918a4d5472d66b22b1ec642b68b5c60a8092a39c84ec1ab1c9ad0289cb8c68c",
++      "commandDigest": "sha256:379f6fb8d42232e69d3e71ef20b26d6d790d171d8f7b9bf33ec92ecf7a1f5b18",
        "requiresProviderPolicy": true
      },
      "cursor": {
@@ -22,11 +22,11 @@
        "agentServerVersion": "1.0.88",
        "agentRuntimePackage": null,
        "agentRuntimeVersion": null,
--      "commandDigest": "sha256:481d0852ae8272a90f9912723d540518a874a0da65a9070e33b52ea1a14cbd7f",
-+      "commandDigest": "sha256:838af528918a07791f63c1fb313c1e3222560623a39ac7a50bf720909b6ba761",
-       "requiresProviderPolicy": true,
-       "qualificationStatus": "pending"
+-      "commandDigest": "sha256:d490dacdab02051d24c84aae49ac6fb12b8226cf8a47b014ec53f3d3a8410a94",
++      "commandDigest": "sha256:2a5fb516aebafe19c22d36e69cb133d846ef76404f1bbafe0cf6603740a424dd",
+       "requiresProviderPolicy": true
      },
+     "claude": {
 --- a/packages/paperclip-runner/cursor-contract.json
 +++ b/packages/paperclip-runner/cursor-contract.json
 @@ -5,7 +5,7 @@
@@ -45,12 +45,12 @@
 -  "commandDigest": "sha256:ac8092119542c8fbe95dae18ba5ef4d3689803fec56b7d2735fa193eea42f59b"
 +  "commandDigest": "sha256:cd218a6d636e74871f1f3b92db4095b4334e926ae32b20d8550c92d5f95faeb3"
  }
---- a/packages/paperclip-runner/test-fixtures/pi-acp/profile-v22-identity.json
-+++ b/packages/paperclip-runner/test-fixtures/pi-acp/profile-v22-identity.json
+--- a/packages/paperclip-runner/test-fixtures/pi-acp/profile-v28-identity.json
++++ b/packages/paperclip-runner/test-fixtures/pi-acp/profile-v28-identity.json
 @@ -1,5 +1,5 @@
  {
--  "commandDigest": "sha256:e92078bee3c23bec4100aa589013a44613d054cd686826534025d8019e9f39a9",
-+  "commandDigest": "sha256:fff690518b765a9a656f27398b3991fc1d3e045d64919411c8b52b0d1870b5d0",
+-  "commandDigest": "sha256:4918a4d5472d66b22b1ec642b68b5c60a8092a39c84ec1ab1c9ad0289cb8c68c",
++  "commandDigest": "sha256:379f6fb8d42232e69d3e71ef20b26d6d790d171d8f7b9bf33ec92ecf7a1f5b18",
    "declaration": {
      "schema": "paperclip.acpx_profile_declaration.v1",
      "agent": "pi",
@@ -63,12 +63,12 @@
      "nativeAssistantMessages": "pi1-rpc-deltas-v3-bound-message-and-tool-receipts",
      "nativeNotices": "session-extension-v2-bounded-runtime-failure",
      "messageProjectionSha256": "17d1e91b948dfa6a56e1905645add52b502041ad843c8d50a13b07956f22aadd",
---- a/packages/paperclip-runner/test/fixtures/copilot-profile-v17-identity.json
-+++ b/packages/paperclip-runner/test/fixtures/copilot-profile-v17-identity.json
+--- a/packages/paperclip-runner/test/fixtures/copilot-profile-v58-identity.json
++++ b/packages/paperclip-runner/test/fixtures/copilot-profile-v58-identity.json
 @@ -1,5 +1,5 @@
  {
--  "commandDigest": "sha256:481d0852ae8272a90f9912723d540518a874a0da65a9070e33b52ea1a14cbd7f",
-+  "commandDigest": "sha256:838af528918a07791f63c1fb313c1e3222560623a39ac7a50bf720909b6ba761",
+-  "commandDigest": "sha256:d490dacdab02051d24c84aae49ac6fb12b8226cf8a47b014ec53f3d3a8410a94",
++  "commandDigest": "sha256:2a5fb516aebafe19c22d36e69cb133d846ef76404f1bbafe0cf6603740a424dd",
    "declaration": {
      "schema": "paperclip.acpx_profile_declaration.v1",
      "agent": "copilot",
@@ -87,8 +87,8 @@
      "agentServerVersion": "0.0.33",
      "agentRuntimePackage": "@earendil-works/pi-coding-agent",
      "agentRuntimeVersion": "1.0.0",
--    "commandDigest": "sha256:e92078bee3c23bec4100aa589013a44613d054cd686826534025d8019e9f39a9",
-+    "commandDigest": "sha256:fff690518b765a9a656f27398b3991fc1d3e045d64919411c8b52b0d1870b5d0",
+-    "commandDigest": "sha256:4918a4d5472d66b22b1ec642b68b5c60a8092a39c84ec1ab1c9ad0289cb8c68c",
++    "commandDigest": "sha256:379f6fb8d42232e69d3e71ef20b26d6d790d171d8f7b9bf33ec92ecf7a1f5b18",
      "permissionPolicy": "interactive"
    },
    "cursor": {
@@ -105,19 +105,19 @@
      "agentServerVersion": "1.0.88",
      "agentRuntimePackage": null,
      "agentRuntimeVersion": null,
--    "commandDigest": "sha256:481d0852ae8272a90f9912723d540518a874a0da65a9070e33b52ea1a14cbd7f",
-+    "commandDigest": "sha256:838af528918a07791f63c1fb313c1e3222560623a39ac7a50bf720909b6ba761",
-     "qualificationStatus": "pending",
+-    "commandDigest": "sha256:d490dacdab02051d24c84aae49ac6fb12b8226cf8a47b014ec53f3d3a8410a94",
++    "commandDigest": "sha256:2a5fb516aebafe19c22d36e69cb133d846ef76404f1bbafe0cf6603740a424dd",
      "permissionPolicy": "interactive"
    },
+   "claude": {
 --- a/packages/paperclip-runner/runner/crates/runner-core/src/generated_acpx_profiles.rs
 +++ b/packages/paperclip-runner/runner/crates/runner-core/src/generated_acpx_profiles.rs
 @@ -29,7 +29,7 @@
              agent_runtime_package: Some("@earendil-works/pi-coding-agent"),
              agent_runtime_version: Some("1.0.0"),
              command_digest:
--                "sha256:e92078bee3c23bec4100aa589013a44613d054cd686826534025d8019e9f39a9",
-+                "sha256:fff690518b765a9a656f27398b3991fc1d3e045d64919411c8b52b0d1870b5d0",
+-                "sha256:4918a4d5472d66b22b1ec642b68b5c60a8092a39c84ec1ab1c9ad0289cb8c68c",
++                "sha256:379f6fb8d42232e69d3e71ef20b26d6d790d171d8f7b9bf33ec92ecf7a1f5b18",
              requires_provider_policy: true,
          },
          "cursor" => AcpxReleaseProfile {
@@ -134,8 +134,8 @@
              agent_runtime_package: None,
              agent_runtime_version: None,
              command_digest:
--                "sha256:481d0852ae8272a90f9912723d540518a874a0da65a9070e33b52ea1a14cbd7f",
-+                "sha256:838af528918a07791f63c1fb313c1e3222560623a39ac7a50bf720909b6ba761",
+-                "sha256:d490dacdab02051d24c84aae49ac6fb12b8226cf8a47b014ec53f3d3a8410a94",
++                "sha256:2a5fb516aebafe19c22d36e69cb133d846ef76404f1bbafe0cf6603740a424dd",
              requires_provider_policy: true,
          },
          "claude" => AcpxReleaseProfile {

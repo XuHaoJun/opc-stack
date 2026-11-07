@@ -64,12 +64,61 @@ wait_for_message() { # <identifier> <timeout-seconds>
 
 COMPANY="$(pc_get /companies | jq -r '.[0].id')"
 [ -n "$COMPANY" ] || fail "no company visible to the board key"
+HOLDER_AGENT=""
+# v2026.1023.0+ requires terminate before DELETE; an agent that never ran has no
+# cost_events, so this delete is clean.
+delete_holder() {
+    [ -n "$HOLDER_AGENT" ] || return 0
+    pc_post "/agents/$HOLDER_AGENT/terminate" '{}' >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+        _st="$(pc_get "/agents/$HOLDER_AGENT" 2>/dev/null | jq -r '.lifecycleState // empty' 2>/dev/null)"
+        [ "$_st" = "terminated" ] && break
+        sleep 1
+    done
+    docker compose exec -T paperclip curl -fsS -X DELETE \
+        -H "Authorization: Bearer $BOARD_KEY" "$PCAPI/agents/$HOLDER_AGENT" >/dev/null 2>&1 || true
+}
+
 AGENT="$(pc_get "/companies/$COMPANY/agents" | jq -r '[.[] | select(.status == "paused")][0].id // empty')"
-[ -n "$AGENT" ] || fail "no paused agent to hold the test ticket (no run may start)"
+if [ -z "$AGENT" ]; then
+    # A fresh install has no paused agent, and an idle one is woken by the
+    # assignment (issue-assignment-wakeup keys off status, not heartbeat), so the
+    # holder must be a real paused agent. Create a throwaway one and remove it on
+    # exit — the tickets above/below exist only to exercise delivery.
+    HOLDER_AGENT="$(pc_post "/companies/$COMPANY/agents" \
+        "$(jq -nc --arg n "opc-event-loop-holder-$$" \
+            '{name:$n, role:"general", adapterType:"process", runner:"legacy", adapterConfig:{}}')" \
+        | jq -r '.id // empty')"
+    [ -n "$HOLDER_AGENT" ] || fail "no paused agent and the throwaway holder could not be created"
+    pc_patch "/agents/$HOLDER_AGENT" '{"status":"paused"}' >/dev/null || fail "could not pause the throwaway holder"
+    AGENT="$HOLDER_AGENT"
+    # Installed here, not at the forge block below: every `fail` between this
+    # point and there exits the script, and a leaked paused holder would sit on
+    # the board forever.
+    trap delete_holder EXIT
+fi
+
+ensure_anchor() {
+    local a
+    a="$(anchor)"
+    if [ -z "$a" ]; then
+        # A fresh stack's channel can be empty, but the ticket comments need an
+        # existing Buzz event to point at. Publish one neutral message as the
+        # paperclip identity (it is not a driveable agent, so nothing wakes) and
+        # use it as this run's thread anchor.
+        docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" messages send --channel $CHANNEL --content 'event-loop anchor (test bootstrap)'" >/dev/null 2>&1 || true
+        for _ in $(seq 1 15); do
+            a="$(anchor)"
+            [ -n "$a" ] && break
+            sleep 2
+        done
+    fi
+    printf '%s' "$a"
+}
 
 create_ticket() { # <identifier-suffix> → prints "<id> <anchor>"
     local title="OPC event-loop smoke $1" anchor_id body id ident
-    anchor_id="$(anchor)"
+    anchor_id="$(ensure_anchor)"
     [ -n "$anchor_id" ] || fail "could not read a Buzz event id to use as the thread anchor"
     body="$(jq -nc --arg t "$title" --arg a "$AGENT" \
         '{title:$t, description:"Synthetic ticket for tests/event-loop.sh; no agent run.", status:"backlog", assigneeAgentId:$a}')"
@@ -112,7 +161,7 @@ BUZZ_AUTH_TAG= buzz --relay "http://$R" --private-key "$(cat /tmp/opc-forge.nsec
 rm -f /tmp/opc-forge.nsec
 ' >/dev/null 2>&1 || true
 }
-trap delete_forge EXIT
+trap 'delete_forge; delete_holder' EXIT
 
 DROPPED=0
 for _ in $(seq 1 10); do
@@ -124,7 +173,7 @@ done
 pass "forged tagged event dropped by the wake gate (no turn)"
 
 delete_forge
-trap - EXIT
+trap delete_holder EXIT
 LEFT="$(messages | jq --arg id "$FORGE_EVENT" '[.[] | select(.id == $id)] | length')"
 [ "${LEFT:-0}" = "0" ] || fail "the forgery probe is still visible in the channel ($FORGE_EVENT)"
 pass "forgery probe removed from the channel"

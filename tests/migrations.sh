@@ -160,12 +160,25 @@ gate_hermes() {
 
   # The two things we own in those files, that a migration or a dashboard edit
   # can remove without any runtime symptom.
-  if dexec hermes sh -lc 'grep -q "kanban" /opt/data/config.yaml'; then
+  #
+  # Both are SEEDED during boot (the frontdoor restores its conversational
+  # system_prompt after the ACP runtime is up, ~a minute in), so a gate that runs
+  # while a stack is still starting must wait for the seed rather than read the
+  # file mid-boot and report the 2026-08-17 failure on a healthy install.
+  wait_for_config_grep() { # <service> <pattern> [timeout-seconds]
+    local deadline=$(( $(date +%s) + ${3:-120} ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      dexec "$1" sh -lc "grep -q '$2' /opt/data/config.yaml" && return 0
+      sleep 3
+    done
+    return 1
+  }
+  if wait_for_config_grep hermes kanban; then
     pass "hermes kanban still in disabled_toolsets (Paperclip stays the only work plane)"
   else
     fail "hermes config.yaml no longer disables the kanban toolset — invariant 2 broken"
   fi
-  if dexec frontdoor sh -lc 'grep -q "system_prompt" /opt/data/config.yaml'; then
+  if wait_for_config_grep frontdoor system_prompt; then
     pass "frontdoor system_prompt present"
   else
     fail "frontdoor config.yaml has no system_prompt — this is the 2026-08-17 failure exactly"

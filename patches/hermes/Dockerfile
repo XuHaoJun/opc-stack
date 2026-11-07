@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.19
-# OPC Hermes v0.22.6: upstream PM/runtime/products with OPC persistent tools and identities.
+# OPC Hermes v0.23.0: upstream PM/runtime/products with OPC persistent tools and identities.
 ARG NIX_SEED_IMAGE=opc/nix-seed:local
 ARG BUZZ_IMAGE=opc/frontdoor:local
 FROM ${NIX_SEED_IMAGE} AS nix-seed
@@ -328,7 +328,7 @@ RUN node scripts/build/tui.mjs --source /opt/hermes --out /opt/products/tui && \
 # The Webapp (the browser-hosted Desktop) builds through its source recipe,
 # which installs Desktop's dependencies in a private workspace. A stage of its
 # own so Desktop changes leave the TUI and dashboard layers cached (upstream
-# v0.22.6).
+# v0.23.0).
 FROM runtime_base AS webapp_build
 COPY package.json package-lock.json .npmrc ./
 COPY apps/desktop/package.json apps/desktop/
@@ -416,14 +416,14 @@ RUN mkdir -p /opt/hermes/bin && \
 # run as the default hermes user (UID 10000).
 
 # ---------- Image provenance + install stamp ----------
-ARG HERMES_GIT_SHA=bf0203a794a07aac3ff764972ab9087baa4e4f4e
+ARG HERMES_GIT_SHA=2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19
 RUN python3 scripts/write_install_stamp.py --output /opt/hermes/install-stamp.json \
-    --commit "${HERMES_GIT_SHA}" --base-version 0.22.6 --display-version 0.22.6 \
+    --commit "${HERMES_GIT_SHA}" --base-version 0.23.0 --display-version 0.23.0 \
     --distance 0 --source opc --distribution docker --update-mechanism external \
     --runtime-dir tools
 # The stamp is code-scoped; the immutable-image marker is outside both the
 # install tree and mutable home. Neither can be clobbered by a home mount.
-RUN python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/hermes","version":"0.22.6","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)'
+RUN python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n"); marker = Path("/etc/hermes/image-provenance.json"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text(json.dumps({"schema":1,"deployment_kind":"image","manager":"docker","image":"opc/hermes","version":"0.23.0","revision":stamp["commit"]}) + "\n"); marker.chmod(0o444)'
 
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.
@@ -493,7 +493,7 @@ ENV XDG_RUNTIME_DIR=/tmp/hermes-runtime
 COPY --chmod=0755 docker/hermes-exec-shim.sh /opt/hermes/bin/hermes
 COPY --chmod=0755 docker/entrypoint-dispatch.sh /opt/hermes/docker/entrypoint-dispatch.sh
 # Login shells re-read /etc/profile, which resets PATH; this re-adds the
-# hermes bin dirs above (upstream v0.22.6). OPC's own profile.d script below
+# hermes bin dirs above (upstream v0.23.0). OPC's own profile.d script below
 # appends the nix/mise entries on top.
 COPY --chmod=0644 docker/profile-hermes-path.sh /etc/profile.d/hermes.sh
 

@@ -102,7 +102,7 @@ async def regression(home):
                               inbound_message_id=event.message_id, source=event.source,
                               title_user_message=None, persist_user_display_kind=None,
                               persist_user_display_metadata=None, moa_config=None,
-                              mute_notification_reply=False)
+                              mute_notification_reply=False, reply_expected=True)
         # Bypass unrelated route/model construction, not the production invocation.
         turn = object.__new__(TurnRunner)
         turn._runner, turn._ctx, turn._approval_owner = runner, ctx, None
