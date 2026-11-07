@@ -11,7 +11,10 @@ assert_not_contains() { local label="$1" needle="$2" haystack="$3"; [[ "$haystac
 CLI=patches/hermes/opc-paperclip
 MODE=fixture
 RUN_LIVE_AFTER_FIXTURE=0
-# Fresh-install rehearsal sets OPC_WORKSPACE_ROUTING_EPHEMERAL=1; main-stack live runs remain strict by default.
+# The fresh-install rehearsal runs --fixture only (its live half cannot clean up
+# while DELETE /agents/:id 500s for agents that have runs), so nothing sets
+# OPC_WORKSPACE_ROUTING_EPHEMERAL today. It remains for a manual --live run
+# inside a disposable stack, where the enclosing teardown owns the records.
 case "${1-}" in
   "") MODE=fixture; RUN_LIVE_AFTER_FIXTURE=1 ;;
   --fixture) MODE=fixture ;;
@@ -1103,17 +1106,21 @@ AGENT_SCRIPT
   queued=0
   for _ in $(seq 1 30); do
     run_json="$(live_api GET "/companies/$LIVE_COMPANY_ID/heartbeat-runs?limit=1000" 2>/dev/null || printf '[]')"
-    # v2026.1106.0 reworked this: a run that would share a busy workspace is
-    # queued behind the holder instead of being started and deferred, so the
-    # same safety property shows up as `queued` rather than
-    # scheduled_retry/workspace_busy. Accept either, but never a second
-    # *running* run for the second issue — that is what this gate is for.
-    if printf '%s' "$run_json" | jq -e --arg id "$prototype_issue_b" '
+    # The safety property is "the second run never runs concurrently with the
+    # holder". It may wait either as scheduled_retry/workspace_busy (the
+    # mechanism this gate originally pinned) or — since v2026.1106.0 — as a
+    # queued run. A bare `queued` is also what a slot/dependency deferral looks
+    # like, so it only counts while the holder issue is actually running in the
+    # same sample; otherwise the assertion would no longer be about the
+    # workspace at all.
+    if printf '%s' "$run_json" | jq -e --arg id "$prototype_issue_b" --arg holder "$prototype_issue_a" '
         ([.[]? | select(.issueId == $id or .contextSnapshot.issueId == $id)]) as $runs
+        | ([.[]? | select(.issueId == $holder or .contextSnapshot.issueId == $holder)
+             | select(.status == "running")] | length) as $holders
         | ($runs | map(select(.status == "running")) | length) == 0
-          and (($runs | map(select(.status == "queued"
-                or (.status == "scheduled_retry" and .scheduledRetryReason == "workspace_busy")))
-                | length) >= 1)' >/dev/null 2>&1; then
+          and (($runs | map(select(
+                 (.status == "scheduled_retry" and .scheduledRetryReason == "workspace_busy")
+                 or (.status == "queued" and $holders >= 1))) | length) >= 1)' >/dev/null 2>&1; then
       queued=1
       break
     fi

@@ -986,8 +986,10 @@ if [ "$HEALTH_OK" = "1" ] && [ "$SNAP_OK" = "1" ] \
   && grep -qx "FIRST_L2=1" "$COLD_LOG" 2>/dev/null \
   && grep -qx "FIRST_L3=1" "$COLD_LOG" 2>/dev/null; then
   pass "first successful prefetch after the core returns carries the snapshot"
-elif [ "$SNAP_PLANE_EMPTY" = "1" ]; then
-  skip "first successful prefetch after the core returns carries the snapshot (empty memory plane)"
+elif [ "$SNAP_PLANE_EMPTY" = "1" ] && [ "$HEALTH_OK" = "1" ]; then
+  # The core came back and serves requests; there is simply nothing to snapshot
+  # for this agent yet. An unhealthy / un-recovered core still fails above.
+  skip "first successful prefetch after the core returns carries the snapshot (empty memory plane, core healthy)"
 else
   fail "first successful prefetch after the core returns carries the snapshot"
 fi

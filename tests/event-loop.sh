@@ -64,21 +64,7 @@ wait_for_message() { # <identifier> <timeout-seconds>
 
 COMPANY="$(pc_get /companies | jq -r '.[0].id')"
 [ -n "$COMPANY" ] || fail "no company visible to the board key"
-AGENT="$(pc_get "/companies/$COMPANY/agents" | jq -r '[.[] | select(.status == "paused")][0].id // empty')"
 HOLDER_AGENT=""
-if [ -z "$AGENT" ]; then
-    # A fresh install has no paused agent, and an idle one is woken by the
-    # assignment (issue-assignment-wakeup keys off status, not heartbeat), so the
-    # holder must be a real paused agent. Create a throwaway one and remove it on
-    # exit — the tickets above/below exist only to exercise delivery.
-    HOLDER_AGENT="$(pc_post "/companies/$COMPANY/agents" \
-        "$(jq -nc --arg n "opc-event-loop-holder-$$" \
-            '{name:$n, role:"general", adapterType:"process", runner:"legacy", adapterConfig:{}}')" \
-        | jq -r '.id // empty')"
-    [ -n "$HOLDER_AGENT" ] || fail "no paused agent and the throwaway holder could not be created"
-    pc_patch "/agents/$HOLDER_AGENT" '{"status":"paused"}' >/dev/null || fail "could not pause the throwaway holder"
-    AGENT="$HOLDER_AGENT"
-fi
 # v2026.1023.0+ requires terminate before DELETE; an agent that never ran has no
 # cost_events, so this delete is clean.
 delete_holder() {
@@ -92,6 +78,25 @@ delete_holder() {
     docker compose exec -T paperclip curl -fsS -X DELETE \
         -H "Authorization: Bearer $BOARD_KEY" "$PCAPI/agents/$HOLDER_AGENT" >/dev/null 2>&1 || true
 }
+
+AGENT="$(pc_get "/companies/$COMPANY/agents" | jq -r '[.[] | select(.status == "paused")][0].id // empty')"
+if [ -z "$AGENT" ]; then
+    # A fresh install has no paused agent, and an idle one is woken by the
+    # assignment (issue-assignment-wakeup keys off status, not heartbeat), so the
+    # holder must be a real paused agent. Create a throwaway one and remove it on
+    # exit — the tickets above/below exist only to exercise delivery.
+    HOLDER_AGENT="$(pc_post "/companies/$COMPANY/agents" \
+        "$(jq -nc --arg n "opc-event-loop-holder-$$" \
+            '{name:$n, role:"general", adapterType:"process", runner:"legacy", adapterConfig:{}}')" \
+        | jq -r '.id // empty')"
+    [ -n "$HOLDER_AGENT" ] || fail "no paused agent and the throwaway holder could not be created"
+    pc_patch "/agents/$HOLDER_AGENT" '{"status":"paused"}' >/dev/null || fail "could not pause the throwaway holder"
+    AGENT="$HOLDER_AGENT"
+    # Installed here, not at the forge block below: every `fail` between this
+    # point and there exits the script, and a leaked paused holder would sit on
+    # the board forever.
+    trap delete_holder EXIT
+fi
 
 ensure_anchor() {
     local a
