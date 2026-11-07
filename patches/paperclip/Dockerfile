@@ -88,6 +88,13 @@ COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-w
 COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin-workspace-diff/
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
+# v2026.1106.0's postinstall materialises the Copilot asset set, so these four
+# paths must exist before `pnpm install` or the deps stage dies with
+# MODULE_NOT_FOUND on packages/paperclip-runner/scripts/install-copilot-assets.mjs.
+COPY packages/paperclip-runner/scripts/install-copilot-assets.mjs packages/paperclip-runner/scripts/materialize-copilot-binary.mjs packages/paperclip-runner/scripts/copilot-inner-distribution.mjs packages/paperclip-runner/scripts/
+COPY packages/paperclip-runner/src/drivers/acpx/copilot-installation.ts packages/paperclip-runner/src/drivers/acpx/
+COPY server/scripts/install-copilot-assets.mjs server/scripts/
+COPY server/src/services/copilot-connection-probe.ts server/src/services/
 
 # Apply the scoped terminal package patches, then let pnpm reconcile the
 # declared runtime graph in the image's private build tree (upstream
@@ -194,6 +201,12 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+# Upstream v2026.1106.0 boots the precompiled bundle (code load up to 24s -> <4s)
+# and keeps the tsx build as a fallback artefact. Both must exist: the CMD below
+# names the runtime bundle, and tests/migrations.sh + the ACP gate exec against
+# the same tree.
+RUN pnpm --filter @paperclipai/server build:runtime \
+  && test -f server/dist-runtime/index.mjs || (echo "ERROR: server runtime bundle missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
 
 # Ship the target's controller-owned remote provider pack without changing
@@ -393,4 +406,8 @@ ENV CONTAINER_HOST=unix:///run/podenv/podman.sock \
     PODENV_LIB=/usr/local/lib/podenv
 
 ENTRYPOINT ["/usr/local/bin/nix-entrypoint.sh", "/usr/local/bin/docker-entrypoint.sh"]
-CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
+# Precompiled runtime bundle (upstream v2026.1106.0 default). No tini here on
+# purpose: upstream's image runs `tini -s`, but our ENTRYPOINT chain is
+# nix-entrypoint.sh -> docker-entrypoint.sh -> CMD and compose declares
+# `init: true`, so docker-init already reaps PID 1's adopted orphans.
+CMD ["node", "server/dist-runtime/index.mjs"]

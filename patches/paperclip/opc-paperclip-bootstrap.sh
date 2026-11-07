@@ -298,6 +298,7 @@ if [ -z "$agent_id" ]; then
         --arg c "$EXECUTOR_CAPABILITIES" \
         '{name:$n, role:$r, title:$t, capabilities:$c,
           adapterType:"claude_local",
+          runner:"legacy",
           adapterConfig:{engine:"acp", agentCommand:"omp acp --yolo"},
           runtimeConfig:{heartbeat:{maxConcurrentRuns:4}},
           metadata:{opcManagedDefaults:{fullstackMaxConcurrentRuns:4}}}' \
@@ -551,9 +552,17 @@ reconcile_agent() {
         jq -r --arg n "$_ra_name" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)"
 
     if [ -z "$_ra_id" ]; then
+        # runner:"legacy" is load-bearing, not a preference. From
+        # v2026.1106.0 on, a create without it defaults to the native Paperclip
+        # Runner on any qualified host (Linux x64 glibc >= 2.39 here) regardless
+        # of the enableNativeRunner setting, and that path rejects agentCommand
+        # with 422 agent_runner_config_incompatible. Our harnesses are a custom
+        # ACP command (omp) and hermes_gateway, so every OPC agent must stay on
+        # the legacy runner. Existing agents are unaffected: PATCH only resolves
+        # the runner when `runner` is sent or a pi agent is converted.
         _ra_id="$(printf '{}' | "$_ra_fn" \
             | jq -c --arg n "$_ra_name" --arg t "$_ra_type" \
-                  '{name:$n, adapterType:$t, adapterConfig:.}' \
+                  '{name:$n, adapterType:$t, runner:"legacy", adapterConfig:.}' \
             | api_post_raw "/companies/$company_id/agents" | jq -r '.id // empty')"
         if [ -n "$_ra_id" ]; then
             echo "[pc-bootstrap] created agent: $_ra_name ($_ra_id)"
