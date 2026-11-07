@@ -93,9 +93,27 @@ delete_holder() {
         -H "Authorization: Bearer $BOARD_KEY" "$PCAPI/agents/$HOLDER_AGENT" >/dev/null 2>&1 || true
 }
 
+ensure_anchor() {
+    local a
+    a="$(anchor)"
+    if [ -z "$a" ]; then
+        # A fresh stack's channel can be empty, but the ticket comments need an
+        # existing Buzz event to point at. Publish one neutral message as the
+        # paperclip identity (it is not a driveable agent, so nothing wakes) and
+        # use it as this run's thread anchor.
+        docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" messages send --channel $CHANNEL --content 'event-loop anchor (test bootstrap)'" >/dev/null 2>&1 || true
+        for _ in $(seq 1 15); do
+            a="$(anchor)"
+            [ -n "$a" ] && break
+            sleep 2
+        done
+    fi
+    printf '%s' "$a"
+}
+
 create_ticket() { # <identifier-suffix> → prints "<id> <anchor>"
     local title="OPC event-loop smoke $1" anchor_id body id ident
-    anchor_id="$(anchor)"
+    anchor_id="$(ensure_anchor)"
     [ -n "$anchor_id" ] || fail "could not read a Buzz event id to use as the thread anchor"
     body="$(jq -nc --arg t "$title" --arg a "$AGENT" \
         '{title:$t, description:"Synthetic ticket for tests/event-loop.sh; no agent run.", status:"backlog", assigneeAgentId:$a}')"
