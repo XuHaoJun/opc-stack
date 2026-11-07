@@ -119,6 +119,15 @@ docker compose logs -f <svc>  # 看日誌
 
 改動一律改 `patches/<proj>/`,不直接改 `upstream/`(git submodule,乾淨 checkout)。
 
+## 使用 tailnet domain（手機 app）
+
+Buzz 手機 app 的加入流程要求 TLS（`wss://` / `https://`），並拒絕 `100.64.0.0/10` 的 IP 字面值，所以只給 tailnet IP 會連不上。`tailscale serve` 可在 `https://<machine>.<tailnet>.ts.net` 終止 TLS 並反代到 relay；此時有四個要點：
+
+- **host 要一起換**：`BUZZ_RELAY_URL` 與 `communities.host` 必須同時改成該 domain（`communities.host` 是純 domain、不帶 `:443`）。只改 host、保留同一列 UUID，既有對話／頻道／成員才會留著；換成不同字串等於新 community。
+- **canonical host 只有一個**：舊 client 必須重新加入（用 `https://<domain>/invite/<code>`）；invite claim 會一併補上 relay membership。
+- **狀態在 host、不在 compose**：`tailscale serve --bg` 會持久化（重開機仍在），但換機器要重跑。
+- **容器連不到 443 的坑**：serve listener 預設綁在 `tailscale0` interface，frontdoor／hermes／event-bridge 走 docker bridge 會得到 `connection refused`，frontdoor 因而 crash-loop、agent 不回話。在 host 的 `/etc/default/tailscaled` 加 `TS_SERVE_ALLOW_ALL_INTERFACES=1` 並重啟 tailscaled。
+
 ## 文件
 
 - `AGENTS.md` — 架構、不變量、已知坑(改動前必讀)
