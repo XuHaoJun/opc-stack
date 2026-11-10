@@ -254,6 +254,37 @@ UI affordance to carry the routing decision.
 Issue statuses: `backlog | todo | in_progress | in_review | done | blocked | cancelled`.
 List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 
+## Reaching an expert agent (Scientist / Prototyper)
+
+The expert agents are Paperclip-driven (`hermes_gateway`); their Buzz identity
+is **outbound only** in this stack. They post with the `buzz` CLI and their own
+`.agent.nsec`, but no process connects to the relay as them, so an `@mention`
+in Buzz is never delivered and never starts a turn. Posting a request and
+reporting "I told her" is a false success — verify delivery on the work plane.
+
+To make an expert act (stop a schedule, change a setting, answer a question),
+open a Paperclip issue **assigned to that agent with status `todo`**:
+`backlog` never wakes anyone (`issue-assignment-wakeup.ts`), and a comment on
+an existing ticket wakes it too. Resolve the agent id from the live agent list
+by exact name at call time; never hardcode it.
+
+`opc-paperclip` has helpers only for the engineering and prototype lanes. An
+expert/ops request is the one documented exception to "helpers only": POST
+`/api/companies/<companyId>/issues` with exactly
+`{title, description, assigneeAgentId, status:"todo"}`, then GET the issue and
+assert `.assigneeAgentId` equals the id you resolved. Do not invent a repo,
+project, workspace or acceptance criteria the request does not have.
+
+**A schedule belongs to the profile that owns it.** Each expert has its own
+`HERMES_HOME` (e.g. `/opt/data/profiles/agt-scientist`) on the
+`hermes-profiles` volume, which the front door does not mount. `hermes cron
+list` in your own home being empty proves nothing about the expert's schedule
+and is not a reason to conclude "not mine" and stop. The Scientist's weekly job
+is `experiment-queue` (`0 9 * * 1`), seeded by the hermes entrypoint; ask the
+owner to run `hermes cron pause experiment-queue` in its own profile — pause,
+never delete, because the entrypoint re-seeds a missing job — and report the
+job id back in the ticket.
+
 ## Prototype lane: names, and how to continue an old one
 
 Every prototype has a NAME, and the name is the handle for everything:
