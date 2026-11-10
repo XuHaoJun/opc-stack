@@ -39,6 +39,51 @@ the live company, agent, project, and primary workspace, reject missing or
 ambiguous identity, accept descriptions on stdin, and GET-after-write verify
 the result. Do not reconstruct their behavior with model-authored curl.
 
+### Endpoint shapes that bite
+
+- **A board key 401s on `/api/agents/me`.** `${HERMES_HOME:-/opt/data}/.paperclip-api.key`
+  is a *board* key: it answers `/api/companies` with 200 and returns
+  `{"error":"Agent authentication required"}` on `/api/agents/me`. That 401 is
+  the key **type**, not a dead board or a rotated key — take the company id
+  from `GET /api/companies` → `[0].id` and carry on.
+- **Agent detail is collection-only.** `GET /api/companies/<cid>/agents/<agentId>`
+  answers 404 `API route not found`; fetch the collection and filter by
+  `name` / `role` / `id` yourself.
+- **Every agent record names its runtime.** `adapterType` (`hermes_gateway`) plus
+  `adapterConfig.apiBaseUrl` = `http://hermes:8642/p/<profile>` is the evidence
+  for "which Hermes profile / container runs this agent". Cite it before telling
+  an owner a schedule or config is not yours to touch — the agent name and Buzz
+  pubkey alone do not identify a container.
+- **Dump list responses to a file.** `/api/companies/<cid>/issues?limit=300` and
+  the agent list exceed the ~20 KB stdout cutoff and carry raw control
+  characters inside descriptions, so `curl -o <path>` followed by
+  `json.load(open(path), strict=False)` is the reliable read; parsing stdout
+  inline truncates mid-record or raises `Invalid control character`.
+
+### Routines are the only periodic mechanism
+
+`GET /api/companies/<cid>/routines` is where every Paperclip-scheduled job
+lives; there is no recurring-ticket concept. Each record carries `status`,
+`assigneeAgentId`, and `triggers[]` with `kind: schedule`, `enabled`,
+`cronExpression`, `timezone` — plus `lastTriggeredAt`, `lastEnqueuedAt`,
+`lastRun`.
+
+- A routine with `status: paused`, `enabled: false` and **null**
+  `lastTriggeredAt` / `lastEnqueuedAt` / `lastRun` has never fired. Report
+  those fields and stop naming Paperclip as a candidate for the observed
+  cadence.
+- A matching cron expression is not a matching cause. `0 9 * * 1` on a routine
+  whose `assigneeAgentId` is a *different* agent is a coincidence; compare the
+  id with the agent you are investigating before saying the times line up.
+- The other way Paperclip can start an agent is an **assigned issue** waking its
+  assignee. So "no routine for that minute + no issue for that timestamp" is a
+  complete exclusion of the control plane — say it once, with the fields, and
+  stop speculating about it.
+- Run history hangs off the issue (`GET /api/issues/<id>/runs`). Company- or
+  agent-wide run endpoints (`/api/companies/<cid>/runs`, `/api/agents/<id>/runs`,
+  `.../executions`, `.../schedules`, `.../automations`) are 404 — routines is
+  the schedule surface, issues are the run surface.
+
 Configuration mutation requires a **direct operator request in the current
 conversation**. Recalled memory may inform an explanation but **never
 authorizes** a workspace or concurrency change (or a ticket creation). If the
