@@ -183,7 +183,7 @@ check "agent uid can read its nsec" \
 # row below, in a form that is also true when there are no channels yet.
 check "scientist is a relay member (the relay accepts its key)" \
     docker compose exec -T -u 10000 -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c \
-    'out=$(buzz --relay "http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")" channels list --member 2>/dev/null) || exit 1
+    'out=$(buzz --relay "$BUZZ_RELAY_URL" channels list --member 2>/dev/null) || exit 1
      case "$out" in "["*) exit 0 ;; *) exit 1 ;; esac'
 # Step (3) of the frontdoor register loop: join every channel the identity can
 # see. Comparing the two lists asserts exactly that, and stays true on a fresh
@@ -191,9 +191,8 @@ check "scientist is a relay member (the relay accepts its key)" \
 # asserts a human has opened the desktop client.
 check "scientist joined every channel it can see" \
     docker compose exec -T -u 10000 -e HERMES_HOME=/opt/data/profiles/agt-scientist hermes sh -c \
-    'R="http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")"
-     all=$(buzz --relay "$R" channels list 2>/dev/null | jq -r ".[].channel_id" | sort) || exit 1
-     mine=$(buzz --relay "$R" channels list --member 2>/dev/null | jq -r ".[].channel_id" | sort) || exit 1
+    'all=$(buzz --relay "$BUZZ_RELAY_URL" channels list 2>/dev/null | jq -r ".[].channel_id" | sort) || exit 1
+     mine=$(buzz --relay "$BUZZ_RELAY_URL" channels list --member 2>/dev/null | jq -r ".[].channel_id" | sort) || exit 1
      [ "$all" = "$mine" ]'
 
 # Fix round 1 stopped the wrapper's old home-root fallback from handing the

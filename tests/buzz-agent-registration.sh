@@ -10,6 +10,9 @@
 # Asserted behaviour (brief Step 1 + Step 4):
 #   * initial boot publishes BOTH surfaces — `users set-profile` (kind 0) and
 #     `channels set-add-policy --policy anyone` (kind 10100) — once each;
+#   * a wss:// relay keeps TLS on the derived HTTP base: the readiness probe
+#     and every CLI call use https:// (stripping the scheme used to produce
+#     http://<domain>, i.e. port 80, which a TLS relay never answers);
 #   * retry: kind 10100 fails once while kind 0 succeeds; on the next loop
 #     kind 0 is NOT republished and kind 10100 IS retried;
 #   * every buzz call carries the relay + private-key prefix (the CLI injects
@@ -128,6 +131,38 @@ if grep -qF -- "channels add-member --channel cid-1" "$dir/calls"; then pass "ha
 n_relay="$(cnt "$dir/calls" "$RELAY_PREFIX")"
 n_buzz="$(cnt "$dir/calls" "buzz ")"
 if [ "$n_relay" = "$n_buzz" ]; then pass "happy: every buzz call carries relay+key prefix ($n_relay)"; else fail "happy: $n_relay of $n_buzz buzz calls carry relay+key prefix"; fi
+rm -rf "$dir"
+clear_registration_markers
+
+
+# ── wss:// must keep TLS on the derived HTTP base ────────────────────────────
+# Regression: the old derivation stripped the scheme and hardcoded `http://`.
+# That only reaches a plain-ws relay; a TLS relay (tailnet domain, 443 via
+# `tailscale serve`) then gets probed on port 80, the probe never succeeds, and
+# the reconciler never joins anything. Both the readiness probe and every CLI
+# call must therefore use https:// for a wss:// input.
+dir="$(mktemp -d)"
+make_keys "$dir"
+make_fake_bin "$dir" happy
+printf '%s\n' '[{"channel_id":"cid-1"}]' > "$dir/channels.json"
+: > "$dir/calls"
+: > "$dir/sleep-count"
+env PATH="$dir:$PATH" BUZZ_KEYS_DIR="$dir" BUZZ_RELAY_URL="wss://relay.test" \
+    FAKE_CALL_LOG="$dir/calls" FAKE_SLEEP_COUNT="$dir/sleep-count" \
+    FAKE_CHANNELS_JSON="$dir/channels.json" FAKE_CASE=happy sh "$PROD" \
+    >"$dir/out" 2>&1 || rc=$?
+if [ "${rc:-}" = 99 ]; then pass "wss: reconciler terminated after 2 loops (sleep exit 99)"; else fail "wss: expected exit 99, got ${rc:-}"; fi
+if grep -qF -- "curl -sf -H Accept: application/nostr+json https://relay.test/" "$dir/calls"; then
+    pass "wss: readiness probe uses https"
+else
+    fail "wss: readiness probe did not use https: $(grep -F -- 'curl ' "$dir/calls" || true)"
+fi
+if [ "$(cnt "$dir/calls" "--relay https://relay.test --private-key")" = "$(cnt "$dir/calls" "buzz ")" ]; then
+    pass "wss: every buzz call carries the https relay prefix"
+else
+    fail "wss: $(cnt "$dir/calls" "--relay https://relay.test --private-key") of $(cnt "$dir/calls" "buzz ") buzz calls carry the https relay prefix"
+fi
+if grep -qF -- "channels add-member --channel cid-1" "$dir/calls"; then pass "wss: joined visible channel cid-1"; else fail "wss: did not join visible channel cid-1"; fi
 rm -rf "$dir"
 clear_registration_markers
 

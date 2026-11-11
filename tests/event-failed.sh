@@ -101,14 +101,12 @@ pass "paperclip.issue.failed emitted for the run without the ticket row changing
 CTL="$(docker compose exec -T event-bridge python3 -c "from opc_bridge import config, store; print(store.Store(config.load().db_path).get_meta('control_channel') or '')")"
 if [ -n "$CTL" ]; then
     docker compose exec -T frontdoor sh -c '
-R=$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\\?://##")
-BUZZ_AUTH_TAG= buzz --relay "http://$R" --private-key "$(cat /keys/paperclip.nsec)" messages get --channel '"$CTL"' --limit 100 \
+BUZZ_AUTH_TAG= buzz --relay "$BUZZ_RELAY_URL" --private-key "$(cat /keys/paperclip.nsec)" messages get --channel '"$CTL"' --limit 100 \
   | jq -r ".[] | select(.content|contains(\"'"$RUN_ID"'\")) | .id" ' 2>/dev/null \
     | while read -r id; do
         [ -n "$id" ] || continue
         docker compose exec -T frontdoor sh -c '
-R=$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\\?://##")
-BUZZ_AUTH_TAG= buzz --relay "http://$R" --private-key "$(cat /keys/paperclip.nsec)" messages delete --event '"$id"'' >/dev/null 2>&1 || true
+BUZZ_AUTH_TAG= buzz --relay "$BUZZ_RELAY_URL" --private-key "$(cat /keys/paperclip.nsec)" messages delete --event '"$id"'' >/dev/null 2>&1 || true
       done
 fi
 pass "test notification cleaned up"

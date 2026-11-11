@@ -22,9 +22,10 @@ timeout 120 bash -c 'until docker compose ps event-bridge --format "{{.Status}}"
 pass() { echo "PASS  $*"; }
 note() { echo "SKIP  $*"; }
 
+# The configured URL verbatim (ws/wss included): the relay resolves the
+# community from this host, and rewriting wss:// to http:// targets port 80.
 RELAY="$(docker compose exec -T frontdoor printenv BUZZ_RELAY_URL | tr -d '[:space:]')"
-RELAY_HTTP="http://$(printf '%s' "$RELAY" | sed 's#^wss\?://##')"
-CHANNEL="$(docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" channels list" \
+CHANNEL="$(docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY --private-key \"\$(cat /keys/paperclip.nsec)\" channels list" \
     | jq -r '[.[] | select(.name == "prototypes")][0].channel_id // .[0].channel_id')"
 [ -n "$CHANNEL" ] || fail "no channel available to receive the notice"
 
@@ -143,20 +144,18 @@ BEFORE="$(docker compose logs frontdoor 2>&1 | grep -c "opc event gate — dropp
 
 FORGE_EVENT="$(docker compose exec -T frontdoor sh -c '
 set -eu
-R=$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")
 OUT=$(buzz-admin generate-key)
 SEC=$(printf "%s" "$OUT" | sed -n "s/^Secret key:  //p")
 printf "%s" "$SEC" > /tmp/opc-forge.nsec
-BUZZ_AUTH_TAG= buzz --relay "http://$R" --private-key "$SEC" messages send \
+BUZZ_AUTH_TAG= buzz --relay "$BUZZ_RELAY_URL" --private-key "$SEC" messages send \
     --channel '"$CHANNEL"' --content "forged opc event (test probe)" --tag opc-event=evt_forged
 ' | jq -r '.event_id')"
 [ -n "$FORGE_EVENT" ] || fail "could not publish the forgery probe"
 
 delete_forge() {
     docker compose exec -T frontdoor sh -c '
-R=$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")
 [ -f /tmp/opc-forge.nsec ] || exit 0
-BUZZ_AUTH_TAG= buzz --relay "http://$R" --private-key "$(cat /tmp/opc-forge.nsec)" \
+BUZZ_AUTH_TAG= buzz --relay "$BUZZ_RELAY_URL" --private-key "$(cat /tmp/opc-forge.nsec)" \
     messages delete --event '"$FORGE_EVENT"' >/dev/null 2>&1 || echo "WARN  forgery probe not deleted"
 rm -f /tmp/opc-forge.nsec
 ' >/dev/null 2>&1 || true

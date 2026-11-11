@@ -106,8 +106,13 @@ except urllib.error.HTTPError as e:
 echo "── internal links ──"
 # frontdoor (buzz-acp sidecar) must reach the relay with the agent's key —
 # same invocation the register loop uses; exit 0 = relay reachable + agent OK.
+#
+# Pass the configured URL verbatim: the CLI speaks ws/wss and the relay binds
+# its community to that host. Re-deriving an `http://` base here was how this
+# gate went green while meaning nothing — with a wss:// tailnet URL the rewrite
+# lands on port 80 and the check fails for a reason unrelated to the stack.
 check "frontdoor → buzz relay (channels list)" \
-  docker compose exec -T frontdoor sh -c 'buzz --relay "http://$(printf "%s" "$BUZZ_RELAY_URL" | sed "s#^wss\?://##")" --private-key "$(cat /keys/agent.nsec)" channels list'
+  docker compose exec -T frontdoor sh -c 'buzz --relay "$BUZZ_RELAY_URL" --private-key "$(cat /keys/agent.nsec)" channels list'
 
 echo
 echo "result: ${PASS} pass, ${FAIL} fail"
