@@ -97,6 +97,17 @@ check_identical "paperclip CLI (buzz/hermes)" \
   patches/buzz/opc-paperclip \
   patches/hermes/opc-paperclip
 
+# The model/base-url/omp-provider seeding. Same reasoning as the nix seed two
+# blocks up, with a sharper failure: the frontdoor and the gateway each own a
+# hermes home, and if their copies disagree one of them silently keeps an old
+# model id or endpoint that the other has already moved.
+check_identical "model seeding (buzz/hermes)" \
+  patches/buzz/opc-model-seed.sh \
+  patches/hermes/opc-model-seed.sh
+check_identical "model seeding (hermes/paperclip)" \
+  patches/hermes/opc-model-seed.sh \
+  patches/paperclip/opc-model-seed.sh
+
 # ── hermes config schema version ────────────────────────────────────────
 # Both hermes entrypoints seed a config.yaml stamped with OPC_CONFIG_VERSION.
 # Hermes migrates that file IN PLACE on every container boot (its s6

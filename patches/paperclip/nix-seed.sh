@@ -49,26 +49,9 @@ opc_nix_seed() {
     export PATH="$PROFILE/bin:$AGENTS_PROFILE/bin:$OPC_BIN:/nix/var/nix/profiles/default/bin:$PATH"
     export NIX_PROFILES="/nix/var/nix/profiles/default /nix/var/nix/profiles/per-user/root $AGENTS_PROFILE"
 
-    # omp default model (used when omp runs inside this container).
-    _omp_cfg="${OMP_CONFIG_DIR:-${HOME:-/root}/.omp}/agent/config.yml"
-    if [ ! -f "$_omp_cfg" ]; then
-        mkdir -p "$(dirname "$_omp_cfg")"
-        cat > "$_omp_cfg" <<YAML
-modelRoles:
-  default: opencode-go/${OPENAI_MODEL:-deepseek-v4.1-flash}
-startup:
-  quiet: true
-YAML
-        echo "[nix] seeded omp config: model=opencode-go/${OPENAI_MODEL:-deepseek-v4.1-flash}"
-    fi
-
-    # Refresh a model left at a previous stack default in an existing omp
-    # config (seeded by an older image) — exact-value match only, never user
-    # edits.
-    if [ -f "$_omp_cfg" ]; then
-        sed -i \
-            -e "s|default: opencode-go/deepseek-v4-pro$|default: opencode-go/${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
-            -e "s|default: opencode-go/deepseek-v4-flash$|default: opencode-go/${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
-            "$_omp_cfg" 2>/dev/null || true
-    fi
+    # omp model, for every omp invocation inside this container. opc-model-seed
+    # writes a custom provider from OPENAI_BASE_URL/OPENAI_MODEL instead of
+    # pinning a built-in provider slug, so omp follows .env like hermes does.
+    command -v opc_omp_seed >/dev/null 2>&1 || . /usr/local/bin/opc-model-seed.sh
+    opc_omp_seed
 }

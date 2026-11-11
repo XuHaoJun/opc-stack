@@ -232,11 +232,14 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}
-      # omp's built-in `opencode-go` provider reads its credential from
-      # OPENCODE_API_KEY specifically (not from OPENAI_API_KEY); every omp
-      # invocation in this container resolves the seeded
-      # `opencode-go/${OPENAI_MODEL}` model through it. Derived from the one
-      # stack key — see the paperclip service for the measurement.
+      # Optional model metadata for the seeded omp provider (see
+      # patches/*/opc-model-seed.sh). Left empty, omp uses its own defaults.
+      OMP_MODEL_CONTEXT_WINDOW: ${OMP_MODEL_CONTEXT_WINDOW:-}
+      OMP_MODEL_MAX_TOKENS: ${OMP_MODEL_MAX_TOKENS:-}
+      # omp no longer routes through a built-in provider slug: the seeded
+      # models.yml declares provider `opc` = OPENAI_BASE_URL with
+      # apiKey OPENAI_API_KEY, so any OpenAI-compatible endpoint works. This
+      # derivation stays for ad-hoc `omp --model opencode-go/...` runs.
       OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "${BUZZ_PORT:-3000}:3000"
@@ -363,8 +366,11 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-      OPENAI_MODEL: ${BUZZ_AGENT_MODEL:-deepseek-v4.1-flash}
-      # Agent model: defaults to the stack model (deepseek-v4.1-flash).
+      OPENAI_MODEL: ${BUZZ_AGENT_MODEL:-${OPENAI_MODEL:-deepseek-v4.1-flash}}
+      OMP_MODEL_CONTEXT_WINDOW: ${OMP_MODEL_CONTEXT_WINDOW:-}
+      OMP_MODEL_MAX_TOKENS: ${OMP_MODEL_MAX_TOKENS:-}
+      # Agent model: defaults to the stack model (BUZZ_AGENT_MODEL if set,
+      # otherwise OPENAI_MODEL), so one .env edit moves the whole stack.
       # Measured alternatives against hermes's long system prompt on the
       # OpenCode Go endpoint: the earlier deepseek-v4-flash (4.0) degenerated
       # (garbage output); gpt-5.6-luna is cheaper but intermittently returns
@@ -512,10 +518,11 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}
-      # omp's built-in `opencode-go` provider reads its credential from
-      # OPENCODE_API_KEY specifically (not from OPENAI_API_KEY); agent
-      # terminals here run omp with the config seeded into /root/.omp.
-      # Derived from the one stack key — see the paperclip service.
+      OMP_MODEL_CONTEXT_WINDOW: ${OMP_MODEL_CONTEXT_WINDOW:-}
+      OMP_MODEL_MAX_TOKENS: ${OMP_MODEL_MAX_TOKENS:-}
+      # Agent terminals here run omp against the provider seeded from
+      # OPENAI_BASE_URL (see patches/hermes/opc-model-seed.sh). This
+      # derivation stays for ad-hoc `omp --model opencode-go/...` runs.
       OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -626,10 +633,11 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}
-      # omp's built-in `opencode-go` provider reads its credential from
-      # OPENCODE_API_KEY specifically (not from OPENAI_API_KEY); the /chat
-      # PTY's terminal runs omp with the config seeded into /root/.omp.
-      # Derived from the one stack key — see the paperclip service.
+      OMP_MODEL_CONTEXT_WINDOW: ${OMP_MODEL_CONTEXT_WINDOW:-}
+      OMP_MODEL_MAX_TOKENS: ${OMP_MODEL_MAX_TOKENS:-}
+      # The /chat PTY's terminal runs omp against the provider seeded from
+      # OPENAI_BASE_URL (see patches/hermes/opc-model-seed.sh). This
+      # derivation stays for ad-hoc `omp --model opencode-go/...` runs.
       OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -719,18 +727,17 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}
-      # omp's built-in `opencode-go` provider reads its key from
-      # OPENCODE_API_KEY specifically — NOT from OPENAI_API_KEY — and every
-      # omp invocation in this container resolves the seeded
-      # `opencode-go/${OPENAI_MODEL}` model through that provider: the
-      # agents' `omp acp --yolo`, and any `omp` an agent runs from its
-      # terminal. Without it the first model call dies with
-      # "No API key found for opencode-go" (measured 2026-09-11 against both
-      # deepseek-v4-flash and deepseek-v4.1-flash, so it is not model
-      # specific — the 2026-08-20 OPENCODE_* -> OPENAI_* rename dropped it on
-      # the assumption that the provider slug needed no env var; that
-      # assumption is what this line corrects). Derived from the one stack
-      # key; OPENAI_API_KEY remains the source of truth.
+      OMP_MODEL_CONTEXT_WINDOW: ${OMP_MODEL_CONTEXT_WINDOW:-}
+      OMP_MODEL_MAX_TOKENS: ${OMP_MODEL_MAX_TOKENS:-}
+      # Every omp invocation in this container (the agents' `omp acp --yolo`
+      # and any `omp` an agent runs from its terminal) uses the provider
+      # seeded from OPENAI_BASE_URL/OPENAI_MODEL by opc-model-seed.sh —
+      # provider `opc`, apiKey read from OPENAI_API_KEY. Nothing here is tied
+      # to a particular vendor. This derivation stays for ad-hoc
+      # `omp --model opencode-go/...` runs: omp's built-in opencode-go
+      # provider reads OPENCODE_API_KEY specifically, and without it the
+      # first model call dies with "No API key found for opencode-go"
+      # (measured 2026-09-11).
       OPENCODE_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}

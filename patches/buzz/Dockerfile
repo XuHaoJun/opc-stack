@@ -193,6 +193,7 @@ COPY --from=stripped-binaries /build/target/release/buzz /usr/local/bin/buzz
 COPY --from=stripped-binaries /build/target/release/examples/opc_nip_oa_sign /usr/local/bin/opc-nip-oa-sign
 # OPC tooling: nix seed helpers + entrypoints.
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-model-seed.sh /usr/local/bin/opc-model-seed.sh
 COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/buzz-entrypoint.sh /usr/local/bin/buzz-entrypoint.sh
@@ -206,7 +207,8 @@ COPY opc/generate-keys.sh /usr/local/bin/opc-generate-keys.sh
 COPY opc/add-member.sh /usr/local/bin/opc-add-member.sh
 # Deterministic Paperclip API/workspace client shared by relay and front door.
 COPY opc/opc-paperclip /usr/local/bin/opc-paperclip
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-model-seed.sh \
+             /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh \
              /usr/local/bin/buzz-entrypoint.sh \
              /usr/local/bin/frontdoor-entrypoint.sh /usr/local/bin/opc-generate-keys.sh \

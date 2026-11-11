@@ -521,6 +521,7 @@ VOLUME [ "/opt/data" ]
 
 # ---------- OPC stack overlay: nix tool persistence + kanban-off seed ----------
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-model-seed.sh /usr/local/bin/opc-model-seed.sh
 COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/hermes-entrypoint.sh /usr/local/bin/hermes-entrypoint.sh
@@ -530,7 +531,7 @@ COPY opc/opc-env-value.sh /usr/local/bin/opc-env-value.sh
 COPY opc/opc-default-env.py /usr/local/lib/opc-default-env.py
 # Deterministic Paperclip API/workspace client.
 COPY opc/opc-paperclip /usr/local/bin/opc-paperclip
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh /usr/local/bin/opc-gh-seed.sh /usr/local/bin/hermes-entrypoint.sh /usr/local/bin/opc-env-value.sh /usr/local/bin/opc-paperclip
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-model-seed.sh /usr/local/bin/opc-mise-seed.sh /usr/local/bin/opc-gh-seed.sh /usr/local/bin/hermes-entrypoint.sh /usr/local/bin/opc-env-value.sh /usr/local/bin/opc-paperclip
 
 # memory_tencentdb MemoryProvider (TencentDB Knowledge Plane, PRD v10.1) —
 # seeded into $HERMES_HOME/plugins/ at boot by hermes-entrypoint.sh.

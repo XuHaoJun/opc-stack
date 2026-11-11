@@ -173,14 +173,14 @@ fi
 # so assert them instead of assuming. A gate that hardcoded a port, or that
 # read $REPO_ROOT/.env, would silently probe the LIVE stack and report the
 # rehearsal green.
-GATES="tests/audit-bootstrap.sh tests/memory-ingress.sh tests/opc-paperclip.sh tests/event-bridge.sh tests/buzz-event-gate.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh tests/memory-scope.sh tests/event-identity.sh tests/event-loop.sh tests/autonomy.sh tests/admission.sh tests/force-stop.sh tests/event-failed.sh"
+GATES="tests/model-seed.sh tests/audit-bootstrap.sh tests/memory-ingress.sh tests/opc-paperclip.sh tests/event-bridge.sh tests/buzz-event-gate.sh tests/connectivity.sh tests/migrations.sh tests/paperclip-workspace-routing.sh tests/scientist.sh tests/podenv.sh tests/devenv-s3.sh tests/devenv-rabbitmq.sh tests/memory-scope.sh tests/event-identity.sh tests/event-loop.sh tests/autonomy.sh tests/admission.sh tests/force-stop.sh tests/event-failed.sh"
 step "preflight: gates are relocatable"
 for g in $GATES; do
     [ -x "$REPO_ROOT/$g" ] || die "$g missing or not executable"
     grep -q 'cd "$(dirname "$0")/\.\."' "$REPO_ROOT/$g" || \
         die "$g does not cd to its own repo root — it would not follow the clone"
     # Two kinds of gate need no env file of their own:
-    #  - pure file/offline checks (audit-bootstrap, memory-ingress,
+    #  - pure file/offline checks (model-seed, audit-bootstrap, memory-ingress,
     #    opc-paperclip, event-bridge, buzz-event-gate read no .env);
     #  - gates that address the stack only through `docker compose exec`
     #    (event-identity, event-loop, autonomy, admission, force-stop,
@@ -189,7 +189,8 @@ for g in $GATES; do
     #    clone without an explicit load. Everything else curls the host and must
     #    resolve ports through opc_load_env ./.env.
     case "$g" in
-        tests/audit-bootstrap.sh | tests/memory-ingress.sh | tests/opc-paperclip.sh | \
+        tests/model-seed.sh | tests/audit-bootstrap.sh | tests/memory-ingress.sh | \
+        tests/opc-paperclip.sh | \
         tests/event-bridge.sh | tests/buzz-event-gate.sh | \
         tests/event-identity.sh | tests/event-loop.sh | tests/autonomy.sh | \
         tests/admission.sh | tests/force-stop.sh | tests/event-failed.sh) ;;

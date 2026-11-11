@@ -119,6 +119,10 @@ docker compose logs -f <svc>  # 看日誌
 
 改動一律改 `patches/<proj>/`,不直接改 `upstream/`(git submodule,乾淨 checkout)。
 
+## 換 LLM endpoint / 模型
+
+`.env` 的三個值是全棧唯一 source of truth：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`（model id 用 endpoint 自己的寫法，例如 `deepseek-v4.1-flash` 或 `deepseek/deepseek-v4.1-flash`）。改完 `docker compose up -d` 即可，不需要 rebuild、不需要手改任何 volume 內的 `config.yaml`／`models.yml`；在 dashboard 或 `/model` 選過的模型會保留，直到 `.env` 再次指名它。`BUZZ_AGENT_MODEL` 留空 = 跟 `OPENAI_MODEL`。細節（誰讀哪個檔、omp 的自訂 provider、context window 的來源）：`SETUP.md` → 「LLM provider」。
+
 ## 使用 tailnet domain（手機 app）
 
 Buzz 手機 app 的加入流程要求 TLS（`wss://` / `https://`），並拒絕 `100.64.0.0/10` 的 IP 字面值，所以只給 tailnet IP 會連不上。`tailscale serve` 可在 `https://<machine>.<tailnet>.ts.net` 終止 TLS 並反代到 relay；此時有四個要點：

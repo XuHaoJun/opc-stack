@@ -258,32 +258,69 @@ docker compose exec -T buzz-db psql -U buzz -d buzz -v ON_ERROR_STOP=1 \
   -c "SELECT indisvalid, indisready, indislive, pg_get_indexdef(indexrelid) FROM pg_index WHERE indexrelid = 'public.idx_thread_metadata_window'::regclass;"
 ```
 
-## LLM provider: OpenCode Go (default)
+## LLM provider: any OpenAI-compatible endpoint
 
-The stack ships pre-configured for **OpenCode Go** (`https://opencode.ai/zen/go/v1`).
-The shared gateway/dashboard/Paperclip/TencentDB default model is
-`deepseek-v4.1-flash`, and the frontdoor relay defaults to the same model.
-Set
-`OPENAI_API_KEY` in `.env`; set `OPENAI_BASE_URL` for the OpenAI-compatible
-endpoint, `OPENAI_MODEL` for the shared services, and `BUZZ_AGENT_MODEL` for
-the frontdoor relay. For Hermes, the custom provider runtime reads its key/base
-URL from `OPENAI_API_KEY` / `OPENAI_BASE_URL`, while model selection is
-persisted in editable `config.yaml` and that file is the model source of truth:
+`OPENAI_API_KEY`, `OPENAI_BASE_URL` and `OPENAI_MODEL` in `.env` are the single
+source of truth for the whole stack — front door, hermes gateway (and every
+Paperclip agent on the `hermes_gateway` adapter), omp agents, and TencentDB
+memory. `OPENAI_MODEL` is the model id **as the endpoint names it**; there is
+no provider name to configure and no model list to extend. Switching:
+
+```bash
+# .env
+OPENAI_BASE_URL=https://api.commandcode.ai/provider/v1
+OPENAI_MODEL=deepseek/deepseek-v4.1-flash
+docker compose up -d          # entrypoints reconcile, no rebuild
+```
+
+Shipped defaults are OpenCode Go (`https://opencode.ai/zen/go/v1`) with
+`deepseek-v4.1-flash`. `BUZZ_AGENT_MODEL` (front door) is empty by default and
+follows `OPENAI_MODEL`; set it only to run the front door on a different model.
 
 | Project | Where the model/key is configured | UI-editable? |
 |---|---|---|
-| Hermes gateway | `config.yaml` seeded to `provider: custom`, `base_url: https://opencode.ai/zen/go/v1`, `default: deepseek-v4.1-flash`; custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — dashboard http://localhost:9119 → config/model pages** |
-| Frontdoor relay (Buzz ACP) | `config.yaml` model seeded from `BUZZ_AGENT_MODEL` (`deepseek-v4.1-flash` by default); custom-provider runtime key/base URL via `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **Yes — shared Hermes dashboard config/model pages** |
-| Paperclip | Agents use the Hermes Gateway adapter → shared model default comes from `OPENAI_MODEL` | Agent adapter fields in the Paperclip UI |
-| TencentDB memory | `TDAI_LLM_*` / `LLM_*` / proxy upstream — shared defaults come from `OPENAI_MODEL` and `OPENAI_BASE_URL` | Panel has ApiKeys + knowledge LLM-binding pages; core extraction follows env |
-| Buzz | None needed | — |
+| Hermes gateway | `config.yaml` (`provider: custom`, `base_url`, `default`), seeded and reconciled from `OPENAI_*` | **Yes — dashboard http://localhost:9119**, or `/model` in a chat |
+| Frontdoor relay (Buzz ACP) | `config.yaml` in the frontdoor home, same reconcile, model = `BUZZ_AGENT_MODEL` or `OPENAI_MODEL` | **Yes — shared Hermes dashboard config/model pages** |
+| omp (front door terminal + Paperclip agents) | `models.yml`/`config.yml` in the omp agent dir: provider `opc` = `OPENAI_BASE_URL`, `apiKey` read from `OPENAI_API_KEY`, `modelRoles.default: opc/$OPENAI_MODEL` | `omp config set` / edit `models.yml` |
+| Paperclip (hermes_gateway agents) | inherits the hermes gateway model | Agent adapter fields in the Paperclip UI |
+| TencentDB memory | `TDAI_LLM_*` / `LLM_*` / proxy upstream, defaulting to `OPENAI_MODEL` / `OPENAI_BASE_URL` | Panel has ApiKeys + knowledge LLM-binding pages |
+| Buzz relay | None needed | — |
 
-`OPENAI_MODEL` seeds the shared Hermes gateway config; `BUZZ_AGENT_MODEL` seeds
-the frontdoor config. Existing editable configs may need manual adjustment.
-If you prefer another provider, set `OPENAI_BASE_URL` and the relevant model
-variable in `.env` (`OPENAI_MODEL` for shared services, `BUZZ_AGENT_MODEL` for
-the frontdoor), or change the provider/model in the Hermes dashboard. Any
-OpenAI-compatible endpoint works for every project above.
+### Model metadata: context window / max tokens
+
+Nothing is hardcoded and nothing is scraped at boot. The seeded omp provider
+entry carries only `baseUrl`, `apiKey`, `api`, `id` and `name`; **context
+window, output cap, thinking levels, image support and pricing are resolved by
+omp from its bundled catalog row for the same model id** (merge order step 4 in
+omp's `docs/models.md`: a custom `models` entry that omits metadata inherits the
+bundled reference matched by id). Measured on the Command Code endpoint:
+
+```bash
+docker compose exec -T -u root -e HOME=/opt/data frontdoor \
+  sh -lc 'cd /tmp && omp models --json' \
+  | python3 -c 'import json,sys; [print(r["selector"], r["contextWindow"], r["maxTokens"]) for r in json.load(sys.stdin)["models"] if r["provider"] == "opc"]'
+# -> opc/deepseek/deepseek-v4.1-flash 1048576 943718
+```
+
+`GET $OPENAI_BASE_URL/models` does report `context_length` (1,000,000 for that
+model), but it is deliberately not consumed: that would make container boot
+depend on the endpoint being reachable and parseable, and the catalog row is
+richer (output cap, effort tiers, price) than that field.
+
+Set `OMP_MODEL_CONTEXT_WINDOW` / `OMP_MODEL_MAX_TOKENS` in `.env` only when the
+model id is **not** in omp's catalog (self-hosted or private names) — then the
+entrypoint writes them into `models.yml` and omp uses them instead of its local
+fallback. They tune omp's local budget; they do not change the request sent to
+the provider.
+
+Reconciliation rule (`patches/*/opc-model-seed.sh`, one file, three copies
+checked byte-identical by `scripts/prepare.sh`): the entrypoint records the
+exact value it last wrote and moves a field only while it still holds that
+value. A model chosen in the dashboard or with `/model` therefore survives
+restarts, and `models.yml` edited by hand is left alone (with a warning).
+Volumes from before that record existed adopt a known historical default once,
+so an existing install follows `.env` too — that is why the old
+"existing editable configs may need manual adjustment" advice is gone.
 
 | Project | Repo |
 |---|---|

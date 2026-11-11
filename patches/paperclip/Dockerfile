@@ -283,6 +283,7 @@ EXPOSE 3100
 
 # ---------- OPC stack overlay: nix tool persistence ----------
 COPY opc/nix-seed.sh /usr/local/bin/opc-nix-seed.sh
+COPY opc/opc-model-seed.sh /usr/local/bin/opc-model-seed.sh
 COPY opc/opc-mise-seed.sh /usr/local/bin/opc-mise-seed.sh
 COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/opc-claude-seed.sh /usr/local/bin/opc-claude-seed.sh
@@ -332,7 +333,8 @@ COPY opc/skills/ /opt/opc-skills/
 COPY opc/agent-prompts/ /opt/opc-agent-prompts/
 COPY opc/opc-paperclip-bootstrap.sh /usr/local/bin/opc-paperclip-bootstrap.sh
 COPY opc/nix-entrypoint.sh /usr/local/bin/nix-entrypoint.sh
-RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-mise-seed.sh \
+RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-model-seed.sh \
+             /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh /usr/local/bin/opc-claude-seed.sh \
              /usr/local/bin/opc-devenv-seed.sh /usr/local/bin/opc-podenv-seed.sh \
              /usr/local/bin/opc-prototype-restore.sh \

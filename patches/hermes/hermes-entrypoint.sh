@@ -26,6 +26,10 @@ set -eu
 OPC_CONFIG_VERSION=52
 OPC_CONFIG_VERSION_LEGACY=34
 
+# Model/base-url/omp-provider seeding, shared with the frontdoor image so the
+# two cannot disagree about what "the stack model" means.
+. /usr/local/bin/opc-model-seed.sh
+
 . /usr/local/bin/opc-nix-seed.sh
 opc_nix_seed
 
@@ -165,15 +169,12 @@ YAML
     echo "[hermes] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENAI_MODEL:-deepseek-v4.1-flash})"
 fi
 
-# Refresh seeded model lines on existing volumes that still carry a previous
-# stack default (config.yaml is dashboard-editable afterwards; only the exact
-# legacy values are rewritten, not user edits).
+# Follow .env on the model lines we seeded (see opc-model-seed.sh: a field is
+# moved only while it still holds the value OPC last wrote, so a model picked
+# in the dashboard or with /model is never reverted).
+opc_model_follow "$HH/config.yaml" default "${OPENAI_MODEL:-deepseek-v4.1-flash}" "$OPC_STACK_MODEL_DEFAULTS"
+opc_model_follow "$HH/config.yaml" base_url "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}" "$OPC_STACK_BASE_URL_DEFAULTS"
 if [ -f "$HH/config.yaml" ]; then
-    sed -i \
-        -e "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
-        -e "s|^  default: deepseek-v4-flash$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
-        -e "s|^  base_url: https://opencode\\.ai/zen/go/v1$|  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}|" \
-        "$HH/config.yaml"
     # Existing editable configs may predate the explicit custom-provider key
     # route. Insert only when the model block has no api_key; operator-set
     # credentials are left untouched.
@@ -448,14 +449,10 @@ YAML
         echo "[hermes] seeded $_ph/config.yaml"
     fi
 
-    # Same refresh discipline as the default home above: rewrite only the
-    # exact previous stack defaults, never operator/dashboard edits.
-    if [ -f "$_ph/config.yaml" ]; then
-        sed -i \
-            -e "s|^  default: deepseek-v4-pro$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
-            -e "s|^  default: deepseek-v4-flash$|  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}|" \
-            "$_ph/config.yaml"
-    fi
+    # Same discipline as the default home above: follow .env while the field
+    # still holds the value OPC wrote, never over operator/dashboard edits.
+    opc_model_follow "$_ph/config.yaml" default "${OPENAI_MODEL:-deepseek-v4.1-flash}" "$OPC_STACK_MODEL_DEFAULTS"
+    opc_model_follow "$_ph/config.yaml" base_url "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}" "$OPC_STACK_BASE_URL_DEFAULTS"
 
     # Converge platforms.api_server.enabled: false on EVERY boot, not just at
     # creation. gateway/config.py's api_server loader force-enables the
@@ -547,11 +544,11 @@ PYEOF
     # confirmed against the running gateway: dropping the line does NOT fall
     # back to the profile's secret scope, it breaks the profile outright.
     # runtime_provider.py:1325-1335 gates the OPENAI_API_KEY candidate on an
-    # openai.com / openai.azure.com HOST, and this base_url is opencode.ai —
-    # so a bare `custom` provider with no config api_key ends at the literal
-    # "no-key-required" (:1360) and every completion 401s even with a
-    # perfectly good key in the profile's .env. Same reason 1881e40 added it
-    # to the default profile.
+    # openai.com / openai.azure.com HOST, and OPC's base_url is never one of
+    # those (opencode.ai, commandcode, …) — so a bare `custom` provider with no
+    # config api_key ends at the literal "no-key-required" (:1360) and every
+    # completion 401s even with a perfectly good key in the profile's .env.
+    # Same reason 1881e40 added it to the default profile.
     #
     # What is NOT established: the mechanism behind ${...} resolution inside
     # a profile's config.yaml. Measured (2026-08-20, across a container
