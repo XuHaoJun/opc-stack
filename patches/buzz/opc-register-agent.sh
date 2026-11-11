@@ -17,7 +17,21 @@ set -eu
 
 BUZZ_KEYS_DIR="${BUZZ_KEYS_DIR:-/keys}"
 RELAY="${BUZZ_RELAY_URL:-ws://localhost:3000}"
-RELAY_API="http://$(printf '%s' "$RELAY" | sed 's#^wss\?://##')"
+# Keep the transport the relay URL implies. The old derivation stripped the
+# scheme and hardcoded `http://`, which is only correct for a `ws://host:3000`
+# relay: once BUZZ_RELAY_URL became `wss://<tailnet-domain>` (TLS terminated by
+# `tailscale serve` on 443), that produced `http://<domain>` — port 80, where
+# nothing listens. The probe below then failed and this script exited for good,
+# so every channel created afterwards had no agent. Never rebuild this URL by
+# hand: the relay resolves the community from the Host header, so an internal
+# name (`http://buzz:3000`) is not a substitute either.
+case "$RELAY" in
+    wss://*) RELAY_API="https://${RELAY#wss://}" ;;
+    ws://*)  RELAY_API="http://${RELAY#ws://}" ;;
+    http://*|https://*) RELAY_API="$RELAY" ;;
+    *)       RELAY_API="http://$RELAY" ;;
+esac
+RELAY_API="${RELAY_API%/}"
 RELAY_NSEC="$(cat "$BUZZ_KEYS_DIR/relay.nsec")"
 
 # The ambient BUZZ_AUTH_TAG (owner attestation) is cryptographically bound to
@@ -51,20 +65,25 @@ paperclip|paperclip|Paperclip work events and notifications|profile"
 log() { echo "[register-agent] $*"; }
 
 # 1) Wait for the relay (community ensured) before any API call.
+#
+# This waits forever on purpose. The script runs unsupervised (`&` from the
+# entrypoint), so exiting means channel joins stay dead until the container is
+# recreated — and a boot-time blip is normal here (older frontdoor containers
+# started before the relay was routable). A bounded wait turns one transient
+# into a permanent loss, which is exactly how the wss:// regression hid.
 ready=0
-i=1
-while [ "$i" -le 60 ]; do
+i=0
+while [ "$ready" -ne 1 ]; do
     if curl -sf -H 'Accept: application/nostr+json' "$RELAY_API/" >/dev/null 2>&1; then
         ready=1
         break
     fi
-    sleep 5
     i=$((i + 1))
+    if [ $((i % 20)) -eq 0 ]; then
+        log "relay not reachable yet ($RELAY_API) — still retrying"
+    fi
+    sleep 5
 done
-if [ "$ready" -ne 1 ]; then
-    log "relay not reachable after 300s — giving up"
-    exit 1
-fi
 log "relay ready: $RELAY_API"
 
 # 2) Attested discovery surfaces. The buzz CLI injects whatever auth tag it
