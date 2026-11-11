@@ -270,8 +270,8 @@ memory:
 model:
   provider: custom
   api_key: \${OPENAI_API_KEY}
-  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}
+  base_url: $(opc_yaml_quote "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}")
+  default: $(opc_yaml_quote "${OPENAI_MODEL:-deepseek-v4.1-flash}")
 YAML
     echo "[frontdoor] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENAI_MODEL:-deepseek-v4.1-flash})"
 fi

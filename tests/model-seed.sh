@@ -1,128 +1,174 @@
 #!/bin/sh
-# Pin the model/base-url/omp-provider reconcile in patches/*/opc-model-seed.sh.
-#
-# Offline: the library is sourced in a temp dir and pointed at throwaway
-# config files. Nothing touches the real checkout, images, containers or
-# volumes. `scripts/prepare.sh` checks that the three copies of the library are
-# byte-identical; this is the behavioural half.
-#
-# Every case here is a failure that actually happened or would silently
-# survive a green stack:
-#   * switching OPENAI_BASE_URL left the volume on the old model id, so the new
-#     endpoint answered HTTP 400 `Model "<id>" is not supported on this
-#     endpoint` while .env, the container env and the seed template all looked
-#     right;
-#   * omp was seeded as `opencode-go/$OPENAI_MODEL` and read OPENCODE_API_KEY,
-#     so it never followed OPENAI_BASE_URL at all;
-#   * and both files are edited by hand / by the hermes dashboard, so the fix
-#     must not revert a human choice on the next boot.
+# Offline behavior checks; all files and processes belong to a throwaway home.
 set -eu
 cd "$(dirname "$0")/.."
+python3 - "$@" <<'PY'
+import fcntl
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+import unittest
 
-fx="$(mktemp -d)"
-trap 'rm -rf "$fx"' EXIT
+LIB = str(Path('patches/hermes/opc-model-seed.sh').resolve())
 
-fail() { echo "FAIL  $1" >&2; exit 1; }
-expect() { [ "$1" = "$2" ] || fail "$3: expected [$2], got [$1]"; }
 
-. patches/hermes/opc-model-seed.sh
+class ModelSeedTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.env = dict(os.environ, OMP_CONFIG_DIR=str(self.home / '.omp'),
+                        OPENAI_MODEL='deepseek/deepseek-v4.1-flash',
+                        OPENAI_BASE_URL='https://provider.invalid/v1',
+                        OMP_MODEL_CONTEXT_WINDOW='', OMP_MODEL_MAX_TOKENS='')
+        self.agent = self.home / '.omp/agent'
+        self.agent.mkdir(parents=True)
 
-hermes_home() { # <dir> <model> <base_url>
-    mkdir -p "$1"
-    cat >"$1/config.yaml" <<YAML
-_config_version: 52
-model:
-  provider: custom
-  api_key: \${OPENAI_API_KEY}
-  base_url: $3
-  default: $2
-YAML
-}
+    def run_seed(self, command='opc_omp_seed', **updates):
+        return subprocess.run(['sh', '-ceu', '. ' + shlex.quote(LIB) + '; ' + command],
+                              env=dict(self.env, **updates), text=True, capture_output=True,
+                              check=True)
 
-reconcile() { # <dir>
-    opc_model_follow "$1/config.yaml" default "${OPENAI_MODEL:-deepseek-v4.1-flash}" "$OPC_STACK_MODEL_DEFAULTS"
-    opc_model_follow "$1/config.yaml" base_url "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}" "$OPC_STACK_BASE_URL_DEFAULTS"
-}
+    def field(self, path, key):
+        return self.run_seed('opc_yaml_field ' + shlex.quote(str(path)) + ' ' + key).stdout.rstrip('\n')
 
-field() { opc_yaml_field "$1/config.yaml" "$2"; }
+    def test_legacy_model_and_endpoint_follow_then_preserve_operator_choice(self):
+        cfg = self.home / 'config.yaml'
+        cfg.write_text('model:\n  default: deepseek-v4.1-flash\n'
+                       '  base_url: https://opencode.ai/zen/go/v1\n')
+        command = ('opc_model_follow "$CFG" default "$OPENAI_MODEL" "$OPC_STACK_MODEL_DEFAULTS"; '
+                   'opc_model_follow "$CFG" base_url "$OPENAI_BASE_URL" "$OPC_STACK_BASE_URL_DEFAULTS"')
+        self.run_seed(command, CFG=str(cfg))
+        self.assertEqual(self.field(cfg, 'default'), 'deepseek/deepseek-v4.1-flash')
+        self.assertEqual(self.field(cfg, 'base_url'), 'https://provider.invalid/v1')
+        cfg.write_text('model:\n  default: operator-model\n'
+                       '  base_url: https://provider.invalid/v1\n')
+        self.run_seed(command, CFG=str(cfg), OPENAI_MODEL='another-model')
+        self.assertEqual(self.field(cfg, 'default'), 'operator-model')
+        self.run_seed(command, CFG=str(cfg), OPENAI_MODEL='operator-model')
+        self.run_seed(command, CFG=str(cfg), OPENAI_MODEL='reclaimed-model')
+        self.assertEqual(self.field(cfg, 'default'), 'reclaimed-model')
 
-# ── hermes: a pre-ledger volume follows a provider switch ──────────────────
-H="$fx/h1"
-hermes_home "$H" deepseek-v4.1-flash https://opencode.ai/zen/go/v1
-OPENAI_MODEL='deepseek/deepseek-v4.1-flash'
-OPENAI_BASE_URL='https://api.commandcode.ai/provider/v1'
-reconcile "$H"
-expect "$(field "$H" default)" "$OPENAI_MODEL" "stale seeded default must follow .env"
-expect "$(field "$H" base_url)" "$OPENAI_BASE_URL" "seeded base_url must follow .env"
+    def test_custom_provider_values_survive_yaml_serialization_and_next_boot(self):
+        # These are valid scalar data, not YAML tokens or escape sequences.
+        for model in ('@cf/meta/llama-3.1-8b-instruct', "operator's/model\\version"):
+            with self.subTest(model=model):
+                self.run_seed(OPENAI_MODEL=model, OMP_MODEL_CONTEXT_WINDOW='200000',
+                              OMP_MODEL_MAX_TOKENS='32000')
+                lines = (self.agent / 'models.yml').read_text().splitlines()
+                values = {}
+                for line in lines:
+                    key, sep, value = line.strip().removeprefix('- ').partition(': ')
+                    if sep and key in ('id', 'name', 'baseUrl', 'apiKey'):
+                        values[key] = json.loads(value)
+                self.assertEqual(values, {'id': model, 'name': model,
+                                         'baseUrl': 'https://provider.invalid/v1',
+                                         'apiKey': 'OPENAI_API_KEY'})
+                self.assertEqual(self.field(self.agent / 'config.yml', 'default'), 'opc/' + model)
+        self.run_seed(OPENAI_MODEL='following-model')
+        self.assertEqual(self.field(self.agent / 'config.yml', 'default'), 'opc/following-model')
 
-# The same switch again with a different model id — no list to maintain.
-OPENAI_MODEL='Qwen/Qwen3.8-Max'
-reconcile "$H"
-expect "$(field "$H" default)" "$OPENAI_MODEL" "any model id must pass through verbatim"
+    def test_legacy_omp_role_migrates_without_dropping_unrelated_settings(self):
+        cfg = self.agent / 'config.yml'
+        cfg.write_text('modelRoles:\n  default: opencode-go/deepseek-v4.1-flash\n'
+                       'startup:\n  quiet: false\n')
+        self.run_seed()
+        self.assertEqual(self.field(cfg, 'default'), 'opc/deepseek/deepseek-v4.1-flash')
+        self.assertIn('startup:\n  quiet: false\n', cfg.read_text())
+        self.run_seed(OPENAI_MODEL='replacement-model')
+        self.assertEqual(self.field(cfg, 'default'), 'opc/replacement-model')
 
-# A dashboard save can quote the value (hermes dumps YAML). It is still the
-# value we wrote, so the field must keep following .env.
-sed -i 's|^  default: .*|  default: "Qwen/Qwen3.8-Max"|' "$H/config.yaml"
-reconcile "$H"
-OPENAI_MODEL='moonshotai/Kimi-K2.7-Code'
-reconcile "$H"
-expect "$(field "$H" default)" "$OPENAI_MODEL" "a quoted value we wrote must still follow .env"
+    def test_operator_provider_files_are_never_shadowed_or_assigned_an_absent_provider(self):
+        for suffix in ('yml', 'yaml', 'json'):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                agent = Path(directory) / 'agent'
+                agent.mkdir()
+                path = agent / ('models.' + suffix)
+                original = '{"providers":{"operator":{"baseUrl":"https://operator.invalid/v1"}}}\n'
+                path.write_text(original)
+                self.run_seed(OMP_CONFIG_DIR=directory)
+                self.assertEqual(path.read_text(), original)
+                if suffix != 'yml':
+                    self.assertFalse((agent / 'models.yml').exists())
+                self.assertFalse((agent / 'config.yml').exists())
 
-# ── hermes: a model chosen by a human is not reverted ─────────────────────
-H="$fx/h2"
-hermes_home "$H" deepseek/deepseek-v4.1-flash "$OPENAI_BASE_URL"
-opc_seed_ledger_set "$H/.opc-model-seed" default deepseek/deepseek-v4.1-flash
-opc_yaml_set "$H/config.yaml" default claude-sonnet-5 # dashboard / /model
-OPENAI_MODEL='deepseek/deepseek-v4.1-flash'
-reconcile "$H"
-expect "$(field "$H" default)" claude-sonnet-5 "an operator-chosen model must survive boot"
+    def test_operator_yaml_role_config_is_not_shadowed(self):
+        cfg = self.agent / 'config.yaml'
+        original = '{"modelRoles":{"default":"operator/chosen"}}\n'
+        cfg.write_text(original)
+        self.run_seed()
+        self.assertEqual(cfg.read_text(), original)
+        self.assertFalse((self.agent / 'config.yml').exists())
 
-# …until .env names it again, at which point OPC owns the field again.
-OPENAI_MODEL='claude-sonnet-5'
-reconcile "$H"
-OPENAI_MODEL='moonshotai/Kimi-K3'
-reconcile "$H"
-expect "$(field "$H" default)" moonshotai/Kimi-K3 "field returns to OPC control once .env matches it"
+    def test_yaml_specific_escapes_preserve_operator_choice_and_allow_handback(self):
+        cfg = self.home / 'config.yaml'
+        original = 'model:\n  default: "\\x40cf/meta/operator"\n'
+        cfg.write_text(original)
+        command = 'opc_model_follow "$CFG" default "$OPENAI_MODEL" "$OPC_STACK_MODEL_DEFAULTS"'
+        self.run_seed(command, CFG=str(cfg))
+        self.assertEqual(cfg.read_text(), original)
+        self.assertEqual(self.field(cfg, 'default'), '@cf/meta/operator')
+        self.run_seed(command, CFG=str(cfg), OPENAI_MODEL='@cf/meta/operator')
+        self.run_seed(command, CFG=str(cfg), OPENAI_MODEL='replacement-model')
+        self.assertEqual(self.field(cfg, 'default'), 'replacement-model')
 
-# ── hermes: a pre-ledger volume with an unknown model is left alone ───────
-H="$fx/h3"
-hermes_home "$H" gpt-6.1-sol https://opencode.ai/zen/go/v1
-OPENAI_MODEL='deepseek/deepseek-v4.1-flash'
-reconcile "$H"
-expect "$(field "$H" default)" gpt-6.1-sol "unknown pre-ledger value belongs to the operator"
+    def test_operator_edits_stop_provider_rewrites(self):
+        self.run_seed()
+        path = self.agent / 'models.yml'
+        original = '{"providers":{"operator":{"baseUrl":"https://operator.invalid/v1"}}}\n'
+        path.write_text(original)
+        cfg = self.agent / 'config.yml'
+        before = cfg.read_bytes()
+        self.run_seed(OPENAI_MODEL='replacement-model')
+        self.assertEqual(path.read_text(), original)
+        self.assertEqual(cfg.read_bytes(), before)
 
-# ── omp: provider follows the endpoint, role follows the model ────────────
-O="$fx/omp"
-mkdir -p "$O/agent"
-cat >"$O/agent/config.yml" <<'YAML'
-modelRoles:
-  default: opencode-go/deepseek-v4.1-flash
-startup:
-  quiet: true
-YAML
-OMP_CONFIG_DIR="$O"
-OPENAI_MODEL='deepseek/deepseek-v4.1-flash'
-OPENAI_BASE_URL='https://api.commandcode.ai/provider/v1'
-opc_omp_seed
-expect "$(opc_yaml_field "$O/agent/config.yml" default)" "opc/$OPENAI_MODEL" \
-    "legacy opencode-go role must migrate to the seeded provider"
-grep -q '^  quiet: true$' "$O/agent/config.yml" || fail "opc_omp_seed clobbered unrelated config keys"
-grep -q "baseUrl: $OPENAI_BASE_URL$" "$O/agent/models.yml" || fail "models.yml must carry OPENAI_BASE_URL"
-grep -q '^    apiKey: OPENAI_API_KEY$' "$O/agent/models.yml" || fail "models.yml must read the stack key"
-grep -q "      - id: $OPENAI_MODEL$" "$O/agent/models.yml" || fail "models.yml must carry the model id verbatim"
+    def test_model_transaction_waits_for_the_shared_ledger_lock(self):
+        cfg = self.home / 'config.yaml'
+        cfg.write_text('model:\n  default: deepseek-v4.1-flash\n')
+        with (self.home / '.opc-model-seed.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            command = ('. ' + shlex.quote(LIB) + '; echo started; '
+                       'opc_model_follow "$CFG" default "$OPENAI_MODEL" "$OPC_STACK_MODEL_DEFAULTS"')
+            proc = subprocess.Popen(['sh', '-ceu', command], env=dict(self.env, CFG=str(cfg)),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(proc.stdout.readline(), 'started\n')
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    proc.wait(timeout=0.2)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                stdout, stderr = proc.communicate(timeout=5)
+                self.assertEqual(proc.returncode, 0, stderr)
+                self.assertEqual(self.field(cfg, 'default'), 'deepseek/deepseek-v4.1-flash')
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.communicate()
 
-# A switch rewrites our own file…
-OPENAI_MODEL='Qwen/Qwen3.8-Max'
-OMP_MODEL_CONTEXT_WINDOW=200000
-opc_omp_seed
-expect "$(opc_yaml_field "$O/agent/config.yml" default)" "opc/$OPENAI_MODEL" "omp role follows the model"
-grep -q "      - id: $OPENAI_MODEL$" "$O/agent/models.yml" || fail "models.yml did not follow the model"
-grep -q '^        contextWindow: 200000$' "$O/agent/models.yml" || fail "optional metadata knob not honoured"
+    def test_simultaneous_provider_and_role_writers_publish_consistent_state(self):
+        command = '. ' + shlex.quote(LIB) + '; opc_omp_seed'
+        processes = [subprocess.Popen(['sh', '-ceu', command], env=self.env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                     for _ in range(8)]
+        try:
+            results = [(proc, proc.communicate(timeout=15)) for proc in processes]
+        finally:
+            for proc in processes:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.communicate()
+        for proc, (stdout, stderr) in results:
+            self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(self.field(self.agent / 'config.yml', 'default'),
+                         'opc/deepseek/deepseek-v4.1-flash')
+        before = (self.agent / 'models.yml').read_bytes()
+        self.run_seed(OPENAI_MODEL='post-race-model')
+        self.assertNotEqual((self.agent / 'models.yml').read_bytes(), before)
+        self.assertEqual(self.field(self.agent / 'config.yml', 'default'), 'opc/post-race-model')
 
-# …but a hand-edited one is left alone, loudly.
-printf 'providers:\n  mine:\n    baseUrl: https://example.invalid/v1\n' >"$O/agent/models.yml"
-out="$(OPENAI_MODEL='deepseek/deepseek-v4.1-flash' opc_omp_seed 2>&1)"
-printf '%s' "$out" | grep -q "changed outside OPC" || fail "hand-edited models.yml must warn"
-grep -q 'mine:' "$O/agent/models.yml" || fail "hand-edited models.yml must be preserved"
 
-echo "model-seed: all cases passed"
+unittest.main(verbosity=2)
+PY

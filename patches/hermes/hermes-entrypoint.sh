@@ -26,6 +26,45 @@ set -eu
 OPC_CONFIG_VERSION=52
 OPC_CONFIG_VERSION_LEGACY=34
 
+# Role comes from the container's command, not a flag, for the same reason
+# upstream keys its own reconciliation skip off it
+# (container_boot._is_dashboard_container, which reads /proc/1/cmdline and
+# checks argv[0] == "dashboard" after peeling the launcher prefix): a flag can
+# be forgotten in a hand-written manifest, reintroducing the race. At
+# entrypoint time PID 1 IS this script and the s6 wrapper has not been exec'd
+# yet, so /proc/1/cmdline carries no main-wrapper.sh token to peel — read the
+# same fact from "$@" instead (compose's `command:`, or the image CMD), and
+# mirror upstream's peeling so a wrapped argv resolves identically.
+#
+# This reads ONLY "$@" (the container's command), not the container's actual
+# name or role — so `docker compose run hermes-dashboard sh` (argv `sh`, not
+# `dashboard`) would resolve as non-dashboard and re-enable seeding from the
+# observer container. Acceptable here because compose.yml pins `command:` for
+# hermes-dashboard's normal `up`/`start`/`restart` path; it is a gap only for
+# an operator deliberately overriding the command on that service, the same
+# class of gap upstream's own flag-based check has.
+opc_is_dashboard_container() { # <container command argv...>
+    _has_wrapper=0
+    for _a in "$@"; do
+        case "$_a" in *main-wrapper.sh) _has_wrapper=1 ;; esac
+    done
+    if [ "$_has_wrapper" = 1 ]; then
+        while [ "$#" -gt 0 ]; do
+            _a="$1"; shift
+            case "$_a" in *main-wrapper.sh) break ;; esac
+        done
+    elif [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "init" ]; then
+        shift
+    fi
+    if [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "entrypoint-dispatch.sh" ]; then
+        shift
+    fi
+    if [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "hermes" ]; then
+        shift
+    fi
+    [ "${1:-}" = "dashboard" ]
+}
+
 # Model/base-url/omp-provider seeding, shared with the frontdoor image so the
 # two cannot disagree about what "the stack model" means.
 . /usr/local/bin/opc-model-seed.sh
@@ -145,7 +184,7 @@ if [ -f /opt/hermes/SOUL.md ]; then
     echo "[hermes] synced SOUL.md (agent identity + delegation rule)"
 fi
 
-if [ ! -f "$HH/config.yaml" ]; then
+if ! opc_is_dashboard_container "$@" && [ ! -f "$HH/config.yaml" ]; then
     mkdir -p "$HH"
     cat > "$HH/config.yaml" <<YAML
 _config_version: ${OPC_CONFIG_VERSION}
@@ -163,8 +202,8 @@ memory:
 model:
   provider: custom
   api_key: \${OPENAI_API_KEY}
-  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}
+  base_url: $(opc_yaml_quote "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}")
+  default: $(opc_yaml_quote "${OPENAI_MODEL:-deepseek-v4.1-flash}")
 YAML
     echo "[hermes] seeded $HH/config.yaml (kanban disabled; memory=tencentdb; model=${OPENAI_MODEL:-deepseek-v4.1-flash})"
 fi
@@ -172,8 +211,15 @@ fi
 # Follow .env on the model lines we seeded (see opc-model-seed.sh: a field is
 # moved only while it still holds the value OPC last wrote, so a model picked
 # in the dashboard or with /model is never reverted).
-opc_model_follow "$HH/config.yaml" default "${OPENAI_MODEL:-deepseek-v4.1-flash}" "$OPC_STACK_MODEL_DEFAULTS"
-opc_model_follow "$HH/config.yaml" base_url "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}" "$OPC_STACK_BASE_URL_DEFAULTS"
+if ! opc_is_dashboard_container "$@"; then
+    # Scoped credentials must move before the endpoint. Unknown/operator
+    # secrets are preserved; do not send them to a newly selected provider.
+    _stack_ready="$(python3 /usr/local/lib/opc-default-env.py "$HH/.env" --stack-status)"
+    if [ "$_stack_ready" = 1 ]; then
+        opc_model_follow "$HH/config.yaml" default "${OPENAI_MODEL:-deepseek-v4.1-flash}" "$OPC_STACK_MODEL_DEFAULTS"
+        opc_model_follow "$HH/config.yaml" base_url "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}" "$OPC_STACK_BASE_URL_DEFAULTS"
+    fi
+fi
 if [ -f "$HH/config.yaml" ]; then
     # Existing editable configs may predate the explicit custom-provider key
     # route. Insert only when the model block has no api_key; operator-set
@@ -228,8 +274,9 @@ export OPENAI_API_KEY OPENAI_BASE_URL
 # What opc_seed_expert_profile actually does today: create the profile's
 # directory tree; seed config.yaml and .env when absent (both are
 # dashboard-editable afterwards); keep API_SERVER_KEY in .env in sync with the
-# operator's .env on every boot; converge .env on mode 600 whichever branch
-# ran; and re-copy the memory plugin and the paperclip-api skill from the image
+# operator's .env on every boot; reconcile OPC-owned provider credentials
+# before moving model/endpoint; converge .env on mode 600; and re-copy the
+# memory plugin and the paperclip-api skill from the image
 # (those two are image-owned, same as for the default profile). It does NOT
 # write SOUL.md — the expert's identity lands here in a later task, and the
 # SOUL.md already sitting in the profile is hermes's own default, written by
@@ -422,6 +469,7 @@ opc_seed_expert_profile() { # <profile-name> <api-key-value>
     # already existed with a looser mode was never tightened, and neither was
     # the one the refresh branch just wrote through a fresh temp file.
     chmod 600 "$_ph/.env"
+    _stack_ready="$(python3 /usr/local/lib/opc-default-env.py "$_ph/.env" --provider-only --stack-status)"
 
     if [ ! -f "$_ph/config.yaml" ]; then
         cat > "$_ph/config.yaml" <<YAML
@@ -440,8 +488,8 @@ memory:
 model:
   provider: custom
   api_key: \${OPENAI_API_KEY}
-  base_url: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
-  default: ${OPENAI_MODEL:-deepseek-v4.1-flash}
+  base_url: $(opc_yaml_quote "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}")
+  default: $(opc_yaml_quote "${OPENAI_MODEL:-deepseek-v4.1-flash}")
 platforms:
   api_server:
     enabled: false
@@ -451,8 +499,10 @@ YAML
 
     # Same discipline as the default home above: follow .env while the field
     # still holds the value OPC wrote, never over operator/dashboard edits.
-    opc_model_follow "$_ph/config.yaml" default "${OPENAI_MODEL:-deepseek-v4.1-flash}" "$OPC_STACK_MODEL_DEFAULTS"
-    opc_model_follow "$_ph/config.yaml" base_url "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}" "$OPC_STACK_BASE_URL_DEFAULTS"
+    if [ "$_stack_ready" = 1 ]; then
+        opc_model_follow "$_ph/config.yaml" default "${OPENAI_MODEL:-deepseek-v4.1-flash}" "$OPC_STACK_MODEL_DEFAULTS"
+        opc_model_follow "$_ph/config.yaml" base_url "${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}" "$OPC_STACK_BASE_URL_DEFAULTS"
+    fi
 
     # Converge platforms.api_server.enabled: false on EVERY boot, not just at
     # creation. gateway/config.py's api_server loader force-enables the
@@ -762,54 +812,11 @@ PYEOF
 # containers and does traverse the shared profiles tree; that is a metadata
 # fix-up for ownership, not a content race, so it is harmless for two writers
 # to repeat.
-#
-# Role comes from the container's command, not a flag, for the same reason
-# upstream keys its own reconciliation skip off it
-# (container_boot._is_dashboard_container, which reads /proc/1/cmdline and
-# checks argv[0] == "dashboard" after peeling the launcher prefix): a flag can
-# be forgotten in a hand-written manifest, reintroducing the race. At
-# entrypoint time PID 1 IS this script and the s6 wrapper has not been exec'd
-# yet, so /proc/1/cmdline carries no main-wrapper.sh token to peel — read the
-# same fact from "$@" instead (compose's `command:`, or the image CMD), and
-# mirror upstream's peeling so a wrapped argv resolves identically.
-#
-# This reads ONLY "$@" (the container's command), not the container's actual
-# name or role — so `docker compose run hermes-dashboard sh` (argv `sh`, not
-# `dashboard`) would resolve as non-dashboard and re-enable seeding from the
-# observer container. Acceptable here because compose.yml pins `command:` for
-# hermes-dashboard's normal `up`/`start`/`restart` path; it is a gap only for
-# an operator deliberately overriding the command on that service, the same
-# class of gap upstream's own flag-based check has.
-opc_is_dashboard_container() { # <container command argv...>
-    _has_wrapper=0
-    for _a in "$@"; do
-        case "$_a" in *main-wrapper.sh) _has_wrapper=1 ;; esac
-    done
-    if [ "$_has_wrapper" = 1 ]; then
-        while [ "$#" -gt 0 ]; do
-            _a="$1"; shift
-            case "$_a" in *main-wrapper.sh) break ;; esac
-        done
-    elif [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "init" ]; then
-        shift
-    fi
-    if [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "entrypoint-dispatch.sh" ]; then
-        shift
-    fi
-    if [ "$#" -gt 0 ] && [ "$(basename -- "$1")" = "hermes" ]; then
-        shift
-    fi
-    [ "${1:-}" = "dashboard" ]
-}
 
 if opc_is_dashboard_container "$@"; then
     echo "[hermes] dashboard container — skipping expert profile seeding (the gateway container owns the shared profiles volume)"
 else
-    # v0.21.7 reloads the launch profile under a fail-closed secret scope too:
-    # process-only credentials no longer enable its API listener/model. This
-    # container owns hermes-data; the dashboard must not write these values
-    # into the separate frontdoor-hermes home it observes.
-    python3 /usr/local/lib/opc-default-env.py "$HH/.env"
+    # Only the gateway owns expert profile content.
     opc_seed_expert_profile agt-scientist "${HERMES_SCIENTIST_API_KEY:-}"
 fi
 

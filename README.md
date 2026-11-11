@@ -121,7 +121,7 @@ docker compose logs -f <svc>  # 看日誌
 
 ## 換 LLM endpoint / 模型
 
-`.env` 的三個值是全棧唯一 source of truth：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`（model id 用 endpoint 自己的寫法，例如 `deepseek-v4.1-flash` 或 `deepseek/deepseek-v4.1-flash`）。改完 `docker compose up -d` 即可，不需要 rebuild、不需要手改任何 volume 內的 `config.yaml`／`models.yml`；在 dashboard 或 `/model` 選過的模型會保留，直到 `.env` 再次指名它。`BUZZ_AGENT_MODEL` 留空 = 跟 `OPENAI_MODEL`。細節（誰讀哪個檔、omp 的自訂 provider、context window 的來源）：`SETUP.md` → 「LLM provider」。
+`.env` 的三個值是全棧唯一 source of truth：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`（model id 用 endpoint 自己的寫法，例如 `deepseek-v4.1-flash` 或 `deepseek/deepseek-v4.1-flash`）。安裝新版 reconcile 後，換模型只需 `docker compose up -d`，不需要 rebuild；dashboard／`/model` 或手改的 provider 設定會保留。舊 volume 若有無法判定歸屬、且與 Compose 不同的憑證，會保留原 endpoint 並警告；一次性對齊指令見 `SETUP.md` → 「Existing installation」。`BUZZ_AGENT_MODEL` 留空 = 跟 `OPENAI_MODEL`。其餘細節見 `SETUP.md` → 「LLM provider」。
 
 ## 使用 tailnet domain（手機 app）
 

@@ -318,9 +318,70 @@ checked byte-identical by `scripts/prepare.sh`): the entrypoint records the
 exact value it last wrote and moves a field only while it still holds that
 value. A model chosen in the dashboard or with `/model` therefore survives
 restarts, and `models.yml` edited by hand is left alone (with a warning).
-Volumes from before that record existed adopt a known historical default once,
-so an existing install follows `.env` too — that is why the old
-"existing editable configs may need manual adjustment" advice is gone.
+Existing `models.yaml` / `models.json` and `config.yaml` are never shadowed
+by generated `.yml` files. Model ids are serialized as strings,
+including ids beginning with `@`. Shared omp provider/role writes and each
+model/ledger transaction are locked; the dashboard does not reconcile the
+frontdoor home's model, so `BUZZ_AGENT_MODEL` has one owner.
+
+Gateway default and expert profile `.env` provider values use a separate
+`.opc-provider-seed.json` ledger of **hashes**, not a second plaintext key
+copy. OPC rotates/revokes values it seeded, preserves operator changes and
+deliberate blanks, and adopts a matching nonempty pre-ledger value. The
+provider key and endpoint are checked as a pair before either is published.
+If one is operator-owned and differs from Compose, both scoped values and
+that profile's `config.yaml` model/endpoint stay unchanged: credentials must
+not be sent to the wrong provider.
+
+### Existing installation: install this reconcile once
+
+Code changes need a rebuild once; later endpoint/model changes only need
+`docker compose up -d`:
+
+```bash
+scripts/prepare.sh
+docker compose up -d --build buzz frontdoor hermes hermes-dashboard paperclip
+```
+
+If the profile already matches Compose, this boot records its provenance
+automatically. A differing **pre-ledger** secret has no trustworthy ownership
+history, so OPC warns and preserves it instead of guessing. Only if you want
+the default and Scientist profiles to use the current Compose provider,
+explicitly align their three provider variables below. This replaces those
+profile overrides, preserves unrelated secrets and listener keys, and never
+prints provider keys. Skip it for intentional per-profile providers.
+
+```bash
+docker compose exec -T hermes /opt/hermes/.venv/bin/python - <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import re
+
+spec = importlib.util.spec_from_file_location("seed", "/usr/local/lib/opc-default-env.py")
+seed = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(seed)
+root = Path(os.environ.get("HERMES_HOME", "/opt/data"))
+uid, gid = int(os.environ.get("HERMES_UID", "10000")), int(os.environ.get("HERMES_GID", "10000"))
+for home in (root, root / "profiles/agt-scientist"):
+    if not home.is_dir():
+        continue
+    path = home / ".env"
+    text = path.read_text() if path.exists() else ""
+    text = re.sub(r"(?m)^[ \t]*(?:export[ \t]+)?(?:OPENAI_API_KEY|OPENAI_BASE_URL|OPENCODE_API_KEY)[ \t]*=.*(?:\n|$)", "", text)
+    seed.write_private(path, text)
+    seed.sync_default_env(path, provider_only=home != root)
+    for file in (path, home / ".opc-provider-seed.json"):
+        if file.exists():
+            os.chown(file, uid, gid)
+PY
+docker compose restart hermes
+```
+
+Regression gates: `tests/model-seed.sh` (offline) and
+`python3 tests/hermes-model-startup.py` (copies the current patches into a
+disposable built Hermes image, with no network or persistent volumes; does
+not restart the running stack).
 
 | Project | Repo |
 |---|---|

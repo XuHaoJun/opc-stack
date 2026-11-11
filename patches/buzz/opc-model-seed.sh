@@ -41,61 +41,97 @@ OPC_STACK_BASE_URL_DEFAULTS="https://opencode.ai/zen/go/v1 https://api.commandco
 # Same, for the omp role that older images seeded as `opencode-go/<model>`.
 OPC_STACK_OMP_MODEL_DEFAULTS="opencode-go/deepseek-v4-pro opencode-go/deepseek-v4-flash opencode-go/deepseek-v4.1-flash"
 
-# Read `  <key>: <value>` from config.yaml's `model:` / config.yml's
-# `modelRoles:` block. Prints nothing when the section or key is absent.
-# Surrounding quotes are stripped: a dashboard save (hermes dumps YAML) can
-# quote the value, and `"opc/x"` must still read as the value we wrote, or the
-# field silently stops following .env after the first dashboard save.
+# JSON strings are also YAML strings. Encode data, never interpolate it as
+# YAML syntax (e.g. Workers AI ids start with the reserved character @).
+opc_yaml_quote() {
+    python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$1"
+}
+
+# Read scalar fields in the model/modelRoles block, including our escaped
+# JSON strings and single-quoted values written by the Hermes dashboard.
 opc_yaml_field() { # <file> <key>
     [ -f "$1" ] || return 0
-    awk -v k="$2" -v sq="'" '
-        /^(model|modelRoles):[[:space:]]*$/ { ins = 1; next }
-        ins && /^[^[:space:]]/ { ins = 0 }
-        ins && index($0, "  " k ": ") == 1 {
-            sub("^  " k ": ", "")
-            sub(/^"/, ""); sub(/"$/, "")
-            sub("^" sq, ""); sub(sq "$", "")
-            print; exit
-        }
-    ' "$1"
+    python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+escapes = {
+    "0": "\0", "a": "\a", "b": "\b", "t": "\t", "\t": "\t", "n": "\n",
+    "v": "\v", "f": "\f", "r": "\r", "e": "\x1b", " ": " ", '"': '"',
+    "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0", "L": "\u2028", "P": "\u2029",
+}
+
+
+def unescape(match):
+    token = match[1]
+    return chr(int(token[1:], 16)) if token[0] in "xuU" else escapes[token]
+
+
+inside = False
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        if re.match(r"^(model|modelRoles):\s*(?:#.*)?$", line):
+            inside = True
+            continue
+        if inside and line.strip() and not line[0].isspace():
+            inside = False
+        if inside and line.startswith("  " + sys.argv[2] + ": "):
+            value = line.split(": ", 1)[1].strip()
+            quoted = re.fullmatch(r'"((?:[^"\\]|\\.)*)"(?:[ \t]+#.*)?', value)
+            if quoted:
+                value = re.sub(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)",
+                               unescape, quoted[1])
+            elif value.startswith("'") and value.endswith("'"):
+                value = value[1:-1].replace("''", "'")
+            print(value)
+            break
+PY
 }
 
 # Rewrite that same line in place, leaving every other byte alone.
-opc_yaml_set() { # <file> <key> <value>
-    _tmp="$1.opc-tmp"
-    awk -v k="$2" -v v="$3" '
-        /^(model|modelRoles):[[:space:]]*$/ { ins = 1; print; next }
+opc_yaml_set() ( # <file> <key> <value>; caller holds the model lock
+    _tmp="$(mktemp "$1.opc-tmp.XXXXXX")"
+    trap 'rm -f "$_tmp"' 0
+    OPC_YAML_VALUE="$(opc_yaml_quote "$3")" awk -v k="$2" '
+        BEGIN { v = ENVIRON["OPC_YAML_VALUE"] }
+        /^(model|modelRoles):[[:space:]]*(#.*)?$/ { ins = 1; print; next }
         ins && /^[^[:space:]]/ { ins = 0 }
         ins && index($0, "  " k ": ") == 1 { print "  " k ": " v; ins = 0; next }
         { print }
-    ' "$1" >"$_tmp" && mv "$_tmp" "$1"
-}
+    ' "$1" >"$_tmp"
+    chmod --reference="$1" "$_tmp"
+    mv "$_tmp" "$1"
+)
 
 opc_seed_ledger_get() { # <ledger> <key>
     [ -f "$1" ] || return 0
     sed -n "s/^$2=//p" "$1" | head -n 1
 }
 
-opc_seed_ledger_set() { # <ledger> <key> <value>
+# Caller holds .opc-model-seed.lock across the config/ledger transaction.
+opc_seed_ledger_set() ( # <ledger> <key> <value>
     [ -f "$1" ] || : >"$1"
-    if grep -q "^$2=" "$1" 2>/dev/null; then
-        _tmp="$1.opc-tmp"
-        awk -v k="$2" -v v="$3" '
-            index($0, k "=") == 1 { print k "=" v; next }
-            { print }
-        ' "$1" >"$_tmp" && mv "$_tmp" "$1"
-    else
-        printf '%s=%s\n' "$2" "$3" >>"$1"
-    fi
-}
+    _tmp="$(mktemp "$1.opc-tmp.XXXXXX")"
+    trap 'rm -f "$_tmp"' 0
+    OPC_LEDGER_VALUE="$3" awk -v k="$2" '
+        BEGIN { v = ENVIRON["OPC_LEDGER_VALUE"] }
+        index($0, k "=") == 1 { print k "=" v; found = 1; next }
+        { print }
+        END { if (!found) print k "=" v }
+    ' "$1" >"$_tmp"
+    chmod --reference="$1" "$_tmp"
+    mv "$_tmp" "$1"
+)
 
 # Follow the desired value unless someone else owns the field.
 #   opc_model_follow <config> <key> <desired> <bootstrap-list>
-opc_model_follow() {
+opc_model_follow() (
     [ -f "$1" ] || return 0
+    _led="$(dirname "$1")/.opc-model-seed"
+    exec 8>"$_led.lock"
+    flock 8
     _cur="$(opc_yaml_field "$1" "$2")"
     [ -n "$_cur" ] || return 0
-    _led="$(dirname "$1")/.opc-model-seed"
     _prev="$(opc_seed_ledger_get "$_led" "$2")"
     if [ "$_cur" != "$3" ]; then
         if [ -n "$_prev" ]; then
@@ -111,26 +147,29 @@ opc_model_follow() {
         opc_yaml_set "$1" "$2" "$3"
     fi
     opc_seed_ledger_set "$_led" "$2" "$3"
-}
+)
 
 # Seed omp's provider + default role for the endpoint in the environment.
 # Reads OMP_CONFIG_DIR (default $HOME/.omp), OPENAI_BASE_URL, OPENAI_MODEL and
 # the optional OMP_MODEL_CONTEXT_WINDOW / OMP_MODEL_MAX_TOKENS metadata knobs.
-opc_omp_seed() {
+opc_omp_seed() (
     _dir="${OMP_CONFIG_DIR:-${HOME:-/root}/.omp}/agent"
     mkdir -p "$_dir"
+    exec 9>"$_dir/.opc-omp-seed.lock"
+    flock 9
     _models="$_dir/models.yml"
     _cfg="$_dir/config.yml"
     _model="${OPENAI_MODEL:-deepseek-v4.1-flash}"
     _base="${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}"
+    _quoted_model="$(opc_yaml_quote "$_model")"
     _want="providers:
   opc:
-    baseUrl: ${_base}
-    apiKey: OPENAI_API_KEY
+    baseUrl: $(opc_yaml_quote "$_base")
+    apiKey: \"OPENAI_API_KEY\"
     api: openai-completions
     models:
-      - id: ${_model}
-        name: ${_model}"
+      - id: ${_quoted_model}
+        name: ${_quoted_model}"
     if [ -n "${OMP_MODEL_CONTEXT_WINDOW:-}" ]; then
         _want="$_want
         contextWindow: ${OMP_MODEL_CONTEXT_WINDOW}"
@@ -147,20 +186,37 @@ opc_omp_seed() {
     _stamp="$_dir/.opc-models-sha"
     _ours=0
     if [ ! -f "$_models" ]; then
+        # omp prefers .yml over .yaml and migrates .json only if neither
+        # YAML file exists. Creating ours would silently hide operator data.
+        if [ -f "$_dir/models.yaml" ] || [ -f "$_dir/models.json" ]; then
+            echo "[opc] existing models.yaml/models.json is operator-owned — not seeding provider or role" >&2
+            return 0
+        fi
         _ours=1
     elif [ -f "$_stamp" ] && [ "$(sha256sum "$_models" | cut -d' ' -f1)" = "$(cat "$_stamp")" ]; then
         _ours=1
     fi
     if [ "$_ours" = 1 ]; then
-        printf '%s\n' "$_want" >"$_models"
-        chmod 644 "$_models"
+        _tmp="$(mktemp "$_models.opc-tmp.XXXXXX")"
+        trap 'rm -f "$_tmp"' 0
+        printf '%s\n' "$_want" >"$_tmp"
+        chmod 644 "$_tmp"
+        mv "$_tmp" "$_models"
         sha256sum "$_models" | cut -d' ' -f1 >"$_stamp"
     else
         echo "[opc] WARNING $_models was changed outside OPC — leaving it alone; provider 'opc' will not follow OPENAI_BASE_URL/OPENAI_MODEL (remove the file to hand it back)" >&2
+        return 0
     fi
 
     if [ ! -f "$_cfg" ]; then
-        printf 'modelRoles:\n  default: opc/%s\nstartup:\n  quiet: true\n' "$_model" >"$_cfg"
+        if [ -f "$_dir/config.yaml" ]; then
+            return 0
+        fi
+        _tmp="$(mktemp "$_cfg.opc-tmp.XXXXXX")"
+        trap 'rm -f "$_tmp"' 0
+        printf 'modelRoles:\n  default: %s\nstartup:\n  quiet: true\n' "$(opc_yaml_quote "opc/$_model")" >"$_tmp"
+        chmod 644 "$_tmp"
+        mv "$_tmp" "$_cfg"
     fi
     # Only point the role at `opc` while the provider file is ours: with a
     # hand-written models.yml there may be no `opc` provider, and a role naming
@@ -168,4 +224,4 @@ opc_omp_seed() {
     if [ "$_ours" = 1 ]; then
         opc_model_follow "$_cfg" default "opc/${_model}" "$OPC_STACK_OMP_MODEL_DEFAULTS"
     fi
-}
+)
