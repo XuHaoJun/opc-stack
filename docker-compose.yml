@@ -305,9 +305,9 @@ services:
         condition: service_completed_successfully
       nix-seed:
         condition: service_completed_successfully
-      # Credentials for the agent's GitHub dev flow (git push / gh): the
-      # host-sync one-shot mirrors host ~/.ssh + ~/.config/gh +
-      # ~/.gitconfig into opc-gh-creds (/creds) on every up.
+      # Reuse the host gh login, including its original GitHub permissions.
+      # The entrypoint mirrors it into the uid-10000 frontdoor home; GitHub
+      # SSH URLs use HTTPS so agents do not need the host's SSH private keys.
       host-sync:
         condition: service_completed_successfully
       # Key producers: paperclip-bootstrap writes /keys/paperclip-api.key and
@@ -429,7 +429,7 @@ services:
       - opc-nix:/nix
       - frontdoor-mise:/opt/mise
       - opc-keys:/keys:ro
-      - opc-gh-creds:/creds
+      - opc-gh-creds:/creds:ro
 
   # ══════════════════════════ Hermes ══════════════════════════
   hermes:

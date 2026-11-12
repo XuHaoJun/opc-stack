@@ -534,6 +534,58 @@ Setup (one-time):
    ```
    `docker compose restart` alone does not load changed `.env` values.
 
+### Frontdoor: private-repo reading during a conversation
+
+Reading source code to discuss architecture or direction belongs to frontdoor;
+it does not require a Paperclip ticket. Implementation and independently
+assigned deliverables still follow the existing routing rules. No prompt or
+expert-profile permissions are changed by this credential fix.
+
+Frontdoor reuses the **same personal GitHub login and its existing permissions**,
+including write access if the host login has it. This is not a read-only token
+or a security boundary enforced by the prompt. Its root entrypoint copies only
+`/creds/gh/{hosts.yml,config.yml}` into `$HERMES_HOME/.config/gh`, and generates
+`$HERMES_HOME/.config/git/config`, owned by the runtime uid (normally 10000).
+Credential directories are mode 700 and files mode 600. The shared `/creds`
+volume is read-only in frontdoor; its host uid ownership is left untouched.
+Hermes gateway experts and Paperclip keep their existing credential setup.
+
+GitHub HTTPS Git uses `gh auth git-credential`. GitHub SSH-style URLs
+(`git@github.com:owner/repo.git` and `ssh://git@github.com/owner/repo.git`)
+are rewritten to HTTPS, so neither copying SSH private keys nor installing
+SSH in frontdoor is necessary. The ACP launcher sets these paths before
+dropping privileges; credentials remain in files rather than token environment
+variables that Hermes may scrub from terminal children.
+
+Apply to an existing stack (no volume deletion or state migration):
+
+```bash
+scripts/prepare.sh
+docker compose build frontdoor
+docker compose up -d --no-deps --force-recreate frontdoor
+```
+
+After host login rotation or logout, refresh the shared source and restart
+frontdoor to reconcile its copy. Missing source login files remove their
+previous mirrors, so a removed login is not retained across boots:
+
+```bash
+scripts/sync-gh-creds.sh
+docker compose restart frontdoor
+```
+
+Verify as the actual runtime uid, not root. Replace `owner/private-repo`:
+
+```bash
+docker compose exec -T -u 10000 frontdoor sh -c '. /usr/local/bin/opc-gh-seed.sh; opc_gh_env; gh api repos/owner/private-repo --jq .full_name; git ls-remote git@github.com:owner/private-repo.git HEAD'
+python3 tests/frontdoor-git-auth.py -v
+```
+
+The offline regression uses the frontdoor image and shared Nix store, fixture
+credentials, and no network or real credential/home volumes. It covers the
+1000→10000 uid boundary, credential rotation/removal, GitHub URL conversion,
+and withholding credentials from unrelated hosts.
+
 The Paperclip admin/company/API key are created automatically by the
 `paperclip-bootstrap` one-shot (see Setup pages above); the executor agent is
 created or reconciled. An existing agent named exactly `OMP Engineer` is

@@ -22,6 +22,11 @@
 # the dashboard's managed-files view resolves every entry under /opt/data
 # and 403s anything escaping it ("Path outside managed files root").
 export HOME="${HERMES_HOME:-/opt/data}"
+# Establish the runtime paths here as well: a root exec's /creds defaults
+# must not leak into ACP agents. Tokens stay in files across Hermes's
+# terminal-environment scrubbing.
+. /usr/local/bin/opc-gh-seed.sh
+opc_gh_env
 # Explicit numeric --groups (not --init-groups): the buzz image has no passwd
 # entry for uid 10000, and setpriv's initgroups lookup refuses unknown users.
 # It was --clear-groups until agents needed to install nix packages: gid 3000
