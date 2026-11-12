@@ -556,6 +556,49 @@ How it works: entrypoints set `GIT_SSH_COMMAND` / `GH_CONFIG_DIR` /
 Buzz via the buzz CLI when the issue reaches `done`. The frontdoor entrypoint
 re-attaches watchers for surviving tickets on every boot.
 
+### Buzz-origin ticket creation: avoid metadata-only duplicate wakes
+
+For Buzz requests, pass both `--buzz-channel <channel-uuid>` and
+`--buzz-event <event-id-hex>` during `opc-paperclip engineering-ticket create`
+or `prototype-ticket create`; on other surfaces omit both. The helper creates
+an **unassigned backlog** draft, writes one combined `BUZZ_CHANNEL` /
+`BUZZ_EVENT` comment, reads comments back to verify the exact origin, then
+assigns and activates once (`todo` by default; explicit engineering backlog
+stays backlog). Marker write/readback failure leaves the draft unassigned
+in backlog and exits nonzero; do not activate it manually.
+
+Backlog alone does not prevent comment wakes on assigned tickets. Posting
+routing metadata after assignment can queue a second run and reopen `done`.
+Never add routing marker comments separately to assigned/running/completed
+tickets; legitimate work-comment wakes remain enabled. An already-active
+prototype returned by the helper keeps its original thread without a new
+marker, reassignment, or reopening. Research/expert raw API requests follow
+the same Buzz-only unassigned-draft → combined marker → readback → assignment
+sequence and reject deduplicated draft responses before commenting, as documented
+in the skill; there is no research helper.
+
+The Paperclip `unassigned-comment-wake.patch` overlay also fences its background
+comment-wake decision: a comment accepted without an assignee cannot acquire a
+later assignee during asynchronous readback. Call ordering alone cannot guarantee
+this. Ordinary comments accepted on already-assigned issues still wake normally.
+
+To deploy the helper, matching skills, and Paperclip wake fence:
+
+```bash
+bash tests/paperclip-workspace-routing.sh --fixture
+scripts/prepare.sh
+docker compose build frontdoor
+docker compose build hermes paperclip
+docker compose up -d --no-deps --force-recreate --wait paperclip frontdoor hermes hermes-dashboard
+```
+
+The offline fixture gate exercises ticket creation and the origin-before-
+activation ordering without a live stack. Recreating the runtimes and dashboard
+loads the new helper and boot-syncs the image-owned skill into existing profiles.
+The Paperclip image build applies the overlay with `--fuzz=0` and runs the focused
+comment-wake regression tests. No event-bridge rebuild or routing-schema change
+is required.
+
 ### Paperclip workspace and concurrency operator commands
 
 The `opc-paperclip` helper is installed in Buzz and Hermes. Run these

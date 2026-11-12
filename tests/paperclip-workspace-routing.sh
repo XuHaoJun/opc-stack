@@ -2119,6 +2119,223 @@ assert_eq "concurrent terminal retry IDs match" \
   "$(jq -r '.id' "$TMPDIR/prototype-terminal-race-a.json")" \
   "$(jq -r '.id' "$TMPDIR/prototype-terminal-race-b.json")"
 assert_contains "prototype ambiguity lists second project" "00000000-0000-4000-8000-000000000124" "$(cat "$PROTOTYPE_AMBIGUOUS_ERR")"
+
+# Origin routing uses the real lane helpers against an authenticated HTTP API.
+# Snapshots catch assigning a backlog draft too early, trusting the POST echo,
+# skipping readback, or mutating an existing active prototype's original thread.
+ORIGIN_CHANNEL=00000000-0000-4000-8000-000000000099
+ORIGIN_EVENT=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+ORIGIN_OTHER_CHANNEL=00000000-0000-4000-8000-000000000098
+ORIGIN_OTHER_EVENT=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+origin_reset() {
+  stop_fixture
+  local faults="${1-}"
+  [ -n "$faults" ] || faults='{}'
+  jq -n --argjson faults "$faults" '{
+    experimental:{enableIsolatedWorkspaces:false},
+    company:{id:"00000000-0000-4000-8000-000000000001",name:"Fixture"},
+    agents:[
+      {id:"00000000-0000-4000-8000-000000000011",name:"Engineer One",role:"engineer",status:"idle"},
+      {id:"00000000-0000-4000-8000-000000000012",name:"Prototyper",role:"prototyper",status:"idle"}
+    ],
+    projects:[],issues:[],comments:[],issueHistory:[],faults:$faults
+  }' >"$STATE"
+  start_fixture
+}
+origin_create() {
+  if [ "$origin_lane" = engineering ]; then
+    printf 'Acceptance: keep this description\nSecond line\n' |
+      "$origin_cli" engineering-ticket create --repo Owner/Origin \
+        --title 'Origin ordering regression' --priority high "$@"
+  else
+    printf 'Prototype: origin-bot\nLane: prototype\nAcceptance: keep this description\n' |
+      "$origin_cli" prototype-ticket create --name origin-bot \
+        --title 'Origin ordering regression' "$@"
+  fi
+}
+origin_assert_state() {
+  local label="$1" expression="$2"
+  if jq -e "$expression" "$STATE" >/dev/null; then
+    ok "$label"
+  else
+    bad "$label"
+  fi
+}
+origin_cli="$CLI"
+  for origin_lane in engineering prototype; do
+    origin_label="$origin_cli $origin_lane origin"
+    if [ "$origin_lane" = engineering ]; then
+      origin_assignee=00000000-0000-4000-8000-000000000011
+    else
+      origin_assignee=00000000-0000-4000-8000-000000000012
+    fi
+
+    origin_reset
+    if origin_create --buzz-channel "$ORIGIN_CHANNEL" --buzz-event "$ORIGIN_EVENT" \
+      >"$TMPDIR/origin-result.json" 2>"$TMPDIR/origin.err"; then
+      ok "$origin_label create succeeds"
+    else
+      bad "$origin_label create succeeds ($(cat "$TMPDIR/origin.err"))"
+    fi
+    origin_assert_state "$origin_label creates exactly one issue and one combined marker" '
+      (.issues | length) == 1 and (.comments | length) == 1
+      and (.comments[0].body | split("\n") | map(select(length > 0))) ==
+        ["BUZZ_CHANNEL: 00000000-0000-4000-8000-000000000099", "BUZZ_EVENT: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+      and .comments[0].issueId == .issues[0].id'
+    origin_assert_state "$origin_label persists and reads marker before assignment" '
+      [.issueHistory[].operation] == ["create","comment","comments","patch"]
+      and all(.issueHistory[];
+        .issue.status == "backlog" and .issue.assigneeAgentId == null
+        and .issue.assigneeUserId == null)
+      and (.issueHistory[0].comments | length) == 0
+      and (.issueHistory[1].comments | length) == 0
+      and (.issueHistory[2].comments | length) == 1
+      and .issueHistory[2].comments == .comments
+      and .issueHistory[3].comments == .comments'
+    origin_assert_state "$origin_label activates intended assignee and default todo" "
+      .issues[0].status == \"todo\" and .issues[0].assigneeAgentId == \"$origin_assignee\"
+      and .issueHistory[-1].payload.status == \"todo\"
+      and .issueHistory[-1].payload.assigneeAgentId == \"$origin_assignee\""
+    if [ "$origin_lane" = engineering ]; then
+      origin_assert_state "$origin_label preserves engineering payload" '
+        .issues[0].description == "Acceptance: keep this description\nSecond line\n"
+        and .issues[0].priority == "high"
+        and .issues[0].projectId == .projects[0].id
+        and .issues[0].projectWorkspaceId == .projects[0].primaryWorkspace.id
+        and .issues[0].executionWorkspaceSettings.mode == "inherit"'
+      origin_reset
+      if origin_create --status backlog --buzz-channel "$ORIGIN_CHANNEL" --buzz-event "$ORIGIN_EVENT" \
+        >"$TMPDIR/origin-backlog.json" 2>"$TMPDIR/origin.err"; then
+        ok "$origin_label explicit backlog succeeds"
+      else
+        bad "$origin_label explicit backlog succeeds"
+      fi
+      origin_assert_state "$origin_label explicit backlog assigns only after persisted marker" "
+        .issues[0].status == \"backlog\" and .issues[0].assigneeAgentId == \"$origin_assignee\"
+        and [.issueHistory[].operation] == [\"create\",\"comment\",\"comments\",\"patch\"]
+        and .issueHistory[-1].issue.assigneeAgentId == null
+        and .issueHistory[-1].payload.status == \"backlog\"
+        and .issueHistory[-1].comments == .comments and (.comments | length) == 1"
+    else
+      origin_assert_state "$origin_label preserves prototype payload" '
+        .issues[0].description == "Prototype: origin-bot\nLane: prototype\nAcceptance: keep this description\n"
+        and .issues[0].projectId == null'
+      origin_id="$(jq -r '.issues[0].id' "$STATE")"
+      curl -fsS -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        "$PAPERCLIP_API_URL/api/issues/$origin_id" -d '{"status":"in_progress"}' >/dev/null
+      origin_before="$(jq -c '{issues,comments,mutations:[.issueHistory[] | select(.operation != "comments")]}' "$STATE")"
+      if origin_create --buzz-channel "$ORIGIN_OTHER_CHANNEL" --buzz-event "$ORIGIN_OTHER_EVENT" \
+        >"$TMPDIR/origin-reused.json" 2>"$TMPDIR/origin.err"; then
+        ok "$origin_label active reuse succeeds"
+      else
+        bad "$origin_label active reuse succeeds"
+      fi
+      assert_eq "$origin_label active reuse returns original issue" "$origin_id" \
+        "$(jq -r '.id' "$TMPDIR/origin-reused.json" 2>/dev/null)"
+      assert_eq "$origin_label active reuse leaves original thread and issue untouched" "$origin_before" \
+        "$(jq -c '{issues,comments,mutations:[.issueHistory[] | select(.operation != "comments")]}' "$STATE")"
+    fi
+
+    origin_reset
+    if origin_create >"$TMPDIR/origin-no-flags.json" 2>"$TMPDIR/origin.err"; then
+      ok "$origin_label no-origin create succeeds"
+    else
+      bad "$origin_label no-origin create succeeds"
+    fi
+    origin_assert_state "$origin_label no-origin retains direct assigned todo create" "
+      (.issues | length) == 1 and .issues[0].status == \"todo\"
+      and .issues[0].assigneeAgentId == \"$origin_assignee\"
+      and [.issueHistory[].operation] == [\"create\"]
+      and .issueHistory[0].issue.assigneeAgentId == \"$origin_assignee\"
+      and .issueHistory[0].issue.status == \"todo\" and (.comments | length) == 0"
+
+    origin_reset
+    for origin_missing in channel event; do
+      if [ "$origin_missing" = event ]; then
+        origin_pair=(--buzz-channel "$ORIGIN_CHANNEL")
+      else
+        origin_pair=(--buzz-event "$ORIGIN_EVENT")
+      fi
+      if origin_create "${origin_pair[@]}" >"$TMPDIR/origin-incomplete.json" 2>"$TMPDIR/origin.err"; then
+        bad "$origin_label rejects missing $origin_missing"
+      else
+        ok "$origin_label rejects missing $origin_missing"
+      fi
+      origin_assert_state "$origin_label missing $origin_missing creates no issue or comment" '
+        (.issues | length) == 0 and (.comments | length) == 0 and (.issueHistory | length) == 0'
+    done
+
+    for origin_fault in write read dropped wrong-event wrong-channel; do
+      case "$origin_fault" in
+        write) origin_faults='{"commentWriteStatus":503}' ;;
+        read) origin_faults='{"commentReadStatus":503}' ;;
+        dropped) origin_faults='{"discardCommentWrites":true}' ;;
+        wrong-event) origin_faults='{"storedCommentBody":"BUZZ_CHANNEL: 00000000-0000-4000-8000-000000000099\nBUZZ_EVENT: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"}' ;;
+        wrong-channel) origin_faults='{"storedCommentBody":"BUZZ_CHANNEL: 00000000-0000-4000-8000-000000000098\nBUZZ_EVENT: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}' ;;
+      esac
+      origin_reset "$origin_faults"
+      if origin_create --buzz-channel "$ORIGIN_CHANNEL" --buzz-event "$ORIGIN_EVENT" \
+        >"$TMPDIR/origin-failure.json" 2>"$TMPDIR/origin.err"; then
+        bad "$origin_label $origin_fault failure exits nonzero"
+      else
+        ok "$origin_label $origin_fault failure exits nonzero"
+      fi
+      origin_assert_state "$origin_label $origin_fault failure leaves unassigned backlog without activation" '
+        (.issues | length) == 1 and .issues[0].status == "backlog"
+        and .issues[0].assigneeAgentId == null and .issues[0].assigneeUserId == null
+        and ([.issueHistory[] | select(.operation == "create")] | length) == 1
+        and ([.issueHistory[] | select(.operation == "comment")] | length) == 1
+        and all(.issueHistory[]; .operation != "patch"
+          and .issue.status == "backlog" and .issue.assigneeAgentId == null
+          and .issue.assigneeUserId == null)'
+      if [ "$origin_fault" != write ]; then
+        origin_assert_state "$origin_label $origin_fault verifies comment readback" '
+          any(.issueHistory[]; .operation == "comments")'
+      fi
+    done
+    if [ "$origin_lane" = prototype ]; then
+      origin_before="$(jq -c '{issues,comments,issueHistory}' "$STATE")"
+      if origin_create --buzz-channel "$ORIGIN_CHANNEL" --buzz-event "$ORIGIN_EVENT" \
+        >"$TMPDIR/origin-incomplete-reuse.json" 2>"$TMPDIR/origin.err"; then
+        bad "$origin_label incomplete draft is not reported as active work"
+      else
+        ok "$origin_label incomplete draft is not reported as active work"
+      fi
+      assert_eq "$origin_label incomplete reuse leaves draft and origin unchanged" "$origin_before" \
+        "$(jq -c '{issues,comments,issueHistory}' "$STATE")"
+      origin_reset
+      stop_fixture
+      python3 - "$STATE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["issues"] = [{
+    "id": "00000000-0000-4000-8000-000000000399",
+    "identifier": "FIX-999",
+    "title": "Another invocation's draft",
+    "description": "Draft setup has not finished",
+    "status": "backlog",
+    "assigneeAgentId": None,
+    "idempotencyKey": "opc-prototype-first:00000000-0000-4000-8000-000000000001:origin-bot",
+}]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+      start_fixture
+      if origin_create --buzz-channel "$ORIGIN_CHANNEL" --buzz-event "$ORIGIN_EVENT" \
+        >"$TMPDIR/origin-create-replay.json" 2>"$TMPDIR/origin.err"; then
+        bad "$origin_label create replay cannot take over another draft"
+      else
+        ok "$origin_label create replay cannot take over another draft"
+      fi
+      origin_assert_state "$origin_label create replay never writes markers or assigns" '
+        (.issues | length) == 1 and .issues[0].status == "backlog"
+        and .issues[0].assigneeAgentId == null
+        and (.comments | length) == 0 and (.issueHistory | length) == 0'
+    fi
+  done
 cleanup
 TMPDIR=""
 if [ "$RUN_LIVE_AFTER_FIXTURE" -eq 1 ] && docker compose ps >/dev/null 2>&1; then

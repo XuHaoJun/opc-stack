@@ -1,0 +1,84 @@
+--- a/server/src/services/issue-comment-wakeup.ts
++++ b/server/src/services/issue-comment-wakeup.ts
+@@ -3,12 +3,17 @@
+   resumeRequested: boolean;
+   commentCreatedByRunId?: string | null;
+   issueAtCommentStart: {
++    assigneeAgentId: string | null;
+     checkoutRunId?: string | null;
+     executionRunId?: string | null;
+   };
+   reopened: boolean;
+   currentStatus: string | null | undefined;
+ }) {
++  // A background wake decision must not acquire an assignee assigned later.
++  if (input.issueAtCommentStart.assigneeAgentId === null) {
++    return false;
++  }
+   const sourceRunId = input.commentCreatedByRunId;
+   const commentIsFromCurrentIssueRun = Boolean(
+     sourceRunId &&
+--- a/server/src/services/issue-comment-wakeup.test.ts
++++ b/server/src/services/issue-comment-wakeup.test.ts
+@@ -9,6 +9,7 @@
+         resumeRequested: true,
+         commentCreatedByRunId: "run-current",
+         issueAtCommentStart: {
++          assigneeAgentId: "agent",
+           checkoutRunId: "run-current",
+           executionRunId: "run-current",
+         },
+@@ -25,6 +26,7 @@
+         resumeRequested: true,
+         commentCreatedByRunId: "run-prior",
+         issueAtCommentStart: {
++          assigneeAgentId: "agent",
+           checkoutRunId: "run-current",
+           executionRunId: "run-current",
+         },
+@@ -40,7 +42,7 @@
+         selfComment: true,
+         resumeRequested: false,
+         commentCreatedByRunId: "run-prior",
+-        issueAtCommentStart: {},
++        issueAtCommentStart: { assigneeAgentId: "agent" },
+         reopened: false,
+         currentStatus: "in_progress",
+       }),
+@@ -51,7 +53,7 @@
+     const base = {
+       selfComment: false,
+       resumeRequested: false,
+-      issueAtCommentStart: {},
++      issueAtCommentStart: { assigneeAgentId: "agent" },
+       currentStatus: "done",
+     };
+     expect(
+@@ -61,4 +63,27 @@
+       true,
+     );
+   });
++
++  it.each(["backlog", "todo", "in_progress"])(
++    "does not wake a later assignee after an unassigned comment (%s)",
++    (currentStatus) => {
++      expect(shouldWakeAssigneeForIssueComment({
++        selfComment: false,
++        resumeRequested: false,
++        issueAtCommentStart: { assigneeAgentId: null },
++        reopened: false,
++        currentStatus,
++      })).toBe(false);
++    },
++  );
++
++  it("still wakes an already-assigned issue for an ordinary work comment", () => {
++    expect(shouldWakeAssigneeForIssueComment({
++      selfComment: false,
++      resumeRequested: false,
++      issueAtCommentStart: { assigneeAgentId: "agent" },
++      reopened: false,
++      currentStatus: "in_progress",
++    })).toBe(true);
++  });
+ });

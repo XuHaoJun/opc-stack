@@ -26,18 +26,42 @@ an internal container name and is useless in a chat message.
 | Action | Command |
 |---|---|
 | Find your company id | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies"` → `[0].id` (board key; agent keys: `/api/agents/me` → `.companyId`) |
-| Create engineering ticket | `printf '%s\n' 'ticket description' \| opc-paperclip engineering-ticket create --repo owner/repo --title '...'` (description is stdin) |
-| Create prototype ticket | `printf '%s\n%s\n' 'Prototype: recipe-bot' '...' \| opc-paperclip prototype-ticket create --name recipe-bot --title '...'` (description is stdin) |
+| Create engineering ticket | `printf '%s\n' 'ticket description' \| opc-paperclip engineering-ticket create --repo owner/repo --title '...'` (description is stdin; on Buzz append paired origin flags below) |
+| Create prototype ticket | `printf '%s\n%s\n' 'Prototype: recipe-bot' '...' \| opc-paperclip prototype-ticket create --name recipe-bot --title '...'` (description is stdin; on Buzz append paired origin flags below) |
 | Get issue | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>"` → `.status`, `.title` |
 | Add comment | `curl -fsS -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"body":"..."}' "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | List comments | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/issues/<issueId>/comments"` |
 | Set status | `curl -fsS -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d '{"status":"done"}' "$PAPERCLIP_API_URL/api/issues/<issueId>"` |
 | List agents (to resolve a lane) | `curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$PAPERCLIP_API_URL/api/companies/<companyId>/agents"` → select engineering by `.role`; select other lanes by `.name`; take `.id` only from one exact match |
 
-The `opc-paperclip` commands are the only ticket-creation path. They resolve
-the live company, agent, project, and primary workspace, reject missing or
-ambiguous identity, accept descriptions on stdin, and GET-after-write verify
-the result. Do not reconstruct their behavior with model-authored curl.
+The `opc-paperclip` commands are the engineering/prototype ticket-creation
+path (research/expert raw API exception below). They resolve the live company,
+agent, project, and primary workspace, reject missing or ambiguous identity,
+accept descriptions on stdin, and GET-after-write verify the result. Do not
+reconstruct their behavior with model-authored curl.
+
+**Buzz origin belongs in the create command:** pass the paired optional flags
+`--buzz-channel <channel-uuid> --buzz-event <event-id-hex>` to either helper.
+Use the channel the user asked in and the requesting message's EVENT_ID (the
+same event you reply to). On non-Buzz surfaces, omit both flags; existing
+one-step creation is unchanged.
+
+With both flags, the helper creates one **unassigned `backlog` draft**, posts
+one combined comment containing `BUZZ_CHANNEL: <channel-uuid>` and
+`BUZZ_EVENT: <event-id-hex>` on separate lines, GETs comments to verify the
+exact persisted origin, then PATCHes the intended `assigneeAgentId` and
+status together. Status defaults to `todo`; explicit engineering
+`--status backlog` remains `backlog`. A comment write/readback failure exits
+nonzero and leaves the draft unassigned in backlog; do not activate it.
+Backlog alone is insufficient: a comment on an assigned backlog ticket can
+wake its agent. A late marker comment can be deferred behind the first run
+and reopen a completed ticket.
+
+**Never separately post routing marker comments onto assigned, running, or
+completed tickets.** Keep legitimate work comments and their wakeups; routing
+metadata must be persisted before assignment, not added after helper return.
+If a prototype helper returns an already-existing active ticket, preserve its
+original origin: do not append another metadata comment, reassign, or reopen it.
 
 ### Endpoint shapes that bite
 
@@ -91,9 +115,9 @@ operator has not directly asked for a mutation, answer with inspection or
 explanation only.
 
 The API key is a board key auto-created by the stack bootstrap (authenticates
-as the admin user). Every issue MUST carry an `assigneeAgentId` — Paperclip
-does no automatic routing in this stack (no CEO agent, flat org), so an
-unassigned ticket is a ticket nobody wakes up for.
+as the admin user). Every activated issue MUST carry an `assigneeAgentId` —
+Paperclip does no automatic routing in this stack (no CEO agent, flat org).
+Buzz-origin drafts deliberately stay unassigned until routing is verified.
 
 ## Workspace and concurrency knowledge
 
@@ -308,17 +332,32 @@ in Buzz is never delivered and never starts a turn. Posting a request and
 reporting "I told her" is a false success — verify delivery on the work plane.
 
 To make an expert act (stop a schedule, change a setting, answer a question),
-open a Paperclip issue **assigned to that agent with status `todo`**:
-`backlog` never wakes anyone (`issue-assignment-wakeup.ts`), and a comment on
-an existing ticket wakes it too. Resolve the agent id from the live agent list
-by exact name at call time; never hardcode it.
+the final issue must be **assigned to that agent with status `todo`**.
+Assignment in `backlog` does not start work, but a comment on an assigned
+ticket can wake it regardless of backlog and can reopen a done ticket.
+Resolve the agent id from the live agent list by exact name at call time;
+never hardcode it.
 
-`opc-paperclip` has helpers only for the engineering and prototype lanes. An
-expert/ops request is the one documented exception to "helpers only": POST
-`/api/companies/<companyId>/issues` with exactly
-`{title, description, assigneeAgentId, status:"todo"}`, then GET the issue and
-assert `.assigneeAgentId` equals the id you resolved. Do not invent a repo,
-project, workspace or acceptance criteria the request does not have.
+`opc-paperclip` has helpers only for the engineering and prototype lanes.
+Research and expert/ops requests are the documented raw API exception:
+
+- **Non-Buzz:** POST `/api/companies/<companyId>/issues` with exactly
+  `{title, description, assigneeAgentId, status:"todo"}`, then GET the issue
+  and assert its assignee and status.
+- **Buzz:** POST the same endpoint with `{title, description, status:"backlog"}`
+  and **no `assigneeAgentId`**. Before commenting, require the response to have
+  `deduplicated != true`, no assignee, and `status:"backlog"`. A deduplicated
+  response belongs to an existing ticket or another caller: stop without
+  writing markers, reassigning, or reopening it. POST exactly one comment with body
+  `BUZZ_CHANNEL: <channel-uuid>\nBUZZ_EVENT: <event-id-hex>`, then GET
+  `/api/issues/<issueId>/comments` and verify the exact combined body persisted.
+  Only after successful verification, PATCH `/api/issues/<issueId>` with
+  `{assigneeAgentId:"<resolved-agent-id>", status:"todo"}`; GET the issue and
+  assert both fields. Any comment write/readback failure must leave the draft
+  unassigned in backlog; stop and report failure without activating it.
+
+There is no research helper. Do not invent a repo, project, workspace or
+acceptance criteria the request does not have.
 
 **A schedule belongs to the profile that owns it.** Each expert has its own
 `HERMES_HOME` (e.g. `/opt/data/profiles/agt-scientist`) on the
@@ -349,12 +388,16 @@ printf '%s\n' \
   'Prototype: recipe-bot' \
   'Scope: ...' \
   'Acceptance: ...' |
-  opc-paperclip prototype-ticket create --name recipe-bot --title '...'
+  opc-paperclip prototype-ticket create --name recipe-bot --title '...' \
+    --buzz-channel <channel-uuid> --buzz-event <event-id-hex>
 ```
 
+This example is for Buzz; omit both origin flags on other surfaces.
 The helper matches the exact project name, resumes an existing project with
 its project and primary-workspace IDs, or creates a new first ticket with the
-name marker. It also rejects ambiguous projects and duplicate active tickets.
+name marker. It rejects ambiguous projects; if an active ticket already
+exists, it returns that ticket without changing its original origin or
+posting a new marker comment. Do not reassign or reopen that returned ticket.
 Do not use a model-authored curl create sequence or a near-miss name such as
 `recipe-bot-2`; that silently forks the directory, database, URL, and bookmark.
 
@@ -415,24 +458,22 @@ and let the agent add it when the need is real.
    it is absent or ambiguous, stop and ask rather than guessing:
    ```
    printf '%s\n' 'Lane: engineering' 'Scope: ...' 'Acceptance: ...' |
-     opc-paperclip engineering-ticket create --repo owner/repo --title '...'
+     opc-paperclip engineering-ticket create --repo owner/repo --title '...' \
+       --buzz-channel <channel-uuid> --buzz-event <event-id-hex>
    ```
-   For prototype, use the exact-name command shown above. The helper resolves
-   `assigneeAgentId`, binds project/workspace identity, and verifies the result;
-   do not write a direct issue-creation curl payload. Engineering descriptions
+   This example is for Buzz; omit both origin flags on other surfaces. For
+   prototype, use the exact-name command shown above. The helper resolves
+   `assigneeAgentId`, binds project/workspace identity, and verifies routing
+   before assignment; do not write a direct issue-creation curl payload.
+   Engineering descriptions
    must include:
    `完成後: gh repo create <name> --private --source . --remote origin --push, 把 repo URL 貼回本 ticket comment, 然後將 issue status 改為 done`
    plus repo visibility, tech stack, and user preferences.
-4. **Add the marker comments** immediately (Buzz only — skip them on surfaces
-   that are not Buzz). Two of them, one call each:
-   - `{"body":"BUZZ_CHANNEL: <channel-uuid>"}` — the Buzz channel the user
-     asked in.
-   - `{"body":"BUZZ_EVENT: <event-id>"}` — the id of the message that asked
-     for this (the same EVENT_ID you reply to). The event bridge posts the
-     result as a reply to it, so the answer lands in the thread that asked
-     rather than starting a new one. Omit it and the user gets a detached
-     notice with nothing tying it to their request.
-6. **Reply to the user** in whatever surface they asked from, WITH the link:
+4. **Do not add routing comments after creation.** The paired Buzz origin flags
+   already persist and verify the one combined marker before activation; the
+   event bridge uses it to reply in the requesting thread. If creation fails,
+   report the failure rather than assigning the unverified draft yourself.
+5. **Reply to the user** in whatever surface they asked from, WITH the link:
    「已建立 ticket <identifier> (lane: <lane>): $PAPERCLIP_PUBLIC_URL/issues/<identifier>
    開發中, 完成後我會貼結果。」
 
@@ -464,11 +505,12 @@ ticket exactly like "develop <X>":
    ```
    printf '%s\n' 'Lane: engineering' 'Existing PR/issue: <URL>' |
      opc-paperclip engineering-ticket create --repo owner/repo \
-       --title 'Resolve conflicts on owner/repo#<n>'
+       --title 'Resolve conflicts on owner/repo#<n>' \
+       --buzz-channel <channel-uuid> --buzz-event <event-id-hex>
    ```
-3. On Buzz, add the `BUZZ_CHANNEL:` and `BUZZ_EVENT:` marker comments; reply
-   to the user with the ticket link. The helper's
-   returned issue ID is the ID used for those marker steps.
+   This example is for Buzz; omit both origin flags on other surfaces.
+3. Reply to the user with the ticket link. Routing metadata was already
+   verified before assignment; do not post another marker comment.
 
 ## Notes
 

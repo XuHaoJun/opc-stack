@@ -121,13 +121,14 @@ create_ticket() { # <identifier-suffix> → prints "<id> <anchor>"
     local title="OPC event-loop smoke $1" anchor_id body id ident
     anchor_id="$(ensure_anchor)"
     [ -n "$anchor_id" ] || fail "could not read a Buzz event id to use as the thread anchor"
-    body="$(jq -nc --arg t "$title" --arg a "$AGENT" \
-        '{title:$t, description:"Synthetic ticket for tests/event-loop.sh; no agent run.", status:"backlog", assigneeAgentId:$a}')"
+    body="$(jq -nc --arg t "$title" \
+        '{title:$t, description:"Synthetic ticket for tests/event-loop.sh; no agent run.", status:"backlog"}')"
     id="$(pc_post "/companies/$COMPANY/issues" "$body" | jq -r '.id')"
     [ -n "$id" ] || fail "issue creation returned no id"
     ident="$(pc_get "/issues/$id" | jq -r '.identifier')"
-    pc_post "/issues/$id/comments" "$(jq -nc --arg c "$CHANNEL" '{body:("BUZZ_CHANNEL: " + $c)}')" >/dev/null
-    pc_post "/issues/$id/comments" "$(jq -nc --arg e "$anchor_id" '{body:("BUZZ_EVENT: " + $e)}')" >/dev/null
+    pc_post "/issues/$id/comments" "$(jq -nc --arg c "$CHANNEL" --arg e "$anchor_id" \
+        '{body:("BUZZ_CHANNEL: " + $c + "\nBUZZ_EVENT: " + $e)}')" >/dev/null
+    pc_patch "/issues/$id" "$(jq -nc --arg a "$AGENT" '{assigneeAgentId:$a}')" >/dev/null
     echo "$id $ident $anchor_id"
 }
 

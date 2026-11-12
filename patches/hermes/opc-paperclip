@@ -158,6 +158,62 @@ verify_json_field() {
     [ "$_actual" = "$_want" ] || die "Paperclip response field $_filter was $_actual, expected $_want" 4
 }
 
+validate_buzz_origin() {
+    if [ -n "$1" ] || [ -n "$2" ]; then
+        [ -n "$1" ] && [ -n "$2" ] ||
+            die "--buzz-channel and --buzz-event must be supplied together" 2
+    fi
+}
+
+create_ticket_json() { # company payload buzz-channel buzz-event
+    _origin_company="$1"
+    _origin_payload="$2"
+    _origin_channel="$3"
+    _origin_event="$4"
+    if [ -z "$_origin_channel" ]; then
+        api_request POST "/companies/$_origin_company/issues" "$_origin_payload"
+        return
+    fi
+    _origin_agent="$(printf '%s' "$_origin_payload" | jq -r '.assigneeAgentId')"
+    _origin_status="$(printf '%s' "$_origin_payload" | jq -r '.status // "todo"')"
+    _origin_draft="$(printf '%s' "$_origin_payload" |
+        jq -c '.assigneeAgentId=null | .status="backlog"')"
+    _origin_created="$(api_request POST "/companies/$_origin_company/issues" "$_origin_draft")" ||
+        die "failed to create unassigned Buzz ticket draft" 4
+    _origin_id="$(printf '%s' "$_origin_created" | jq -r '.id // empty')"
+    [ -n "$_origin_id" ] || die "Paperclip draft response has no id" 4
+    # An idempotent prototype replay may already be assigned. Keep its original
+    # thread; posting another marker would recreate the comment-wake race.
+    if printf '%s' "$_origin_created" | jq -e --arg agent "$_origin_agent" \
+        '.assigneeAgentId == $agent' >/dev/null; then
+        printf '%s\n' "$_origin_created"
+        return
+    fi
+    # Only the creator owns draft initialization. A replay can belong to
+    # another concurrent caller, which may assign the issue at any moment.
+    printf '%s' "$_origin_created" | jq -e '.deduplicated != true' >/dev/null ||
+        die "Buzz ticket $_origin_id is an existing draft; another caller owns routing setup" 4
+    printf '%s' "$_origin_created" | jq -e \
+        '.assigneeAgentId == null and .status == "backlog"' >/dev/null ||
+        die "Buzz ticket $_origin_id is not an unassigned backlog draft" 4
+    _origin_body="$(printf 'BUZZ_CHANNEL: %s\nBUZZ_EVENT: %s' "$_origin_channel" "$_origin_event")"
+    _origin_comment="$(api_request POST "/issues/$_origin_id/comments" "$(
+        jq -nc --arg body "$_origin_body" '{body:$body}'
+    )")" || die "routing write failed for draft $_origin_id; left unassigned in backlog" 4
+    _origin_comment_id="$(printf '%s' "$_origin_comment" | jq -r '.id // empty')"
+    [ -n "$_origin_comment_id" ] ||
+        die "routing response missing comment id for draft $_origin_id; left unassigned in backlog" 4
+    _origin_comments="$(api_request GET "/issues/$_origin_id/comments")" ||
+        die "routing readback failed for draft $_origin_id; left unassigned in backlog" 4
+    printf '%s' "$_origin_comments" | jq -e --arg id "$_origin_comment_id" \
+        --arg body "$_origin_body" 'any(.[]; .id == $id and .body == $body)' >/dev/null ||
+        die "routing verification failed for draft $_origin_id; left unassigned in backlog" 4
+    api_request PATCH "/issues/$_origin_id" "$(
+        jq -nc --arg agent "$_origin_agent" --arg status "$_origin_status" \
+            '{assigneeAgentId:$agent,status:$status}'
+    )" || die "activation failed for Buzz ticket $_origin_id; inspect its state before retrying" 4
+}
+
 FULLSTACK_MAX_CONCURRENT_RUNS_DEFAULT=4
 
 agent_by_role() {
@@ -910,16 +966,21 @@ prototype_ticket_create() {
     _name=""
     _title=""
     _priority=""
+    _buzz_channel=""
+    _buzz_event=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --name) [ "$#" -ge 2 ] || die "--name requires a value" 2; _name="$2"; shift 2 ;;
             --title) [ "$#" -ge 2 ] || die "--title requires a value" 2; _title="$2"; shift 2 ;;
             --priority) [ "$#" -ge 2 ] || die "--priority requires a value" 2; _priority="$2"; shift 2 ;;
-            *) die "usage: opc-paperclip prototype-ticket create --name <name> --title <title> [--priority <p>]" 2 ;;
+            --buzz-channel) [ "$#" -ge 2 ] || die "--buzz-channel requires a value" 2; _buzz_channel="$2"; shift 2 ;;
+            --buzz-event) [ "$#" -ge 2 ] || die "--buzz-event requires a value" 2; _buzz_event="$2"; shift 2 ;;
+            *) die "usage: opc-paperclip prototype-ticket create --name <name> --title <title> [--priority <p>] [--buzz-channel <uuid> --buzz-event <id>]" 2 ;;
         esac
     done
     [ -n "$_name" ] || die "--name is required" 2
     [ -n "$_title" ] || die "--title is required" 2
+    validate_buzz_origin "$_buzz_channel" "$_buzz_event"
     printf '%s' "$_name" | grep -Eq '^[a-z][a-z0-9-]{1,40}$' ||
         die "invalid prototype name '$_name' — must match ^[a-z][a-z0-9-]{1,40}\$" 2
 
@@ -959,6 +1020,10 @@ prototype_ticket_create() {
                     [ -n "$_existing_id" ] || die "existing prototype ticket has no id" 4
                     _issue="$(api_request GET "/issues/$_existing_id")" ||
                         die "failed to read existing prototype ticket" 4
+                    if printf '%s' "$_issue" | jq -e \
+                        '.status == "backlog" and .assigneeAgentId == null' >/dev/null; then
+                        die "prototype ticket $_existing_id is an unassigned draft; Buzz routing setup is incomplete" 4
+                    fi
                     safe_issue_json "$_issue"
                     rm -f "$_description_file"
                     return 0
@@ -1002,7 +1067,7 @@ prototype_ticket_create() {
     _payload="$(prototype_payload_json "$_description_file" "$_title" "$_priority" \
         "$_agent_id" "$_project_id" "$_workspace_id" "$_idempotency_key" \
         "Prototype: $_name" "$_terminal_epoch" "$_allow_duplicate" "$_labels_json")"
-    _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
+    _created="$(create_ticket_json "$_company" "$_payload" "$_buzz_channel" "$_buzz_event")" ||
         die "failed to create prototype ticket" 4
     rm -f "$_description_file"
     _issue_id="$(printf '%s' "$_created" | jq -r '.id // empty')"
@@ -1089,6 +1154,8 @@ cmd_engineering_ticket_create() {
     _status=""
     _mode=inherit
     _execution_workspace_id=""
+    _buzz_channel=""
+    _buzz_event=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --repo) [ "$#" -ge 2 ] || die "--repo requires a value" 2; _repo="$2"; shift 2 ;;
@@ -1097,11 +1164,14 @@ cmd_engineering_ticket_create() {
             --status) [ "$#" -ge 2 ] || die "--status requires a value" 2; _status="$2"; shift 2 ;;
             --mode) [ "$#" -ge 2 ] || die "--mode requires a value" 2; _mode="$2"; shift 2 ;;
             --execution-workspace-id) [ "$#" -ge 2 ] || die "--execution-workspace-id requires a value" 2; _execution_workspace_id="$2"; shift 2 ;;
-            *) die "usage: opc-paperclip engineering-ticket create --repo <repo> --title <title> [--priority <p>] [--status todo|backlog] [--mode <mode>] [--execution-workspace-id <uuid>]" 2 ;;
+            --buzz-channel) [ "$#" -ge 2 ] || die "--buzz-channel requires a value" 2; _buzz_channel="$2"; shift 2 ;;
+            --buzz-event) [ "$#" -ge 2 ] || die "--buzz-event requires a value" 2; _buzz_event="$2"; shift 2 ;;
+            *) die "usage: opc-paperclip engineering-ticket create --repo <repo> --title <title> [--priority <p>] [--status todo|backlog] [--mode <mode>] [--execution-workspace-id <uuid>] [--buzz-channel <uuid> --buzz-event <id>]" 2 ;;
         esac
     done
     [ -n "$_repo" ] || die "--repo is required" 2
     [ -n "$_title" ] || die "--title is required" 2
+    validate_buzz_origin "$_buzz_channel" "$_buzz_event"
     case "$_status" in ""|todo|backlog) ;; *) die "status must be todo or backlog" 2 ;; esac
     case "$_mode" in
         inherit) [ -z "$_execution_workspace_id" ] || die "--execution-workspace-id requires --mode reuse_existing" 2 ;;
@@ -1148,7 +1218,7 @@ cmd_engineering_ticket_create() {
         "$_workspace_id" "$_settings" "$_labels_json")"
     rm -f "$_description_file"
     _company="$(company_id)"
-    _created="$(api_request POST "/companies/$_company/issues" "$_payload")" ||
+    _created="$(create_ticket_json "$_company" "$_payload" "$_buzz_channel" "$_buzz_event")" ||
         die "failed to create engineering ticket" 4
     _issue_id="$(printf '%s' "$_created" | jq -r '.id // empty')"
     [ -n "$_issue_id" ] || die "Paperclip issue create response has no id" 4

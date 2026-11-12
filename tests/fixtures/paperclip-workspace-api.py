@@ -38,6 +38,8 @@ DEFAULT_STATE = {
     "agents": [DEFAULT_ENGINEER],
     "projects": [],
     "issues": [],
+    "comments": [],
+    "issueHistory": [],
     "labels": [],
 }
 STATE_PATH = Path(os.environ.get("PAPERCLIP_FIXTURE_STATE", "")) if os.environ.get("PAPERCLIP_FIXTURE_STATE") else None
@@ -134,6 +136,32 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid JSON object"})
             return
         with LOCK:
+            if len(path) == 4 and path[:2] == ["api", "issues"] and path[3] == "comments":
+                issue = self._find_issue(path[2])
+                if issue is None:
+                    self._send_json(404, {"error": "issue not found"})
+                    return
+                self._record_issue("comment", issue, payload)
+                faults = STATE.get("faults", {})
+                if faults.get("commentWriteStatus"):
+                    self._send_json(int(faults["commentWriteStatus"]), {"error": "comment write failed"})
+                    return
+                comment = dict(payload)
+                comment.update({
+                    "id": self._next_id("comment-", "comments"),
+                    "issueId": issue["id"],
+                    "authorAgentId": None,
+                    "authorUserId": "fixture-board",
+                    "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+                if not faults.get("discardCommentWrites"):
+                    stored = dict(comment)
+                    if "storedCommentBody" in faults:
+                        stored["body"] = faults["storedCommentBody"]
+                    STATE.setdefault("comments", []).append(stored)
+                save_state()
+                self._send_json(201, comment)
+                return
             if len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "projects":
                 company_id = path[2]
                 if company_id != str(STATE.get("company", {}).get("id", "")):
@@ -200,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
                         None,
                     )
                     if replay is not None:
-                        self._send_json(200, replay)
+                        self._send_json(200, {**replay, "deduplicated": True, "deduplicationReason": "idempotency_key"})
                         return
                 if payload.get("allowDuplicate") is False:
                     title = " ".join(str(payload.get("title", "")).split()).lower()
@@ -234,7 +262,7 @@ class Handler(BaseHTTPRequestHandler):
                         None,
                     )
                     if replay is not None:
-                        self._send_json(200, replay)
+                        self._send_json(200, {**replay, "deduplicated": True, "deduplicationReason": "recent_open_title"})
                         return
                 issue = dict(payload)
                 settings = issue.get("executionWorkspaceSettings")
@@ -251,6 +279,7 @@ class Handler(BaseHTTPRequestHandler):
                 issue.setdefault("status", "todo")
                 issue.setdefault("createdAt", datetime.datetime.now(datetime.timezone.utc).isoformat())
                 STATE.setdefault("issues", []).append(issue)
+                self._record_issue("create", issue, payload)
                 save_state()
                 self._send_json(201, issue)
                 return
@@ -261,7 +290,7 @@ class Handler(BaseHTTPRequestHandler):
         return f"00000000-0000-4000-8000-{base + ordinal:012x}"
 
     def _next_id(self, prefix: str, collection: str) -> str:
-        base = {"projects": 0x101, "issues": 0x301, "labels": 0x401}[collection]
+        base = {"projects": 0x101, "issues": 0x301, "labels": 0x401, "comments": 0x501}[collection]
         existing = {
             str(item.get("id", ""))
             for item in STATE.get(collection, [])
@@ -312,6 +341,25 @@ class Handler(BaseHTTPRequestHandler):
             None,
         )
 
+    def _find_issue(self, issue_id: str) -> dict | None:
+        return next(
+            (issue for issue in STATE.get("issues", []) if str(issue.get("id", "")) == issue_id),
+            None,
+        )
+
+    def _record_issue(self, operation: str, issue: dict, payload: dict | None = None) -> None:
+        # Snapshot API-observable state, not a model of Paperclip's wake scheduler.
+        STATE.setdefault("issueHistory", []).append(json.loads(json.dumps({
+            "operation": operation,
+            "issue": issue,
+            "payload": payload,
+            "comments": [
+                comment for comment in STATE.get("comments", [])
+                if comment.get("issueId") == issue["id"]
+            ],
+        })))
+        save_state()
+
 
     def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
@@ -332,6 +380,15 @@ class Handler(BaseHTTPRequestHandler):
                 experimental.update(update)
                 save_state()
                 self._send_json(200, experimental)
+            elif len(path) == 3 and path[:2] == ["api", "issues"]:
+                issue = self._find_issue(path[2])
+                if issue is None:
+                    self._send_json(404, {"error": "issue not found"})
+                    return
+                self._record_issue("patch", issue, update)
+                issue.update(update)
+                save_state()
+                self._send_json(200, issue)
             elif len(path) == 3 and path[:2] == ["api", "agents"]:
                 for agent in STATE.get("agents", []):
                     if str(agent.get("id", "")) == path[2]:
@@ -416,6 +473,20 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json(200, agent)
                         return
                 self._send_json(404, {"error": "agent not found"})
+            elif len(path) == 4 and path[:2] == ["api", "issues"] and path[3] == "comments":
+                issue = self._find_issue(path[2])
+                if issue is None:
+                    self._send_json(404, {"error": "issue not found"})
+                    return
+                self._record_issue("comments", issue)
+                faults = STATE.get("faults", {})
+                if faults.get("commentReadStatus"):
+                    self._send_json(int(faults["commentReadStatus"]), {"error": "comment read failed"})
+                    return
+                self._send_json(200, [
+                    comment for comment in STATE.get("comments", [])
+                    if comment.get("issueId") == issue["id"]
+                ])
             elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "labels":
                 self._company_collection(path[2], "labels")
             elif len(path) == 4 and path[:2] == ["api", "companies"] and path[3] == "issues":

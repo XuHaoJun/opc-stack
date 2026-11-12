@@ -180,13 +180,15 @@ COPY --from=deps /app/patches/acpx@0.12.0.patch /app/patches/acpx@0.13.1.patch p
 # Keep the closed host projection intact; the adapter contributes only OPC
 # capabilities, and remote callers still supply no host environment.
 COPY --from=deps /usr/bin/patch /usr/local/bin/opc-build-patch
-COPY opc/patches/omp-acpx-runtime-env.patch opc/patches/task-bound-runtime-mcp.patch opc/patches/acpx-profile-attestation.patch opc/patches/custom-acp-command-probe.patch opc/patches/harness-health-verification.patch /tmp/
+COPY opc/patches/omp-acpx-runtime-env.patch opc/patches/task-bound-runtime-mcp.patch opc/patches/acpx-profile-attestation.patch opc/patches/custom-acp-command-probe.patch opc/patches/harness-health-verification.patch opc/patches/unassigned-comment-wake.patch /tmp/
 RUN opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/omp-acpx-runtime-env.patch \
   && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/task-bound-runtime-mcp.patch \
   && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/acpx-profile-attestation.patch \
   && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/custom-acp-command-probe.patch \
   && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/harness-health-verification.patch \
-  && rm /tmp/omp-acpx-runtime-env.patch /tmp/task-bound-runtime-mcp.patch /tmp/acpx-profile-attestation.patch /tmp/custom-acp-command-probe.patch /tmp/harness-health-verification.patch /usr/local/bin/opc-build-patch
+  && opc-build-patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/unassigned-comment-wake.patch \
+  && rm /tmp/omp-acpx-runtime-env.patch /tmp/task-bound-runtime-mcp.patch /tmp/acpx-profile-attestation.patch /tmp/custom-acp-command-probe.patch /tmp/harness-health-verification.patch /tmp/unassigned-comment-wake.patch /usr/local/bin/opc-build-patch
+RUN pnpm --filter @paperclipai/server exec vitest run src/services/issue-comment-wakeup.test.ts
 RUN find packages/paperclip-runner/runner packages/paperclip-runner/protocol -type f -exec touch -d @0 {} + \
   && touch -d @0 packages/paperclip-runner/rust-toolchain.toml
 # Both the browser bundle and server stamp need the exact source commit.
