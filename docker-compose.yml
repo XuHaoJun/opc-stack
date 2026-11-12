@@ -724,6 +724,8 @@ services:
       # host's LAN IP if you open the board from other devices.
       PAPERCLIP_ALLOWED_HOSTNAMES: ${PAPERCLIP_ALLOWED_HOSTNAMES:-paperclip}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set in .env}
+      # Native managed-checkout GitHub auth; company credentials take precedence.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}

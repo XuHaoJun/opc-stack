@@ -512,6 +512,27 @@ Setup (one-time):
    ```
    Rewrites ssh `IdentityFile` paths to the container layout and pre-seeds
    the `github.com` host key. No rebuild needed.
+   The generated `/creds/git/config` includes a credential helper scoped to
+   `https://github.com`: plain agent `git fetch` / `git push` use
+   `gh auth git-credential`, which reads `GH_TOKEN` / `GITHUB_TOKEN` or the
+   synced gh login. Tokens are never written into this Git config; host
+   credential helpers are not copied. SSH URLs still use the existing SSH setup.
+   Existing installs pick up this helper by running `scripts/sync-gh-creds.sh`
+   above; no image rebuild or Paperclip restart is needed.
+   Offline regression: `python3 tests/github-git-auth.py -v` (requires Docker,
+   Git and gh; uses fixture credentials and no network).
+3. **Managed private-repository checkouts**: set `GITHUB_TOKEN` in `.env`
+   (a PAT or the output of `gh auth token --hostname github.com`; do not
+   paste it into tickets). Compose passes it to the Paperclip server.
+   Managed GitHub identities and company token secrets take precedence.
+   With a token, Paperclip uses HTTPS auth for both HTTPS and GitHub SSH URLs.
+   This is separate from the ambient `/creds` SSH/gh configuration; it does
+   not automatically extract or refresh the host's gh token.
+   After setting or rotating the token, recreate only Paperclip (no image rebuild):
+   ```bash
+   docker compose up -d --no-deps --force-recreate paperclip
+   ```
+   `docker compose restart` alone does not load changed `.env` values.
 
 The Paperclip admin/company/API key are created automatically by the
 `paperclip-bootstrap` one-shot (see Setup pages above); the executor agent is

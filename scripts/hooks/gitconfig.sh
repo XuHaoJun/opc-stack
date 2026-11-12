@@ -2,10 +2,9 @@
 # gitconfig source transform — runs inside host-sync-worker after
 # /src/gitconfig → /dst/gitconfig.
 #
-# Extracts a minimal git identity into the consumer layout
-# /creds/git/config ([user] name/email + [init] defaultBranch). The worker's
-# raw copy is removed — the volume only carries the extracted form. Include/
-# signing/section complexity deliberately not carried.
+# Extracts git identity into /creds/git/config and adds a GitHub-only gh helper.
+# The helper reads credentials at invocation time; no token is written here.
+# The raw copy is removed; host includes/signing/helpers are not carried.
 set -eu
 
 rm -rf /dst/gitconfig
@@ -16,6 +15,9 @@ mkdir -p /dst/git
     sed -n "/^[[:space:]]*\[user\]/,/^\[/p" /src/gitconfig | grep -E "^[[:space:]]*(name|email)[[:space:]]*=" | head -2 | sed "s/^[[:space:]]*//"
     echo "[init]"
     echo "  defaultBranch = main"
+    printf '%s\n' '[credential "https://github.com"]' \
+        '  helper =' \
+        '  helper = !gh auth git-credential'
 } > /dst/git/config
 
 if ! grep -q "^name" /dst/git/config; then
