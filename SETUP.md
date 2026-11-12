@@ -78,7 +78,7 @@ its Dockerfile copies `/nix-seed` out of the seed image via
 
 On the first boot with empty `*-mise` volumes (fresh install or after
 `down -v`), each entrypoint auto-installs the mise-managed toolchains —
-node@lts, rust@stable, and the omp prebuilt — a few hundred MB of downloads
+node@lts, bun@1.4.4, rust@stable, and the omp prebuilt — a few hundred MB of downloads
 that can take a couple of minutes. Verify once the stack has settled:
 
 ```bash
@@ -87,7 +87,16 @@ docker exec opc-buzz-1 sh -c 'mise ls; just --version; gh --version; omp --versi
 
 If a tool reports missing, it self-heals on the next boot (the nix seed
 checks rg/mise/just/gh and re-adds the 8-tool set; the mise seed re-adds
-node/rust/omp when absent).
+node/bun/rust/omp when absent). Existing Bun installs and global version choices
+are left untouched; the Bun bootstrap pin applies only when Bun is missing.
+
+For an existing Paperclip container, install and select the same Bun version
+without rebuilding:
+
+```bash
+docker compose exec -T -u root paperclip mise use -g bun@1.4.4
+docker compose exec -T -u node paperclip bun --version
+```
 
 ## Image prefix / project name
 
@@ -895,7 +904,7 @@ nixpkgs packages: it is installed into the seed image and copied into the
 volume, so review the `nix` and `live-nix` rows independently.
 
 `omp` (Oh My Pi) — the Paperclip executor agent runtime — is mise-managed:
-the entrypoint installs the prebuilt `github:can1357/oh-my-pi@18.16.0` into each
+the entrypoint installs the prebuilt `github:can1357/oh-my-pi@18.19.0` into each
 `*-mise` volume on first boot (and re-adds it if missing). The nix derivation
 can't build in image environments (bun EPERM), so omp is not part of the nix
 seed. It runs as the `Fullstack Engineer` agent via the claude_local adapter
@@ -911,7 +920,7 @@ that container until its image has been rebuilt with the new bootstrap pin.
 
 ```bash
 for c in buzz frontdoor hermes hermes-dashboard paperclip; do
-  docker compose exec -T -u root "$c" mise use -g github:can1357/oh-my-pi@18.16.0
+  docker compose exec -T -u root "$c" mise use -g github:can1357/oh-my-pi@18.19.0
 done
 for c in buzz frontdoor hermes hermes-dashboard paperclip; do
   echo -n "$c: "; docker compose exec -T "$c" omp --version

@@ -3,7 +3,7 @@
 # (mise binary comes from the nix profile, so nix PATH must be active first).
 #
 # Ensures the mise-managed toolchains exist on the persistent *-mise volume:
-# node@lts, rust@stable, and omp (prebuilt from GitHub releases — the nix
+# node@lts, bun@1.4.4, rust@stable, and omp (prebuilt from GitHub releases — the nix
 # derivation for omp cannot build in image environments, bun EPERM). Installs
 # only when a toolchain is missing (fresh volume / down -v); existing
 # installs are left untouched. Per-tool check → a failed install retries on
@@ -20,6 +20,10 @@ opc_mise_seed() {
         echo "[mise] first boot: installing node@lts (global)"
         mise use -g node@lts || echo "[mise] node install failed (network?)" >&2
     fi
+    if [ ! -d "$MISE_DATA_DIR/installs/bun" ]; then
+        echo "[mise] first boot: installing bun@1.4.4 (global)"
+        mise use -g bun@1.4.4 || echo "[mise] bun install failed (network?)" >&2
+    fi
     if [ ! -d "$MISE_DATA_DIR/installs/rust" ]; then
         echo "[mise] first boot: installing rust@stable (global, rustup)"
         mise use -g rust@stable || echo "[mise] rust install failed (network?)" >&2
@@ -32,6 +36,6 @@ opc_mise_seed() {
     fi
     if [ ! -d "$MISE_DATA_DIR/installs/github-can1357-oh-my-pi" ]; then
         echo "[mise] first boot: installing omp (prebuilt, github releases)"
-        mise use -g github:can1357/oh-my-pi@18.16.0 || echo "[mise] omp install failed (network?)" >&2
+        mise use -g github:can1357/oh-my-pi@18.19.0 || echo "[mise] omp install failed (network?)" >&2
     fi
 }
