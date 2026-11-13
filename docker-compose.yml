@@ -806,10 +806,21 @@ services:
       # the board itself, which holds every ticket and config in the stack.
       #
       # Tighten it per deployment if you want: DEVENV_HTTP_BIND=127.0.0.1 for
-      # local-only, or a tailnet address (Tailscale 100.x) to reach your own
-      # devices without listening on the LAN. Whatever you choose,
-      # DEVENV_HTTP_PUBLIC_HOST must resolve to it or DEV_URL advertises an
-      # address the browser cannot reach.
+      # local-only. Whatever you choose, DEVENV_HTTP_PUBLIC_HOST must resolve
+      # to it or DEV_URL advertises an address the browser cannot reach.
+      #
+      # Do NOT bind to an address an interface brings up later — a Tailscale
+      # 100.x, a VPN, a DHCP lease. At boot dockerd starts containers as soon
+      # as it is up; if tailscaled has not assigned 100.x yet the bind fails
+      # with `cannot assign requested address`, and dockerd does NOT apply the
+      # restart policy to that failure — paperclip simply stays down until
+      # someone runs `up` by hand. It is a race, so it only fails sometimes.
+      # Unit ordering (After=tailscaled) does not fix it: the daemon starting
+      # is not the address existing. To reach the stack only over the tailnet,
+      # filter in the firewall instead (DOCKER-USER chain, match on
+      # `-i tailscale0` — a rule by interface name exists whether or not the
+      # interface is up yet), which also covers 3100/3000/8642 rather than
+      # only the preview range.
       - "${DEVENV_HTTP_BIND:-0.0.0.0}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}"
     volumes:
       - paperclip-data:/paperclip
