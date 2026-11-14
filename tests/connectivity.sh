@@ -28,6 +28,15 @@ http_ok() { # http_ok <url> [ok-codes...]  → exit 0 if status matches any
   for w in $want; do [ "$code" = "$w" ] && return 0; done
   return 1
 }
+http_ok_host() { # http_ok_host <host> <port> <path> [ok-codes...] — loopback, custom Host
+  local host="$1" port="$2" path="$3"; shift 3
+  local want="${*:-200}"
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+      -H "Host: $host" "http://127.0.0.1:$port$path" 2>/dev/null || echo 000)"
+  for w in $want; do [ "$code" = "$w" ] && return 0; done
+  return 1
+}
 cid_of() { docker compose ps -a -q "$1" 2>/dev/null; } # container id by service name
 service_state() { # <service> → healthy|running|exited|… 
   local cid; cid="$(cid_of "$1")"
@@ -65,6 +74,16 @@ done
 
 echo "── HTTP endpoints (host → published ports) ──"
 check "buzz relay REST  :${BUZZ_PORT:-3000}/_readiness" http_ok "http://127.0.0.1:${BUZZ_PORT:-3000}/_readiness" 200
+# Single-community admission (BUZZ_MULTI_COMMUNITY_RELAY=false in compose):
+# the relay serves ordinary traffic only for the RELAY_URL authority, and
+# /_readiness above stays exempt. Both rows below are deliberate invariant
+# checks, not incidental behaviour — turn the flag back on and the 404 goes
+# green-as-200, which is what "one host = one community" is supposed to forbid.
+RELAY_HOST="${BUZZ_RELAY_URL#*://}"; RELAY_HOST="${RELAY_HOST%%/*}"; RELAY_HOST="${RELAY_HOST%%:*}"
+check "buzz relay serves canonical Host ($RELAY_HOST → NIP-11 200)" \
+  http_ok_host "$RELAY_HOST" "${BUZZ_PORT:-3000}" /info 200
+check "buzz relay rejects a non-canonical Host (→ 404)" \
+  http_ok_host "127.0.0.1" "${BUZZ_PORT:-3000}" /info 404
 check "hermes dashboard :${HERMES_DASHBOARD_PORT:-9119}/" http_ok "http://127.0.0.1:${HERMES_DASHBOARD_PORT:-9119}/" 200 401 302
 check "hermes API       :${HERMES_API_PORT:-8642}/" http_ok "http://127.0.0.1:${HERMES_API_PORT:-8642}/" 200 401 403 404
 # Expert agent profiles are served on the same port under /p/<name>.
