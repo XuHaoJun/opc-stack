@@ -14,7 +14,10 @@
 #   opc-relay     — the Buzz relay (Postgres + Redis + S3-backed media)
 #   opc-frontdoor — buzz-acp + buzz CLI + Hermes Agent CLI (ACP) in one box
 
-ARG RUST_VERSION=1.95
+# Must match `rust-toolchain.toml` at the pinned tag (1.98.1 at desktop-v0.5.30).
+# A lower base image still builds — rustup would download the pinned toolchain —
+# but then the build pays for two toolchains and the image comment lies.
+ARG RUST_VERSION=1.98.1
 ARG NODE_VERSION=24
 ARG DEBIAN_VERSION=bookworm
 
@@ -48,9 +51,14 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # ─── Stage 3: cook dependencies, then build the binaries ────────────────────
 FROM chef AS builder
+# `cmake` is not for our targets: `cargo chef cook` covers the whole workspace,
+# and since desktop-v0.5.29 the workspace carries the Huddle audio crates
+# (`buzz-voice` → `opusic-sys`, a cmake build script). Upstream's own Dockerfile
+# gained the same line at that tag.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        cmake \
         pkg-config \
         libssl-dev \
         ca-certificates \
@@ -149,6 +157,9 @@ COPY web/package.json web/
 COPY admin-web/package.json admin-web/
 RUN pnpm install --frozen-lockfile --filter buzz-web --filter buzz-admin-web
 COPY web/ web/
+# web/vite.config.ts resolves `../previews/invite-video/${source}` at build time
+# (invite-link preview video + poster); without these the vite build fails.
+COPY previews/invite-video/buzz-invite-loop.mp4 previews/invite-video/buzz-invite-poster.png previews/invite-video/
 COPY admin-web/ admin-web/
 RUN pnpm -C web build && pnpm -C admin-web build
 
