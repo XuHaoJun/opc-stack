@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.19
 #
 # OPC stack image for Buzz — adapted from the upstream ghcr.io/block/buzz
-# Dockerfile (tag desktop-v0.5.14). Changes vs upstream:
+# Dockerfile (tag desktop-v0.5.30). Changes vs upstream:
 #   1. Also builds `buzz-acp` and the `buzz` CLI so a companion container can
 #      bridge the relay to an ACP agent (Hermes front door).
 #   2. Runs as root inside the container (self-hosted, host-isolated; the
@@ -14,7 +14,10 @@
 #   opc-relay     — the Buzz relay (Postgres + Redis + S3-backed media)
 #   opc-frontdoor — buzz-acp + buzz CLI + Hermes Agent CLI (ACP) in one box
 
-ARG RUST_VERSION=1.95
+# Must match `rust-toolchain.toml` at the pinned tag (1.98.1 at desktop-v0.5.30).
+# A lower base image still builds — rustup would download the pinned toolchain —
+# but then the build pays for two toolchains and the image comment lies.
+ARG RUST_VERSION=1.98.1
 ARG NODE_VERSION=24
 ARG DEBIAN_VERSION=bookworm
 
@@ -48,9 +51,14 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # ─── Stage 3: cook dependencies, then build the binaries ────────────────────
 FROM chef AS builder
+# `cmake` is not for our targets: `cargo chef cook` covers the whole workspace,
+# and since desktop-v0.5.29 the workspace carries the Huddle audio crates
+# (`buzz-voice` → `opusic-sys`, a cmake build script). Upstream's own Dockerfile
+# gained the same line at that tag.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        cmake \
         pkg-config \
         libssl-dev \
         ca-certificates \
@@ -149,18 +157,29 @@ COPY web/package.json web/
 COPY admin-web/package.json admin-web/
 RUN pnpm install --frozen-lockfile --filter buzz-web --filter buzz-admin-web
 COPY web/ web/
+# web/vite.config.ts resolves `../previews/invite-video/${source}` at build time
+# (invite-link preview video + poster); without these the vite build fails.
+COPY previews/invite-video/buzz-invite-loop.mp4 previews/invite-video/buzz-invite-poster.png previews/invite-video/
 COPY admin-web/ admin-web/
 RUN pnpm -C web build && pnpm -C admin-web build
 
 # ─── Stage 5: shared runtime ────────────────────────────────────────────────
 FROM debian:${DEBIAN_VERSION}-slim AS runtime-base
 
+# `python3` is not for the relay: the OPC seed scripts that run in this image's
+# containers (`opc-model-seed.sh`, sourced by every entrypoint) parse and emit
+# YAML/JSON with it — `opc_yaml_quote` is a one-line python3 call. It was a
+# latent hole until 2026-11-14: the one-shots that run these scripts had exited
+# 0 before the model-seed work landed, and compose never re-runs a completed
+# one-shot, so only `--force-recreate` (i.e. an upgrade) exposed it as
+# `python3: not found` / exit 127.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
         openssl \
+        python3 \
         xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1000 buzz \

@@ -1,23 +1,24 @@
 diff --git a/crates/buzz-cli/src/commands/messages.rs b/crates/buzz-cli/src/commands/messages.rs
-index f80f928d3..d0f81913a 100644
 --- a/crates/buzz-cli/src/commands/messages.rs
 +++ b/crates/buzz-cli/src/commands/messages.rs
-@@ -1,5 +1,5 @@
+@@ -1,7 +1,7 @@
+ mod edit;
+ 
  use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 -use nostr::PublicKey;
 +use nostr::{PublicKey, Tag};
  use uuid::Uuid;
  
  use crate::client::{normalize_events, normalize_write_response, BuzzClient};
-@@ -606,6 +606,7 @@ pub struct SendMessageParams {
+@@ -626,6 +626,7 @@
      pub broadcast: bool,
      pub files: Vec<String>,
      pub mentions: Vec<String>,
 +    pub tags: Vec<String>,
+     pub from_thread: Option<String>,
  }
  
- pub async fn cmd_send_message(
-@@ -680,7 +681,7 @@ pub async fn cmd_send_message(
+@@ -744,7 +745,7 @@
  
      let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
  
@@ -26,7 +27,7 @@ index f80f928d3..d0f81913a 100644
          Some(45001) => {
              buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
                  .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
-@@ -742,6 +743,10 @@ pub async fn cmd_send_message(
+@@ -810,6 +811,10 @@
          }
      };
  
@@ -34,34 +35,34 @@ index f80f928d3..d0f81913a 100644
 +        builder = builder.tags(parse_extra_tags(&p.tags)?);
 +    }
 +
-     let event = client.sign_event(builder)?;
+     let event = client.sign_event(builder).await?;
      let emitted_mentions = event_mention_pubkeys(&event);
      let resp = client.submit_event(event).await?;
-@@ -945,6 +950,7 @@ pub async fn dispatch(
+@@ -990,6 +995,7 @@
              broadcast,
              files,
              mentions,
 +            tags,
+             from_thread,
          } => {
              cmd_send_message(
-                 client,
-@@ -956,6 +962,7 @@ pub async fn dispatch(
+@@ -1002,6 +1008,7 @@
                      broadcast,
                      files,
                      mentions,
 +                    tags,
+                     from_thread,
                  },
              )
-             .await
-@@ -1717,6 +1724,7 @@ mod tests {
+@@ -1935,6 +1942,7 @@
              broadcast: false,
              files: vec![],
              mentions: vec![],
 +            tags: vec![],
+             from_thread: None,
          }
      }
- 
-@@ -1889,3 +1897,54 @@ mod tests {
+@@ -2267,3 +2275,54 @@
          );
      }
  }
@@ -117,10 +118,9 @@ index f80f928d3..d0f81913a 100644
 +    }
 +}
 diff --git a/crates/buzz-cli/src/lib.rs b/crates/buzz-cli/src/lib.rs
-index c2f6b7e08..ed44bfee7 100644
 --- a/crates/buzz-cli/src/lib.rs
 +++ b/crates/buzz-cli/src/lib.rs
-@@ -434,6 +434,10 @@ pub enum MessagesCmd {
+@@ -652,6 +652,10 @@
          /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
          #[arg(long = "mention")]
          mentions: Vec<String>,

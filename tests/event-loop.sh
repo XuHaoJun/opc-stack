@@ -45,7 +45,7 @@ pc_patch() {
         -H "Content-Type: application/json" -d "$2" "$PCAPI$1"
 }
 messages() {
-    docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" messages get --channel $CHANNEL --limit 80" \
+    docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY --private-key \"\$(cat /keys/paperclip.nsec)\" messages get --channel $CHANNEL --limit 80" \
         2>/dev/null || echo '[]'
 }
 anchor() {
@@ -107,7 +107,7 @@ ensure_anchor() {
         # existing Buzz event to point at. Publish one neutral message as the
         # paperclip identity (it is not a driveable agent, so nothing wakes) and
         # use it as this run's thread anchor.
-        docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY_HTTP --private-key \"\$(cat /keys/paperclip.nsec)\" messages send --channel $CHANNEL --content 'event-loop anchor (test bootstrap)'" >/dev/null 2>&1 || true
+        docker compose exec -T frontdoor sh -c "BUZZ_AUTH_TAG= buzz --relay $RELAY --private-key \"\$(cat /keys/paperclip.nsec)\" messages send --channel $CHANNEL --content 'event-loop anchor (test bootstrap)'" >/dev/null 2>&1 || true
         for _ in $(seq 1 15); do
             a="$(anchor)"
             [ -n "$a" ] && break
