@@ -228,7 +228,19 @@ services:
       # fresh volume; 8 keeps the conformance check without the stall.
       BUZZ_GIT_PROBE_WRITERS: "8"
       BUZZ_GIT_REPO_PATH: /data/git/repos
-      RUST_LOG: buzz_relay=info
+      # The right-edge catch-all (`events_p_future`) holds every event written
+      # before 0.5.29 — 2308 rows on this deployment. Replacing it with month
+      # partitions is a one-way catalog change that upstream deliberately
+      # refuses to automate ("moving rows requires an operator"), so with the
+      # new default (true) every boot would log ERROR + partition_ensure
+      # degraded. Off keeps 0.5.28 behaviour: uncovered months are still
+      # created, the populated catch-all is left alone, and boot stays clean.
+      BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED: "false"
+      # 0.5.29 logs one INFO line per HTTP request, WS read and login under
+      # `buzz_relay::access` — 60% of this relay's log volume, which buries the
+      # relay's own INFO. `warn` keeps refusals, error statuses and aborted
+      # requests (the security-relevant subset) and drops the routine reads.
+      RUST_LOG: buzz_relay=info,buzz_relay::access=warn
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-v4.1-flash}

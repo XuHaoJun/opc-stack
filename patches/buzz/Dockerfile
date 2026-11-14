@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.19
 #
 # OPC stack image for Buzz — adapted from the upstream ghcr.io/block/buzz
-# Dockerfile (tag desktop-v0.5.14). Changes vs upstream:
+# Dockerfile (tag desktop-v0.5.30). Changes vs upstream:
 #   1. Also builds `buzz-acp` and the `buzz` CLI so a companion container can
 #      bridge the relay to an ACP agent (Hermes front door).
 #   2. Runs as root inside the container (self-hosted, host-isolated; the
