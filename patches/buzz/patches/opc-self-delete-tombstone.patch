@@ -1,0 +1,94 @@
+diff --git a/crates/buzz-relay/src/handlers/side_effects.rs b/crates/buzz-relay/src/handlers/side_effects.rs
+index f7f83f249..62cf50224 100644
+--- a/crates/buzz-relay/src/handlers/side_effects.rs
++++ b/crates/buzz-relay/src/handlers/side_effects.rs
+@@ -472,7 +472,7 @@ async fn may_delete_channel_event(
+     // An author deleting their own event re-passes the channel write gate, so a
+     // removed private-channel member cannot mutate old messages after access is
+     // revoked, and a guest cannot delete either.
+-    if author_delete_can_use_self_delete_path(author, actor, event)
++    if is_plain_self_delete(author, actor, event)
+         && super::ingest::check_channel_membership(
+             tenant.community(),
+             state,
+@@ -3577,7 +3577,22 @@ pub(crate) async fn persist_deletion(
+             emit_live_thread_summary(tenant, state, channel_id, root_id.clone());
+         }
+         if is_group_deletion {
+-            if let Err(e) = emit_group_deletion_tombstone(tenant, event, state, planned).await {
++            // A plain author self-delete is not announced to the room. Every
++            // client already drops the target from its own timeline from this
++            // 9005 alone, so a tombstone adds nothing but a permanent "removed a
++            // message" row for a message its author retracted. Accountability
++            // still needs the notice, so a moderator delete — a different
++            // actor, or any moderation metadata — keeps it.
++            let author =
++                effective_message_author(&planned.target.event, &state.relay_keypair.public_key());
++            if is_plain_self_delete(&author, &event.pubkey.to_bytes(), event) {
++                tracing::debug!(
++                    target_event = %hex::encode(&planned.id),
++                    "NIP-29 DELETE_EVENT: author self-delete, no room tombstone"
++                );
++            } else if let Err(e) =
++                emit_group_deletion_tombstone(tenant, event, state, planned).await
++            {
+                 error!(target_event = %hex::encode(&planned.id), "NIP-29 DELETE_EVENT tombstone failed: {e}");
+             }
+             info!(target_event = %hex::encode(&planned.id), "NIP-29 DELETE_EVENT processed");
+@@ -3852,7 +3867,11 @@ fn has_moderation_delete_metadata(event: &Event) -> bool {
+         .any(|tag_name| extract_tag_value(event, tag_name).is_some())
+ }
+ 
+-fn author_delete_can_use_self_delete_path(author: &[u8], actor: &[u8], event: &Event) -> bool {
++/// A deletion that removes the actor's own event and carries no moderation
++/// metadata — in short, not a moderation act. Two consequences share this one
++/// definition: such a delete authorizes through the ordinary channel write gate
++/// instead of the moderator path, and the room is not told about it.
++fn is_plain_self_delete(author: &[u8], actor: &[u8], event: &Event) -> bool {
+     author == actor && !has_moderation_delete_metadata(event)
+ }
+ 
+@@ -5099,7 +5118,19 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn author_self_delete_with_moderation_metadata_skips_self_delete_path() {
++    fn plain_author_self_delete_is_not_a_moderation_act() {
++        let keys = nostr::Keys::generate();
++        let actor = keys.public_key().to_bytes();
++        let event = EventBuilder::new(Kind::Custom(9005), "")
++            .tags([Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap()])
++            .sign_with_keys(&keys)
++            .expect("sign");
++
++        assert!(is_plain_self_delete(&actor, &actor, &event));
++    }
++
++    #[test]
++    fn moderation_metadata_is_not_a_plain_self_delete() {
+         let keys = nostr::Keys::generate();
+         let actor = keys.public_key().to_bytes();
+         let event = EventBuilder::new(Kind::Custom(9005), "")
+@@ -5107,9 +5138,19 @@ mod tests {
+             .sign_with_keys(&keys)
+             .expect("sign");
+ 
+-        assert!(!author_delete_can_use_self_delete_path(
+-            &actor, &actor, &event
+-        ));
++        assert!(!is_plain_self_delete(&actor, &actor, &event));
++    }
++
++    #[test]
++    fn removing_another_members_event_is_not_a_plain_self_delete() {
++        let author = nostr::Keys::generate().public_key().to_bytes();
++        let actor = nostr::Keys::generate().public_key().to_bytes();
++        let event = EventBuilder::new(Kind::Custom(9005), "")
++            .tags([Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap()])
++            .sign_with_keys(&nostr::Keys::generate())
++            .expect("sign");
++
++        assert!(!is_plain_self_delete(&author, &actor, &event));
+     }
+ 
+     #[test]

@@ -117,6 +117,20 @@ RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/opc-event-tag-cli.patch \
     && (cargo test --release --locked -p buzz-acp opc_event_gate_tests > /tmp/opc-gate-tests.log 2>&1 \
         || { cat /tmp/opc-gate-tests.log; exit 1; }) \
     && grep -Eq "test result: ok\. [1-9][0-9]* passed" /tmp/opc-gate-tests.log
+# NIP-29 delete: the room-facing tombstone (kind 40099 "message_deleted") is for
+# moderation only. An author retracting their own event emits the kind 9005
+# alone — every client already drops the target from its own timeline from that
+# event, so the tombstone only ever added a permanent "removed a message" system
+# row per self-delete (test probes and agents alike). A different actor, or any
+# moderation metadata, still announces itself.
+#
+# No in-build test gate here, unlike the patches above: the relay's lib-test
+# target `include_str!`s `docs/nips/NIP-MP.fixtures.json`, and `.dockerignore`
+# deliberately keeps `docs/` out of the build context. `--fuzz=0` is the drift
+# gate — any upstream move of these hunks stops the build. The predicate's unit
+# tests run with `cargo test -p buzz-relay --lib self_delete` on a full checkout.
+COPY opc/patches/opc-self-delete-tombstone.patch /tmp/
+RUN patch -p1 --fuzz=0 --no-backup-if-mismatch < /tmp/opc-self-delete-tombstone.patch
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay \
