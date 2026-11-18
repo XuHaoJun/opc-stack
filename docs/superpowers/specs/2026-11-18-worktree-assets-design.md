@@ -100,25 +100,51 @@ opc-assets (named volume，paperclip 以 :ro 掛在 /opt/opc-assets)
 
 ### Manifest（進版控）
 
-專案根目錄 `.worktree-assets.json`：
+專案根目錄 `.worktree-assets.json`。格式是**明確的 entry 清單**，不是 glob：
 
 ```json
 {
   "version": 1,
-  "store": "<store-key>",
+  "store": "example-store",
   "entries": [
-    { "target": "<worktree 相對路徑>", "source": "<store current 內的相對路徑>", "mode": "link" },
-    { "target": "<worktree 相對路徑>", "source": "<store current 內的相對路徑>", "mode": "clone" }
+    {
+      "target": "assets/reference",
+      "source": "immutable/reference",
+      "mode": "link"
+    },
+    {
+      "target": "assets/derived",
+      "source": "derived/base",
+      "mode": "clone"
+    }
   ]
 }
 ```
 
-規則：
+完整欄位：
 
-- `target` 必須是相對路徑、不得逃出 worktree 根目錄；同一 target 只允許一個 entry。
-- `source` 不得逃出 `current/`；不得是絕對路徑。
-- `mode` 只有 `link` 與 `clone`；未知值或未知版本 → 拒絕。
-- 專案自己的 `.gitignore` 必須涵蓋每個 target；CLI 會驗證（見下）。
+| 欄位 | 型別 | 必填 | 規則 |
+|---|---|---|---|
+| `version` | integer | 是 | 目前只有 `1`；其他值拒絕 |
+| `store` | string | 是 | `[a-z0-9][a-z0-9._-]*`，對應 `/opt/opc-assets/<store>` |
+| `entries` | array | 是 | 至少 1 個；同一 `target` 不得重複 |
+| `entries[].target` | string | 是 | POSIX 相對路徑；不得是絕對路徑、不得含 `..`、不得指向 `.git`/`.worktree-assets.json`；不得以 `/` 結尾 |
+| `entries[].source` | string | 是 | POSIX 相對路徑，相對於 `<store>/current/`；不得含 `..`；必須存在（檔案或目錄） |
+| `entries[].mode` | string | 是 | `link` 或 `clone`；`clone` 只接受目錄 |
+| `entries[].optional` | boolean | 否 | `true` 時 source 不存在只警告、不建立；預設 `false` |
+
+未知欄位一律拒絕（避免打錯字被靜默忽略）。
+
+**為什麼不是 glob？** 參考過的專案各自只支援一種模式：
+
+- [`git-worktree-share`](https://github.com/keithamus/git-worktree-share)：`.manifest` 是一行一個路徑，全部 symlink。
+- [`worktree-link`](https://github.com/km-tr/worktree-link)：`.worktreelinks` 用 gitignore 語法（`node_modules`、`.env.*`），全部 symlink。
+- Claude Code `worktree.symlinkDirectories`：JSON 陣列，全部 symlink。
+- Orca `orca.yaml` 的 `sharedDirectories`（link）與 `.worktreeinclude`（copy）是**兩個檔案、兩種模式**，不能逐條指定。
+
+我們需要「同一個 repo 裡，有些 target 是唯讀共用、有些是可寫 COW」，而且 target/source 要能分開命名（不是主 worktree 的同名路徑），所以用明確 entry。若之後真的需要 glob，可以再加 `patterns` 欄位當語法糖，不影響現在的格式。
+
+專案自己的 `.gitignore` 必須涵蓋每個 `target`；CLI 會驗證（見下）。
 
 ### CLI：`worktree-assets`
 
@@ -181,9 +207,9 @@ Exit codes（依指令）：
 
 ### Import（operator，原子換版）
 
-`scripts/import-assets.sh <store> <host-source> --map <hostRel>=<setRel> [--map ...] [--force] [--prune-old]`：
+`scripts/import-assets.sh <store> <host-source> --map <hostPath>=<setRel> [--map ...] [--force] [--prune-old]`：
 
-- 沒有隱含映射；`--map` 必須明確（避免把不相關的目錄匯進 store）。`--map` 可重複。
+- 沒有隱含映射；`--map` 必須明確（避免把不相關的目錄匯進 store）。`--map` 可重複；`<hostPath>` 可以是相對於 `<host-source>` 的路徑，也可以是絕對路徑（所以可從不同目錄匯入同一個 version）。
 - 解析 volume：`docker volume ls --filter label=com.docker.compose.project=<project> --filter label=com.docker.compose.volume=opc-assets`；找不到就報錯，請先 `docker compose up -d paperclip` 讓 compose 建立（避免 compose project prefix 不一致而匯入孤兒 volume）。
 - 流程：
   1. 建立 `versions/<UTC timestamp>/`，用 tar stream 寫入（不經 host mount）：`tar -C "$HOST_SRC" -cf - <hostRel> | docker run --rm -i -v "$VOLUME":/assets alpine:3 sh -c 'mkdir -p ... && tar -C ... -xf -'`。
@@ -192,6 +218,38 @@ Exit codes（依指令）：
   4. 預設保留上一個版本；`--prune-old` 才刪。
 - 中途被殺：沒有 `.import.json` 的 version 目錄會被下次 import 清掉；`current` 不會切換，live worktree 不受影響。
 - `--force` 也是 staged + atomic swap，不做 in-place 覆寫。
+
+### 素材實際要放在哪裡（operator runbook）
+
+**先講清楚：這段是實作內容，不是現有功能。** 現在在 repo 目錄 `ls` 不會看到任何 volume —— `opc-assets` 是 Docker **named volume**，不是工作目錄下的資料夾，而且這個機制還沒實作。實作後：
+
+- volume 會出現在 `docker volume ls`（名稱帶 compose project 前綴），paperclip 以 `:ro` 掛在 `/opt/opc-assets`。
+- 唯一寫入路徑是 import script；**不要** `docker cp` 到 mountpoint，也不要在 repo 裡建 `assets/` 再想辦法搬進去。
+- 步驟：
+  1. `docker compose up -d paperclip`（讓 compose 建立 volume）。
+  2. 匯入（來源是目前宿主已有的 `_shared/assets`）：
+     ```sh
+     scripts/import-assets.sh champi-survivor \
+       /home/noah/champi-survivor-worktrees/_shared/assets \
+       --map Data=client/Data \
+       --map game=derived/game-base
+     ```
+  3. 驗證：
+     ```sh
+     docker run --rm -v <real-volume-name>:/a alpine:3 \
+       ls /a/champi-survivor/current
+     ```
+  4. 新 ticket 的 provision 會自動 `init`；既有 worktree 手動跑 `worktree-assets init`。
+
+**多途徑 / 多來源：**
+
+| 需求 | 支援方式 |
+|---|---|
+| 同一個 store 從多個目錄匯入 | `--map` 可重複；`<hostPath>` 可以是絕對路徑，所以可跨磁碟／目錄組成同一個 version |
+| 多個專案各自一份素材 | 同一個 volume 下多個 `<store>/`；各專案 manifest 的 `store` 不同即可 |
+| 多個獨立 volume | v1 不支援；一個 compose project 只有一個 `opc-assets`。要完全隔離就用不同 compose project |
+| 更新素材 | 重新跑 import（新 version + 原子 swap）；不要手動改 `current` |
+| 從網路下載 | v1 不支援；先下載到 host，再 import |
 
 ### 清理
 
