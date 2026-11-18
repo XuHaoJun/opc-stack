@@ -1,350 +1,137 @@
-# Worktree Asset Sharing — Design Spec
+# Paperclip Worktree Assets — 設計規格
 
-**日期**: 2026-11-18
-**狀態**: draft, 待審
-**範圍**: `opc-stack`（volume / CLI / import / compose）＋ 任一需要非版控素材的專案（manifest / provision script / `.gitignore` / 文件）
+日期：2026-11-18 · 狀態：設計稿，未實作
 
-## 背景
+## 問題與選擇
 
-Paperclip 的 execution workspace 是 `git worktree`：只含 tracked 檔案，每個 ticket 一個 worktree。對需要**大型、不進版控素材**的專案（客戶端資料、模型權重、地圖包、字型、影片），這代表：
+Git linked worktree 不會帶入主 checkout 的未追蹤檔案。讓新 worktree 取得這些檔案是常見需求：[Claude Code 的 `.worktreeinclude`](https://code.claude.com/docs/en/worktrees#copy-gitignored-files-into-worktrees) 和 [Worktrunk 的 `copy-ignored`](https://worktrunk.dev/step) 都提供這類功能。**常見的是補齊本機輸入，不是讓每個 worktree 永遠讀最新資料。**
 
-- 素材不存在於新 worktree；agent 得自己想辦法，或直接跳過相關驗證。
-- 把素材複製進每個 worktree 是 `大小 × ticket 數`。
-- 放進共享可寫目錄則是一個 ticket 的寫入會影響所有 ticket，`git status` 仍顯示乾淨（隱形），而且沒有任何自動回收路徑。
+`champi-survivor` 有約 5 GB 的本機遊戲來源資料與 194 MB 的可寫抽取樣板。來源不應放進 Git、上傳遠端或由 CI 分發；既有工具讀 `assets/Data`、寫 `assets/game`。要讓每個 worktree 使用與程式碼相容的同一版輸入、不複製 5 GB，並避免抽取改到其他 worktree。隔離單位是 **execution worktree**，不是 issue ID；若多個 issue 共用同一個 worktree，衍生物也共用。
 
-素材有兩種性質，必須分開處理：
-
-| 性質 | 例子 | 需求 |
-|---|---|---|
-| 不可變（來源資料） | 客戶端資料、預訓練權重、原始素材庫 | 一份、唯讀、所有 worktree 共用 |
-| 可變（per-ticket 衍生物） | 從來源抽出的檔案、轉檔結果、快取 | 每個 ticket 可自由新增／覆寫，互不影響，ticket 結束一起消失 |
-
-這份設計提供一個通用機制；`champi-survivor` 的遊戲素材只是第一個使用者（見附錄）。
-
-## 目標
-
-1. 每個 worktree 都能取得不可變素材，不必複製整份。
-2. 每個 ticket 都能產生自己的衍生物，互不影響，且不需要改專案既有的抽取／轉檔工具。
-3. **worktree 被 archive 時，per-ticket 衍生物一定跟著消失**；沒有第二個沒人清的資料池。
-4. 不引入 sidecar、不 patch `upstream/paperclip`、不依賴 `setupCommand`。
-5. 機制本身與專案無關：換一份 manifest 與 provision script 就能給另一個專案用。
-
-## 非目標
-
-- 不把 per-ticket 衍生物 promote 回共享樣板（v1）。共享樣板只由 operator 重新 import。
-- 不做 CI 的素材快取；CI 沒有素材，依賴素材的檢查要明確 skip。
-- 不改專案的抽取／轉檔工具。
-- 不改 Paperclip 的 reaper/compaction 行為。
-- 不覆蓋 project clone 本身（`instances/.../projects/<company>/<project>/<repo>`）的 cwd 執行；本設計只管 `git_worktree` 的 execution workspace。
-
-## 現況證據（2026-11-18 實測）
-
-| 事實 | 證據 |
+| 方案 | 適用範圍 |
 |---|---|
-| worktree 是 linked worktree，`.git` 是檔案 | `git worktree list`；`.git` 內容指向主 repo 的 `.git/worktrees/<name>` |
-| base ref 從 `origin/main` 開 | workspace operation log：`git worktree add -b <branch> <path> origin/main` |
-| **Paperclip 有 worktree provision 指令，create 與 reuse 都會跑** | `workspace-runtime.ts:3010` `resolveWorkspaceProvisionCommand`；`provisionExecutionWorktree` 在 `:3487`（reuse）、`:3647`/`:3744`（create）、`:4011`（restoration）被呼叫 |
-| provision 來源：`workspaceStrategy.provisionCommand`，否則 repo 的 `scripts/provision-worktree.sh` | `BUILTIN_WORKSPACE_PROVISION_COMMAND = "bash ./scripts/provision-worktree.sh"` |
-| provision 以 worktree 為 cwd，帶 `PAPERCLIP_WORKSPACE_CREATED=true/false` | `buildWorkspaceCommandEnv` |
-| provision 非零 exit 讓該次 run 失敗；environment 路徑有 300s timeout | `runWorkspaceCommand` → `WorkspaceCommandExitError`；`environment-run-orchestrator.ts:530` |
-| Paperclip 不執行 `setupCommand` | 只有 CRUD / portability 讀寫 |
-| reaper 的 clean 判定是 `git status --porcelain --untracked-files=all` 為空 | `execution-workspaces.ts:1906`、`:3473` |
-| ignored 檔案不擋 `git worktree remove`，且會一起刪除 | scratch repo 實測：8 MB ignored 檔 → `git worktree remove` rc=0，目錄消失 |
-| 未 ignored 的檔案會永久擋住 archive | 實測 `.claude/settings.local.json`（1 KB）讓 4 個 worktree 累積；清掉後立即 archive |
-| compaction 只認固定名稱（`node_modules` `dist` `build` `target` …） | `workspace-compaction.ts` `REGENERABLE_WORKSPACE_DIR_NAMES` |
-| archive 是唯一會刪整個 worktree 的路徑（terminal tree + clean + merged + 冷卻 1 天） | `execution-workspaces.ts:3440-3500` |
-| 宿主與 `/paperclip` volume 都是 btrfs；容器內 `cp --reflink=always` 成功 | scratch 檔實測 rc=0；`du` 會高報，實際共享 extent |
+| 普通複製／worktree 工具 | 小量未追蹤檔案優先採用；每個 worktree 複製 5 GB 不合適，另裝 Git hook 也不能取代 Paperclip 的 reuse 入口。 |
+| [Git LFS](https://git-lfs.com/)／既有 artifact registry | 可分發且已有存取控管的素材優先沿用；這案的素材只留在 operator 管理的本機。 |
+| **本機不可變素材 + worktree 自有衍生物** | 採用。Git 固定 revision，Paperclip provision 在既有工具路徑建出唯讀 link 與可寫 clone。 |
 
-## 設計
+## 支援邊界
 
-### 原則
+- 只支援**可信任專案、在 Paperclip 容器本機執行的 linked Git execution worktree**。project clone、prototype、SSH／sandbox／plugin、其他跳過本機 provision 的路徑，以及 CI 素材配送，不在範圍內。
+- Compose 建立 `opc-assets` named volume，只以 `:ro` 掛給 `paperclip` 的 `/opt/opc-assets`。空 volume 不影響開機；operator 的一次性匯入容器才有寫權。不用 host bind mount、privileged、Docker socket 或常駐服務；不 patch Paperclip、不改專案抽取工具。
+- `:ro` 是寫保護，**不是專案間存取控制**。同一容器內能讀掛載的程式可讀所有 store。不同信任範圍用不同部署；勿將憑證或跨專案受限資料放入共同掛載。
+- 不做 `current` alias、共享可寫快取、衍生物 promote、網路下載或自動 GC。`SETUP.md` 記錄匯入、備份與退役；乾淨 `setup.sh` 不會自行抓私有資料。
 
-| 資料性質 | 機制 | 理由 |
-|---|---|---|
-| 不可變 | `mode: "link"`：symlink 到 store | 一份；唯讀掛載讓誤寫直接失敗 |
-| 可變（per-ticket 衍生物） | `mode: "clone"`：COW 複本（`cp -a --reflink=auto`） | 每 ticket 可自由寫；寫入不回滲；磁碟≈變更量 |
-| per-ticket 產物 | 留在 worktree 內、target 被 gitignore | archive 時整棵刪除，沒有第二個 GC |
+## 固定素材版本
 
-專案只透過一份 manifest 宣告「哪個 target 用哪種模式」，CLI 不含任何專案名稱。
-
-### 資料流
-
-```mermaid
-flowchart LR
-  H["host asset source"] -->|one-shot import<br/>staging + atomic swap| V["opc-assets volume<br/>/opt/opc-assets/<store>/current"]
-  V -->|ro mount| P[paperclip]
-  P -->|provisionCommand| W["worktree targets"]
-  W -->|link| L["唯讀 set"]
-  W -->|clone| C["可寫 COW set"]
-  W -->|ticket 產生| C
-  R[reaper archive] -->|刪除整棵 worktree| W
+```text
+/opt/opc-assets/<store>/revisions/<sha256>/
+  inventory.json
+  payload/
 ```
 
-### Store 佈局（版本化 + 原子切換）
+`revision` 是 `sha256:<64 個小寫 hex>`；磁碟路徑只用 hex。發布後不覆寫。從同一份備份重匯要得到相同 ID：
 
-```
-opc-assets (named volume，paperclip 以 :ro 掛在 /opt/opc-assets)
-└── <store>/
-    ├── current -> versions/<id>         # 原子 swap
-    ├── versions/
-    │   ├── <id>/
-    │   │   ├── .import.json             # 最後才寫，代表這次 import 完成
-    │   │   ├── <set-a>/                 # 不可變 set
-    │   │   └── <set-b>/                 # 可變 set 的樣板
-    │   └── <previous-id>/               # 上一個版本，operator GC 前保留
-    └── .import.lock
-```
+- 以 `payload` 內的 POSIX 相對路徑為準。目錄也入清單（含空目錄，不含 `payload` 根目錄）。檔名用有效 UTF-8，不做 Unicode 正規化，排序用 UTF-8 byte order。
+- `inventory.json` 是以標準 `JSON.stringify` 產生的 UTF-8 JSON 陣列，無 BOM、縮排或末尾換行。目錄列為 `["d",path]`，檔案列為 `["f",path,sha256hex]`；revision 是這份 inventory bytes 的 SHA-256。只在匯入時 hash 檔案內容，不在每次 provision 重讀素材。
+- 只接受普通檔案及真目錄；拒絕 symlink、hardlink、特殊檔案，且不保留 ACL、owner、時間戳或執行位。發布資料的檔案為 0644、目錄為 0755；容器內由唯讀掛載保護。來源在匯入期間必須停止變動。
 
-- worktree 的 symlink 指向 `<store>/current/...`；換版是原子 symlink swap，讀者只會看到完整舊版或完整新版。
-- `clone` 在 ticket 首次 `init` 時複製；之後 store 換版不影響該 ticket，新 ticket 才拿新樣板。
+Git 記錄 `(store, revision)`，同一 worktree 的 link 與 clone 一定來自同一 revision。換版順序是**先匯入、再提交 manifest**；既有 worktree 不原地換版。舊分支與 reopen 仍以各自 worktree 的 manifest 為準，不追全域最新版。
 
-### Manifest（進版控）
+## 專案端契約
 
-專案根目錄 `.worktree-assets.json`。格式是**明確的 entry 清單**，不是 glob：
-
-```json
-{
-  "version": 1,
-  "store": "example-store",
-  "entries": [
-    {
-      "target": "assets/reference",
-      "source": "immutable/reference",
-      "mode": "link"
-    },
-    {
-      "target": "assets/derived",
-      "source": "derived/base",
-      "mode": "clone"
-    }
-  ]
-}
-```
-
-完整欄位：
-
-| 欄位 | 型別 | 必填 | 規則 |
-|---|---|---|---|
-| `version` | integer | 是 | 目前只有 `1`；其他值拒絕 |
-| `store` | string | 是 | `[a-z0-9][a-z0-9._-]*`，對應 `/opt/opc-assets/<store>` |
-| `entries` | array | 是 | 至少 1 個；同一 `target` 不得重複 |
-| `entries[].target` | string | 是 | POSIX 相對路徑；不得是絕對路徑、不得含 `..`、不得指向 `.git`/`.worktree-assets.json`；不得以 `/` 結尾 |
-| `entries[].source` | string | 是 | POSIX 相對路徑，相對於 `<store>/current/`；不得含 `..`；必須存在（檔案或目錄） |
-| `entries[].mode` | string | 是 | `link` 或 `clone`；`clone` 只接受目錄 |
-| `entries[].optional` | boolean | 否 | `true` 時 source 不存在只警告、不建立；預設 `false` |
-
-未知欄位一律拒絕（避免打錯字被靜默忽略）。
-
-**為什麼不是 glob？** 參考過的專案各自只支援一種模式：
-
-- [`git-worktree-share`](https://github.com/keithamus/git-worktree-share)：`.manifest` 是一行一個路徑，全部 symlink。
-- [`worktree-link`](https://github.com/km-tr/worktree-link)：`.worktreelinks` 用 gitignore 語法（`node_modules`、`.env.*`），全部 symlink。
-- Claude Code `worktree.symlinkDirectories`：JSON 陣列，全部 symlink。
-- Orca `orca.yaml` 的 `sharedDirectories`（link）與 `.worktreeinclude`（copy）是**兩個檔案、兩種模式**，不能逐條指定。
-
-我們需要「同一個 repo 裡，有些 target 是唯讀共用、有些是可寫 COW」，而且 target/source 要能分開命名（不是主 worktree 的同名路徑），所以用明確 entry。若之後真的需要 glob，可以再加 `patterns` 欄位當語法糖，不影響現在的格式。
-
-專案自己的 `.gitignore` 必須涵蓋每個 `target`；CLI 會驗證（見下）。
-
-### CLI：`worktree-assets`
-
-位置：`patches/paperclip/worktree-assets/`，image 內 `/usr/local/bin/worktree-assets`。Node（image 已有），只用 stdlib + `child_process`；預設 store root 是 `/opt/opc-assets`，可用 `WORKTREE_ASSETS_ROOT` 覆寫（測試用）。
-
-| 指令 | 行為 |
-|---|---|
-| `worktree-assets init [--quiet]` | 依 manifest 建立 target；已符合則跳過 |
-| `worktree-assets status [--json]` | 每個 entry 的狀態（見下） |
-| `worktree-assets check` | 驗 manifest、store、gitignore；不安全就 exit 2 |
-| `worktree-assets import-verify` | 對 `.import.json` 做檔案數／bytes 驗證（慢，operator 用） |
-
-狀態集合：`ok` / `missing` / `wrong-target` / `not-a-link` / `store-missing` / `store-incomplete` / `not-ignored` / `not-worktree`。
-
-`init` 的安全規則（fail closed）：
-
-1. `git check-ignore -q <target>` 必須成立；不是 ignored 就**什麼都不建**，exit 2。這是「放進去的東西清得掉」的保證。
-2. 只能在 linked worktree 執行（`.git` 是檔案）；在 project clone 直接 exit 0 並印 `not-worktree`。
-3. target 已存在：
-   - `link`：已是同一個 source 的 symlink → `ok`；其他形式 → 拒絕，不覆蓋、不刪除。
-   - `clone`：已存在 → `ok`（不重建）；其他形式 → 拒絕。
-4. `clone` 先複製到 `<parent>/.worktree-assets-staging-<pid>`，完成後 `chmod -R u+w`，再 `rename` 成 target。中途失敗只留 staging；下次 `init` 清掉自己的 stale staging 後重試，**不會留下半套 target**。
-5. lock 檔放在 target 的父目錄內（已被 ignore 的樹裡，例如 `assets/.worktree-assets-lock`），不會變成 untracked；stale lock（PID 已死或超過 10 分鐘）可接管。
-6. store 缺 or 不完整（無 `.import.json`）：warning + exit 0，不建立任何 link。素材不是每個 ticket 都需要，不能因此讓 run 失敗。
-7. `--force` 不提供；target 衝突一律交人處理（衍生物可安全重建，但 CLI 不替人決定）。
-
-Exit codes（依指令）：
-
-| 指令 | 0 | 1 | 2 | 3 |
-|---|---|---|---|---|
-| `init` | ok / 已符合 / store-missing（警告） | — | unsafe / not ignored / manifest invalid | IO 錯誤 |
-| `check` | 全部 OK | store-missing / incomplete | unsafe / not ignored / manifest invalid | IO 錯誤 |
-| `status` | 一律 0（狀態在輸出裡） | — | — | 內部錯誤 |
-
-### 觸發：Paperclip 原生 provisionCommand
-
-不需要 hook、不需要 sidecar、不需要 entrypoint 安裝器：
-
-1. 專案新增 `scripts/provision-worktree.sh`（tracked）：
-
-   ```sh
-   #!/bin/sh
-   # Paperclip 在 create 與 reuse 時都會以 worktree 為 cwd 執行這支。
-   # 缺 store 不讓 ticket 失敗；ignore 規則缺失才失敗（config bug 要大聲）。
-   [ -f .worktree-assets.json ] || exit 0
-   command -v worktree-assets >/dev/null 2>&1 || exit 0
-   worktree-assets init --quiet || exit $?
-   exit 0
-   ```
-
-   Paperclip 的 `resolveWorkspaceProvisionCommand` 會自動採用它；要改路徑或加參數可設 `workspaceStrategy.provisionCommand`。
-
-2. 行為契約：
-   - **store 缺失**：`init` warning + 0；run 繼續，agent 在 ticket 標「素材相關未驗證」。
-   - **not-ignored / manifest 壞掉**：exit 2 → provision 非零 → **run 失敗**，訊息指出 target。
-   - **reused worktree**：`init` 對已存在 target 是 no-op、只補 missing 的 entry。
-   - 300s 內完成：clone 是秒級；非 btrfs 的一般複製也在數十秒內。
-
-3. 既有 worktree 或 store 在 worktree 建立後才 import：手動跑 `worktree-assets init`（對已存在 target 是 no-op）。
-
-### Import（operator，原子換版）
-
-`scripts/import-assets.sh <store> <host-source> --map <hostPath>=<setRel> [--map ...] [--force] [--prune-old]`：
-
-- 沒有隱含映射；`--map` 必須明確（避免把不相關的目錄匯進 store）。`--map` 可重複；`<hostPath>` 可以是相對於 `<host-source>` 的路徑，也可以是絕對路徑（所以可從不同目錄匯入同一個 version）。
-- 解析 volume：`docker volume ls --filter label=com.docker.compose.project=<project> --filter label=com.docker.compose.volume=opc-assets`；找不到就報錯，請先 `docker compose up -d paperclip` 讓 compose 建立（避免 compose project prefix 不一致而匯入孤兒 volume）。
-- 流程：
-  1. 建立 `versions/<UTC timestamp>/`，用 tar stream 寫入（不經 host mount）：`tar -C "$HOST_SRC" -cf - <hostRel> | docker run --rm -i -v "$VOLUME":/assets alpine:3 sh -c 'mkdir -p ... && tar -C ... -xf -'`。
-  2. 寫 `.import.json`（**最後**）：per-set `{files, bytes}`、來源、時間。
-  3. 原子切換 `current`：先建暫存 symlink，再 `rename(2)` 取代（GNU `mv -T`）。
-  4. 預設保留上一個版本；`--prune-old` 才刪。
-- 中途被殺：沒有 `.import.json` 的 version 目錄會被下次 import 清掉；`current` 不會切換，live worktree 不受影響。
-- `--force` 也是 staged + atomic swap，不做 in-place 覆寫。
-
-### 素材實際要放在哪裡（operator runbook）
-
-**先講清楚：這段是實作內容，不是現有功能。** 現在在 repo 目錄 `ls` 不會看到任何 volume —— `opc-assets` 是 Docker **named volume**，不是工作目錄下的資料夾，而且這個機制還沒實作。實作後：
-
-- volume 會出現在 `docker volume ls`（名稱帶 compose project 前綴），paperclip 以 `:ro` 掛在 `/opt/opc-assets`。
-- 唯一寫入路徑是 import script；**不要** `docker cp` 到 mountpoint，也不要在 repo 裡建 `assets/` 再想辦法搬進去。
-- 步驟：
-  1. `docker compose up -d paperclip`（讓 compose 建立 volume）。
-  2. 匯入（來源是目前宿主已有的 `_shared/assets`）：
-     ```sh
-     scripts/import-assets.sh champi-survivor \
-       /home/noah/champi-survivor-worktrees/_shared/assets \
-       --map Data=client/Data \
-       --map game=derived/game-base
-     ```
-  3. 驗證：
-     ```sh
-     docker run --rm -v <real-volume-name>:/a alpine:3 \
-       ls /a/champi-survivor/current
-     ```
-  4. 新 ticket 的 provision 會自動 `init`；既有 worktree 手動跑 `worktree-assets init`。
-
-**多途徑 / 多來源：**
-
-| 需求 | 支援方式 |
-|---|---|
-| 同一個 store 從多個目錄匯入 | `--map` 可重複；`<hostPath>` 可以是絕對路徑，所以可跨磁碟／目錄組成同一個 version |
-| 多個專案各自一份素材 | 同一個 volume 下多個 `<store>/`；各專案 manifest 的 `store` 不同即可 |
-| 多個獨立 volume | v1 不支援；一個 compose project 只有一個 `opc-assets`。要完全隔離就用不同 compose project |
-| 更新素材 | 重新跑 import（新 version + 原子 swap）；不要手動改 `current` |
-| 從網路下載 | v1 不支援；先下載到 host，再 import |
-
-### 清理
-
-| 資料 | 誰刪 | 何時 |
-|---|---|---|
-| `worktree/<target>`（含 ticket 產生的） | reaper archive → `git worktree remove` | issue tree terminal + 已交付 + clean + 冷卻 1 天 |
-| `worktree/<target>`（未合併 ticket） | 不會自動刪 | 合併、取消，或人工 `git worktree remove` |
-| `opc-assets/versions/*` | 不會自動刪 | operator 重新 import / `--prune-old` / 刪 volume |
-| 共享樣板的新增 | 不可能 | volume 在 paperclip 內是 `:ro` |
-
-「clean」= `git status --porcelain --untracked-files=all` 為空。target 被 ignore 所以不出現；`git worktree remove` 不會因 ignored 檔拒絕（實測）。因此「產生的東西清不掉」只可能發生在 ignore 規則缺失時，而 `init` 會直接拒絕。
-
-target 不在 compaction 的固定名稱清單裡，所以 compaction 不碰它；archive 才是刪除點。
-
-### 專案端 checklist
-
-1. `.gitignore` 加入每個 target 的**裸路徑**（例：`/assets`，不要 `assets/`——結尾斜線只匹配目錄，symlink 是檔案，不會被忽略）。
-2. `.worktree-assets.json`。
-3. `scripts/provision-worktree.sh`。
-4. `AGENTS.md` / 專案文件：
-   - 開工先 `worktree-assets status`；`store-missing` 時不要自行取得來源資料，照常做 code-level 驗證並標明未驗證項。
-   - 衍生物只寫在 worktree 的 target 內，不准寫 store。
-   - 不要 commit target，不要複製到其他位置。
-
-### 失敗模式
-
-| 情況 | 行為 |
-|---|---|
-| store 未 import / volume 沒掛 | warning + exit 0；agent 標「未驗證」 |
-| `.gitignore` 缺 target | exit 2 → run 失敗，訊息指出 target |
-| target 已存在真目錄／別的 link | 拒絕，不覆蓋；訊息給人工指令 |
-| clone 中途被殺 | 只留 staging；下次 init 清掉重試 |
-| 非 btrfs | `--reflink=auto` 退回一般複製；功能不變 |
-| 樣板是唯讀 | 複製後 `chmod -R u+w` |
-| 專案工具改寫 target 內的 manifest/index | 寫在 COW 複本，不影響樣板 |
-| 兩個 init 同時跑 | lock + stale 接管；idempotent |
-| import 時有 ticket 正在讀 | 原子 symlink swap，只看到完整舊版或新版 |
-| `du` 看起來每個 worktree 都佔滿 | btrfs `du` 高報；用 `btrfs filesystem du` / `compsize` 看 exclusive bytes |
-| project clone 的 cwd 執行 | 不在本設計範圍；`status` 回 `not-worktree` |
-
-## 不採用的方案
-
-| 方案 | 為什麼不用 |
-|---|---|
-| `post-checkout` hook（git-worktree-share / worktree-link / Claude Code / Orca 的機制） | Paperclip 原生 `provisionCommand` 已覆蓋 create 與 reuse；hook 反而漏掉 reuse，還要維護安裝器與既有 hook 串接 |
-| 全部 symlink 農場 | 適合不可變資料；可變 set 的寫入會回滲，要安全就得做 per-file link farm + publish 工具 |
-| 共享可寫 store | 寫入對所有 ticket 可見且隱形；index 併發覆寫；沒有自動回收 |
-| 每個 worktree 完整複製 | 大小 × n；btrfs 已能 COW 幾乎免費 |
-| host bind mount | 違反不變量 6（service 無 host mount）；worktree 路徑動態 |
-| DVC / git-annex | 大型來源資料不可散佈、CI 不能快取；還要引入新工具鏈 |
-| `setupCommand` | Paperclip 只 CRUD，從不執行 |
-
-## 驗收
-
-1. Scratch repo（manifest + 假 store + provision script）：
-   - `link` 建出正確 symlink；`clone` 建出可寫複本。
-   - 重跑 `init` 不改變任何東西。
-   - `.gitignore` 缺 target → exit 2，檔案系統沒有新增任何東西。
-   - target 已存在 → 拒絕，原內容不動。
-   - 中斷後 staging 被清掉並重試成功；stale lock 被接管。
-   - `status --json` 狀態集合正確；project clone 回 `not-worktree`。
-2. Paperclip 容器：
-   - 無 store：`status` = `store-missing`，provision exit 0。
-   - import 後：新 worktree 的 link/clone 正確，`git status` 為空。
-   - ticket 內在 clone target 新增檔案成功；其他 worktree 不受影響。
-   - reuse 路徑（`PAPERCLIP_WORKSPACE_CREATED=false`）會補 missing entry。
-   - archive 後 target 隨 worktree 消失（opt-in 手動驗證，不進 gate）。
-3. import：staging + atomic swap；中途殺掉不影響 `current`。
-4. 既有 gate 不退化：`tests/audit-bootstrap.sh` 知道新 volume（ro）與 provision script 的期望；`tests/connectivity.sh` 不受影響。
-
-## 待決事項
-
-- 無。Import 映射由 operator 明確提供；可變 set 的樣板只由完整重新 import 更新（v1 不做 promote）。這是作者的決定。
-
-## 附錄：`champi-survivor`（第一個使用者，不是機制的一部分）
-
-| host（`~/champi-survivor-worktrees/_shared/assets`） | store `<store>=champi-survivor` | 大小 |
-|---|---|---|
-| `Data` | `client/Data`（`link`） | 5.0 GB |
-| `game` | `derived/game-base`（`clone`） | 194 MB |
-| `evidence` | 需要時再 `--map` | 105 MB |
-| `source` | 需要時再 `--map` | 3.2 MB |
-| `Data2026.rar` | 不匯入 | 4.2 GB |
+根目錄提交 `.worktree-assets.json`：
 
 ```json
 {
   "version": 1,
   "store": "champi-survivor",
+  "revision": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "entries": [
-    { "target": "assets/Data", "source": "client/Data", "mode": "link" },
-    { "target": "assets/game", "source": "derived/game-base", "mode": "clone" }
+    { "target": "Data", "source": "Data", "mode": "link" },
+    { "target": "game", "source": "game", "mode": "clone" }
   ]
 }
 ```
 
-- `.gitignore` 加 `/assets`（裸路徑）。
-- `assets/game` 每個 ticket 會再抽新檔案，所以是 `clone` 而不是 `link`；`assets/Data` 唯讀，所以是 `link`。
-- 抽取工具照舊寫 `assets/game`；寫入只落在該 ticket 的 COW 複本。
+- 範例 digest 僅示意。manifest 只接受版本 `1`、非空 entries 與已宣告欄位；所有欄位必填。固定使用 **`assets/` 專用目錄**，不可夾帶 tracked 檔或其他工具的資料；已有 tracked `assets/` 的專案不適用此契約。`target` 是 `assets/` 的直接子項且唯一。`store`、`target` 均為單段，以 ASCII 英數起始，其餘限英數、`.`、`_`、`-`；store 只用小寫。專案不得用 Paperclip compaction 候選目錄名命名 clone target。
+- `source` 相對於 revision 的 `payload/`；拒絕絕對路徑、空段、`.`、`..`、Git metadata 或 symlink 路徑。`link` 接收檔案或目錄，指向固定 revision；`clone` 只接受目錄，建出 runtime user 可寫的真目錄。沒有逐項 optional，不建半可用的素材環境。
+- 提交根 `.gitignore` 的 `/assets/` 和 `/.worktree-assets-state/`，兩者都是真目錄。驗證實際命中的規則來自 tracked 根 `.gitignore`，且涵蓋整棵樹；另用 Git index 拒絕兩棵樹內的 tracked 檔、submodule。不能只信全域 exclude，或只測尚不存在的裸路徑。
+- `assets/` 內保留 `.opc-assets-binding.json`，記錄實際 provision 的完整 manifest。專案工具只處理各自的 target，不碰 binding 或 state；需要交付的產物不能只留在這棵樹。
+
+## Provision 與恢復
+
+`worktree-assets` 裝進 Paperclip image，以 agent 的 runtime user 執行。只有 `init`（可寫）與 `status`（只讀）；從 worktree root 讀 manifest，用 Git root、git-dir／common-dir 和 linked-worktree metadata 判定，不單靠 `.git` 是否為檔案。執行時固定 store root，不提供任意路徑覆寫。
+
+| 狀態 | `init` | `status` |
+|---|---|---|
+| `not-configured`／`not-worktree` | 不寫，exit 0 | exit 0，報狀態 |
+| `ready` | 建好或保留既有 binding，exit 0 | exit 0，報 store、revision |
+| `not-provisioned`：revision 在，尚無 binding | 建立整組，成功 exit 0 | exit 1 |
+| `missing-revision`：尚未 provision，指定版本也未匯入 | 不寫，報缺哪個 store/revision，exit 1 | exit 1 |
+| `conflict`／`invalid` | 不覆蓋、不刪資料，exit 2 | exit 2 |
+| `io-error`／掛載缺失 | 明確報部署或 IO 錯誤，exit 3 | exit 3 |
+
+1. 驗證宣告、掛載、Git、既有 root 與來源，再建立工作檔。拒絕 manifest、root 或 state 本身為 symlink；拒絕陌生既有 root。只有**尚未發布**的 revision 可降級；已發布但缺 inventory/entry、已有 binding 的 revision 消失、或已有 state 而 manifest 消失，都是錯誤。
+2. `/.worktree-assets-state/` 有固定 lock 與專用 staging。`flock` 串行同 worktree 的 `init`；拿鎖後重驗。寫 staging 的複製子程序也須受同一把鎖保護。鎖等待超時明確失敗，不以 PID 或時間強搶，不 unlink lock inode。只在持鎖時回收 CLI 保留的 staging。
+3. 在同一棵 staging 建所有 target 和 binding，然後**同 filesystem、不覆蓋已存在目的地、不 fallback 到 move-copy**地 rename 為 `assets/`。現行 image 的 GNU `mv` 支援 `-T --no-copy --update=none-fail`。中斷只會留下隱藏 staging 或完整 root；不能用 `exists` 後接可覆蓋的 rename。
+4. 重跑時比對已驗證的 manifest（entry 順序不算差異），確認 link 仍指向指定來源、clone 仍是真目錄；不遍歷或重寫 clone 的內容。binding 不符、target 被換掉或缺失就報衝突。升版、重建請用新 execution worktree；沒有 `reset` 或 `--force`。
+5. `clone` 預設用 `cp --reflink=always`，不默默改成整份複製。operator 評估容量後可在 Paperclip 部署設 `WORKTREE_ASSETS_ALLOW_FULL_COPY=1`，允許 `--reflink=auto`；最壞是每個 worktree 一份完整樣板，沒有時間承諾。已用目前 image、runtime UID、兩顆暫存 Docker volume（來源 `:ro`）實測跨 mount reflink 成功；[Btrfs 文件](https://btrfs.readthedocs.io/en/latest/Reflink.html) 說明這不是任意 filesystem 或 mount 的保證。
+
+### Paperclip 入口
+
+在專案的 `scripts/provision-worktree.sh` 或現有的 `workspaceStrategy.provisionCommand` 中組合這個步驟，不覆寫既有 provision。單獨使用的 wrapper：
+
+```sh
+#!/bin/sh
+if ! command -v worktree-assets >/dev/null 2>&1; then
+    if [ -e .worktree-assets.json ] || [ -L .worktree-assets.json ] ||
+       [ -e .worktree-assets-state ] || [ -L .worktree-assets-state ]; then
+        echo 'worktree-assets CLI missing from the Paperclip image' >&2
+        exit 3
+    fi
+    exit 0
+fi
+
+rc=0
+worktree-assets init || rc=$?
+[ "$rc" -eq 1 ] && exit 0  # init 已記錄 missing-revision
+exit "$rc"
+```
+
+上游[從主 checkout 解析 script](../../../upstream/paperclip/server/src/services/workspace-runtime.ts#L3016)，[以 execution worktree 為 cwd](../../../upstream/paperclip/server/src/services/workspace-runtime.ts#L3247)，[reuse 也呼叫](../../../upstream/paperclip/server/src/services/workspace-runtime.ts#L3487)；[部分環境及 source-trust 選擇會跳過](../../../upstream/paperclip/server/src/services/heartbeat/workspace-preparation.ts#L426)。wrapper 保持薄，CLI 對尚可 reopen 的 manifest 保持相容；不把遠端 provision 的 300 秒套成本機保證。素材補匯入後，下一次 reuse 或 runtime user 手動 `init` 都能完成尚未 provision 的 worktree。
+
+專案文件要求在素材相關工作前跑 `status`；缺料時仍跑不需素材的檢查，明確標出哪項未驗證。**需要素材的驗收不能以 skip 充當通過**：一般 CI 可標記不適用，專門驗素材的命令遇到缺輸入應失敗。
+
+## Operator 匯入
+
+`scripts/import-assets.sh <store> <host-source-dir> <entry> [<entry> ...]`。明確選一個 host 目錄下的頂層檔案／目錄，保留原名，不 sweep 來源、不接收任意 tar 檔、不做路徑改名：
+
+```sh
+scripts/import-assets.sh champi-survivor \
+  "$HOME/champi-survivor-worktrees/_shared/assets" Data game
+```
+
+1. 由 Compose 實際解析的 project 名和 volume label 找唯一的 `opc-assets` volume；缺失或不唯一便拒絕，不能默默新增一顆。用已建好的 Paperclip image 作一次性 helper：覆寫 entrypoint、不轉送服務環境、無網路、只掛這顆 volume。初次只用 root 建匯入目錄與設定 runtime UID，解包與發布用非 root。
+2. Host 驗證來源，將生成的 tar stream 傳至 volume 內唯一 token 的 staging。解包只允許 `payload/` 內的普通檔案與真目錄；拒絕重複路徑、link、特殊檔與逃出 staging 的路徑，不將 archive metadata 套到既有資料。解包、正規化與 inventory 計算完成後，helper 只回報 staging token 與 digest，**不得發布**。
+3. Host 確認 producer 與 consumer 都成功才另呼叫 publish。`pipefail` 只能偵測錯誤，不能收回 consumer 先前的副作用。publish 驗 token 與完成標記，使用同 volume 不覆蓋的 rename；同 digest 併發只會有一方寫入，另一方回報已存在、清自己的 staging。不重新寫既有 revision。正常錯誤處理自己的 token；被 kill 留下的 staging 由 operator 在確認沒有匯入進行時處理。
+4. 成功才印出可提交到 Git 的 `sha256:…`。保留能重現每個仍需支援的 revision 的來源備份；還原時比對匯入輸出的 digest。不使用 worktree 衍生物重建共享樣板。`down -v` 會移除 volume，不能把它當唯一備份。
+
+首個專案只匯入 `Data`（約 5 GB，link）和 `game`（約 194 MB，clone）。`Data2026.rar`、`evidence`、`source` 不匯入。
+
+專案現有 `tools/worktree.ts` 已在 host 做 link + 每個 worktree 一份 clone；它繼續只服務 host 流程，Paperclip 不呼叫它。實查 `assets/` 在專案 Git index 沒有 tracked 路徑，現有 host ignore 來自 `.git/info/exclude`；接入時要提交上述兩條 `.gitignore` 與 provision wrapper，不能依賴那份本機 exclude。既有 host 的 `assets/` 不自動接管或刪除；實際接入再跑專案的 extractor／素材驗收，確認消費路徑無須修改。
+
+## 清理與容量
+
+- **實體 worktree 成功移除時**，衍生物、binding、staging／lock 一起消失。[Paperclip terminal reaper](../../../upstream/paperclip/server/src/services/execution-workspaces.ts#L3456) 要求 issue tree 已終止、已交付、Git clean、冷卻期已過且沒有阻擋執行。done／cancelled 或一度標成 archived 不保證目錄已移除；卡住的 worktree 由 Paperclip 清理／診斷，不加第二個刪除者。
+- [Compaction 會遞迴找候選目錄](../../../upstream/paperclip/server/src/services/workspace-compaction.ts#L125)，`assets/game/build` 等子目錄仍可能提前消失。整棵樹只放可再生資料；從已移除的 worktree reopen 時重建樣板，不還原舊衍生物。
+- 每個 revision 計入素材 volume 的容量，沒有自動 prune。先備份並確認沒有仍支援的 ref／可恢復的 workspace 依賴，再由 operator 於維護窗口刪指定版本；不能只數現存 symlink。查不清就保留。`SETUP.md` 提供查看 revision 用量、處理失敗 staging 與重新匯入的做法。
+
+## 驗收（實作門檻）
+
+| 情境 | 需看到的結果 |
+|---|---|
+| 版本釘選 | 發布 B 後，既有 worktree A 的 link 與 clone 仍用 A，新 worktree 用其宣告的 B；在 A 改 manifest 報衝突。 |
+| 安全與隔離 | 兩個 worktree 寫同名 clone 檔互不影響，來源 `:ro`；拒絕陌生既有目錄、symlink、tracked 子項、忽略規則缺失與壞來源。兩顆 volume 實測 reflink；另驗不支援時只在 opt-in 後才允許複製。 |
+| Worktree 交易 | 競爭 init、clone 中止、rename 前目的地出現，不覆寫、不留半套；重跑只清自己的 staging。正常與中斷後的 `git status --porcelain --untracked-files=all` 不因工具暫存變髒。 |
+| Import 交易 | producer 寫完有效 tar 後 exit 非零、殺掉中途流程、錯誤輸入時，不得發布新 revision 或更動已發布版；同 digest 併發或重匯只產生一份。備份重匯 digest 相同，改動任一檔案內容後 digest 不同。 |
+| Paperclip 真實路徑 | 隔離 fixture 用真實 create、reuse、reaper cleanup 與 reopen 驗證：沒匯入時 run 能繼續且可診斷；補匯入後 reuse 整組就緒；清理後 worktree 消失、共享 revision 保留；reopen 重新得到對應樣板。Compose 靜態檢查只掛給 Paperclip 且 `:ro`；空 volume 及未採用專案不退化。 |
