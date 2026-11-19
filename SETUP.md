@@ -724,6 +724,97 @@ docker compose exec frontdoor cat /opt/data/issue-watchers/watcher.log
   `scripts/sync-gh-creds.sh` (`docker compose restart frontdoor hermes
   paperclip` re-applies key perms).
 
+## Local assets for Paperclip Git worktrees
+
+Use this for large, private input files that don't belong in Git. Only trusted
+local tasks using the project's default Git worktree source are supported.
+The OPC implementation stays on Paperclip `v2026.1106.0`.
+
+On an existing deployment, install the overlay and recreate the Paperclip
+service to mount the new volume (this does not change the upstream pin):
+
+```sh
+scripts/prepare.sh
+docker compose up -d --build --no-deps paperclip
+```
+
+From the **host** checkout, import explicitly named files/directories. The
+command streams their contents into an isolated helper; it never mounts or
+removes your host originals. `docker compose` must resolve the intended
+project and its `opc-assets` volume and Paperclip image must already exist.
+
+```sh
+./scripts/opc-assets import champi-survivor \
+  "$HOME/champi-survivor-worktrees/_shared/assets" Data game
+./scripts/opc-assets list champi-survivor
+```
+
+Commit `.worktree-assets.json` in the project repo with the **printed** digest,
+`version: 1`, `store: "champi-survivor"`, and entries `Data → Data` (`link`)
+and `game → game` (`clone`); see the [complete JSON](docs/superpowers/specs/2026-11-18-worktree-assets-design.md#專案端契約).
+Commit `/assets/` and `/.worktree-assets-state/` in the root `.gitignore`.
+Install the [thin provision wrapper](patches/paperclip/worktree-assets/provision-worktree.sh)
+as `scripts/provision-worktree.sh` in the project's source checkout, or
+combine it with the project's existing provision command. Putting the wrapper
+only on a task branch won't activate the default hook. Existing host-created
+asset directories are not adopted; use a fresh Paperclip execution worktree.
+Projects without a manifest get no worktree files.
+
+Paperclip provisions automatically on eligible create/reuse. To diagnose or
+re-initialize an existing worktree, use its container path:
+
+```sh
+docker compose exec -T -u node -w "$WORKTREE_CWD" paperclip worktree-assets status
+docker compose exec -T -u node -w "$WORKTREE_CWD" paperclip worktree-assets init
+```
+
+No import means an empty named volume and a small CLI in the image, not a
+reserved asset allocation. `WORKTREE_ASSETS_ENABLED=false` plus
+`docker compose up -d --no-deps paperclip` pauses future provisioning without
+deleting anything. Re-enable the same way. Keep
+`PAPERCLIP_GIT_CACHE_EXPIRATION_ENABLED=false` and
+`PAPERCLIP_GIT_RESTORE_POINTS_ENABLED=false`; `.gitignore` is not a backup
+exclusion on newer Paperclip versions. The ordinary terminal reaper is not
+disabled. The default `clone` requires reflinks; set
+`WORKTREE_ASSETS_ALLOW_FULL_COPY=1` only after budgeting a full clone per
+worktree. The shared mount is read-only, **not** an access boundary between
+projects in the same container.
+
+Each imported revision occupies storage. Keep a backup of the exact source
+directory selection: reimporting it must print the same digest. During a
+maintenance window, stop provisioning/consumers and finish any in-flight
+imports first. Once the backups and all supported refs/reopenable workspaces
+are accounted for, retire an exact published revision:
+
+```sh
+./scripts/opc-assets retire champi-survivor "$REVISION"  # full sha256:…; interactive
+```
+
+Project deletion does not retire assets. If unsure which refs can be reopened,
+keep the revision. A killed import can leave `.staging/<token>` in the volume;
+the host command logs the exact Compose project, volume and token before
+transfer. After independently confirming that no import is active, use that
+exact volume and the image resolved for that Compose deployment:
+
+```sh
+docker run --pull=never --rm --network none --user node \
+  --mount "type=volume,source=$volume,target=/opt/opc-assets,volume-nocopy" \
+  --entrypoint /usr/bin/python3 "$image_id" \
+  /usr/local/lib/opc-assets/asset-store.py cleanup "$token"
+```
+
+Use the recorded volume name and 32-character token; verify the volume exists
+and has `com.docker.compose.volume=opc-assets` before running Docker (Docker
+otherwise creates a misspelled named volume). The image ID is from
+`docker image inspect --format '{{.Id}}'` on the configured `paperclip` image.
+A killed host command can also leave a stopped volume holder: list created
+containers with `docker ps -a --filter status=created --filter "label=opc.assets.volume-holder=$project"`.
+After verifying no command is still active, remove only that abandoned holder
+by container ID with `docker rm`. This does not remove the named volume.
+If retirement reported a failed deletion after moving the revision into
+`.retired/`, it is already unavailable; remove only the exact leftover path
+reported by the command during maintenance. Never clear the whole volume.
+
 ## Event bridge & autonomy control (OPC)
 
 `paperclip`（service identity）＋ `event-bridge`（sidecar）把 Paperclip 的工作事件

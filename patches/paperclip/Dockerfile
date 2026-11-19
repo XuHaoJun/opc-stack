@@ -296,6 +296,9 @@ COPY opc/devenv/ /usr/local/lib/devenv/
 # podenv CLI + its control schema (the nested container lease lane).
 COPY opc/podenv/ /usr/local/lib/podenv/
 COPY opc/opc-podenv-seed.sh /usr/local/bin/opc-podenv-seed.sh
+COPY --chmod=0755 opc/worktree-assets/worktree-assets.py /usr/local/bin/worktree-assets
+COPY opc/worktree-assets/asset-store.py /usr/local/lib/opc-assets/asset-store.py
+COPY opc/worktree-assets/provision-worktree.sh /usr/local/share/opc-assets/provision-worktree.sh
 # The podman CLIENT: Debian's own `podman-remote` package (installed in the
 # apt layer above), symlinked to the plain name an agent types.
 #

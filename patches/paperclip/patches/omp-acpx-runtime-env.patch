@@ -1,6 +1,6 @@
 --- a/packages/adapters/claude-local/src/server/acp.ts
 +++ b/packages/adapters/claude-local/src/server/acp.ts
-@@ -124,10 +124,32 @@
+@@ -124,10 +124,35 @@
 +// OPC local omp runs share the container's tool/resource leases. This is not
 +// server/runner/MCP authority. Remote callers pass no inherited environment.
 +const OPC_OMP_LOCAL_ENV_KEYS = new Set([
@@ -11,6 +11,9 @@
 +  "OPENCODE_API_KEY", "OPENCODE_ALLOW_ALL_MODELS",
 +  "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
 +  "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY",
++  "WORKTREE_ASSETS_ENABLED", "WORKTREE_ASSETS_ALLOW_FULL_COPY",
++  "PAPERCLIP_GIT_CACHE_EXPIRATION_ENABLED", "PAPERCLIP_GIT_RESTORE_POINTS_ENABLED",
++  // These scalar policy switches let the local agent's CLI agree with provision.
 +]);
 +
  export function buildClaudeAcpConfig(
@@ -34,7 +37,7 @@
    const stateDir = firstNonEmptyString(config.stateDir, config.acpStateDir);
    const mode = firstNonEmptyString(config.mode, config.acpMode) ?? DEFAULT_ACP_ENGINE_MODE;
    const permissionMode =
-@@ -145,7 +167,7 @@
+@@ -145,7 +170,7 @@
      ...config,
      model,
      // ACP reads ANTHROPIC_MODEL at startup; keep it aligned with CLI precedence.

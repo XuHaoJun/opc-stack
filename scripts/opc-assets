@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage:
+  opc-assets import <store> <host-source-dir> <entry> [<entry> ...]
+  opc-assets list [<store>]
+  opc-assets retire <store> <sha256:full-digest>
+EOF
+}
+
+fail() {
+    printf 'opc-assets: %s\n' "$*" >&2
+    exit 1
+}
+
+invalid_usage() {
+    usage >&2
+    exit 2
+}
+
+command=${1:-}
+case "$command" in
+    -h|--help) usage; exit 0 ;;
+    import) (( $# >= 4 )) || invalid_usage ;;
+    list) (( $# <= 2 )) || invalid_usage ;;
+    retire) (( $# == 3 )) || invalid_usage ;;
+    *) invalid_usage ;;
+esac
+
+if (( $# >= 2 )) && [[ ! $2 =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+    fail 'store must start with a lowercase ASCII letter or digit and use only lowercase letters, digits, ., _, and -'
+fi
+if [[ $command == retire ]]; then
+    [[ $3 =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'retire requires sha256: followed by exactly 64 lowercase hex digits'
+    [[ -t 0 && -t 1 ]] || fail 'retire requires an interactive terminal; nothing was removed'
+fi
+command -v python3 >/dev/null || fail 'Python 3 is required on the host'
+command -v docker >/dev/null || fail 'Docker with the Compose plugin is required on the host'
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+helper="$repo_root/patches/paperclip/worktree-assets/asset-store.py"
+resolved=$( (cd -- "$repo_root" && docker compose config --format json) | python3 "$helper" resolve-compose) ||
+    fail 'could not resolve the checkout Compose project; check its configuration and .env'
+IFS=$'\t' read -r project image expected_volume <<< "$resolved"
+volume=$(docker volume ls --quiet --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.volume=opc-assets') || fail 'could not query Docker volumes'
+[[ -n $volume ]] || fail "no Compose-labeled opc-assets volume for project $project; initialize the deployment first"
+[[ $volume != *$'\n'* ]] || fail "multiple Compose-labeled opc-assets volumes for project $project; resolve the ambiguity first"
+[[ $volume == "$expected_volume" ]] ||
+    fail "Compose project $project expects volume $expected_volume, but the labeled volume is $volume"
+image_id=$(docker image inspect --format '{{.Id}}' "$image") ||
+    fail "build the configured Paperclip image ($image) with docker compose build paperclip first"
+[[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] || fail "Docker returned an invalid image ID for $image"
+
+# Docker auto-creates missing named volumes. A stopped container keeps this
+# volume attached across helper invocations without running another process.
+mount="type=volume,source=$volume,target=/opt/opc-assets,volume-nocopy"
+anchor=$(docker create --pull=never --network none --mount "$mount,readonly" \
+    --label "opc.assets.volume-holder=$project" --entrypoint /bin/true "$image_id") ||
+    fail "could not hold volume $volume"
+trap 'docker rm "$anchor" >/dev/null || printf "opc-assets: could not remove volume holder %s\n" "$anchor" >&2' EXIT
+attached_labels=$(docker volume inspect --format \
+    '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}' "$volume") ||
+    fail "could not verify attached volume $volume"
+[[ $attached_labels == "$project|opc-assets" ]] ||
+    fail "attached volume $volume no longer has the expected Compose labels; nothing was written"
+
+run_helper() {
+    local user=$1 action=$2
+    shift 2
+    local helper_mount=$mount
+    local -a terminal=()
+    case "$action" in
+        stage) terminal=(-i) ;;
+        retire) terminal=(-it) ;;
+        list) helper_mount+=',readonly' ;;
+    esac
+    docker run --pull=never --rm --network none --mount "$helper_mount" --user "$user" \
+        --entrypoint /usr/bin/python3 "${terminal[@]}" "$image_id" \
+        /usr/local/lib/opc-assets/asset-store.py "$action" "$@"
+}
+
+cleanup_import() {
+    if ! run_helper node cleanup "$token"; then
+        printf 'opc-assets: could not clean token %s; check .staging/%s in volume %s after all imports stop\n' \
+            "$token" "$token" "$volume" >&2
+    fi
+}
+
+case "$command" in
+    import)
+        store=$2
+        shift 2
+        token=$(python3 "$helper" token) || fail 'could not allocate import token'
+        [[ $token =~ ^[0-9a-f]{32}$ ]] || fail 'invalid import token returned by host helper'
+        run_helper root init "$store" || fail "could not initialize store $store on volume $volume; check the Paperclip image and volume"
+        printf 'opc-assets: staging store %s on project %s, volume %s (token %s)\n' \
+            "$store" "$project" "$volume" "$token" >&2
+        # Capture the stage response, but do not publish unless BOTH pipeline
+        # commands succeeded. A producer can fail even after writing a full tar.
+        if ! staged=$(python3 "$helper" pack -- "$@" | run_helper node stage "$store" "$token"); then
+            cleanup_import
+            fail 'tar producer or staging helper failed; no revision was published'
+        fi
+        revision=${staged#"$token "}
+        if [[ $staged != "$token $revision" || ! $revision =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            cleanup_import
+            fail 'invalid staging response; no revision was published'
+        fi
+        if ! run_helper node publish "$store" "$token" "$revision"; then
+            cleanup_import
+            fail "publish did not finish; check opc-assets list $store before retrying"
+        fi
+        printf '%s\n' "$revision"
+        ;;
+    list)
+        shift
+        run_helper node list "$@"
+        ;;
+    retire)
+        run_helper node retire "$2" "$3" "$project" "$volume"
+        ;;
+esac

@@ -1,6 +1,6 @@
 # Paperclip Worktree Assets — 設計規格
 
-日期：2026-11-18 · 狀態：設計稿，未實作
+日期：2026-11-18 · 實作基準：Paperclip `v2026.1106.0`，不隨本功能升版
 
 ## 問題與選擇
 
@@ -46,6 +46,8 @@ OPC-assets 的支援配置要求 `PAPERCLIP_GIT_CACHE_EXPIRATION_ENABLED` 和 `P
 - 以 `payload` 內的 POSIX 相對路徑為準。目錄也入清單（含空目錄，不含 `payload` 根目錄）。檔名用有效 UTF-8，不做 Unicode 正規化，排序用 UTF-8 byte order。
 - `inventory.json` 是以標準 `JSON.stringify` 產生的 UTF-8 JSON 陣列，無 BOM、縮排或末尾換行。目錄列為 `["d",path]`，檔案列為 `["f",path,sha256hex]`；revision 是這份 inventory bytes 的 SHA-256。只在匯入時 hash 檔案內容，不在每次 provision 重讀素材。
 - 只接受普通檔案及真目錄；拒絕 symlink、hardlink、特殊檔案，且不保留 ACL、owner、時間戳或執行位。發布資料的檔案為 0644、目錄為 0755；容器內由唯讀掛載保護。來源在匯入期間必須停止變動。
+
+在 provision 時驗證已選來源子樹的路徑與檔案種類，不重讀內容。若重匯得到已存在的 digest，匯入工具會先比對既有 payload 內容再回報已存在；已發布 revision 缺損時拒絕默默成功或覆寫。
 
 Git 記錄 `(store, revision)`，同一 worktree 的 link 與 clone 一定來自同一 revision。換版順序是**先匯入、再提交 manifest**；既有 worktree 不原地換版。舊分支與 reopen 仍以各自 worktree 的 manifest 為準，不追全域最新版。
 
@@ -156,5 +158,5 @@ exit "$rc"
 | Worktree 交易 | 競爭 init、clone 中止、rename 前目的地出現，不覆寫、不留半套；重跑只清自己的 staging。正常與中斷後的 `git status --porcelain --untracked-files=all` 不因工具暫存變髒。 |
 | Import 交易 | producer 寫完有效 tar 後 exit 非零、殺掉中途流程、錯誤輸入時，不得發布新 revision 或更動已發布版；同 digest 併發或重匯只產生一份。備份重匯 digest 相同，改動任一檔案內容後 digest 不同。 |
 | 開關與空載 | 未採用專案不寫檔；已接入但空 volume 只報缺 revision，不建立 `assets/` 或 state；stack 停用回 `disabled`，不改既有檔案或 revision，恢復後可補建。開任一 Paperclip 不相容選項時，僅已接入且啟用的 worktree provision 拒絕執行。 |
-| Paperclip 真實路徑 | 先驗目前 pin，再在隔離環境驗新版。兩個版本都用同一 task 的可信任本機預設 Git 來源，且 cache expiration／restore points 關閉。經真實 create → 匯入後 reuse → 一般 terminal reaper → reopen：空 volume 時 run 能繼續；補匯入後整組就緒；清理後實體 worktree 消失但共享 revision 不變；reopen 按實際 checkout 的 manifest 重建。Compose 靜態檢查只掛給 Paperclip 且 `:ro`。 |
+| Paperclip 真實路徑 | 用 `tests/paperclip-worktree-assets.sh` 驗目前 pin；日後評估升版時才用同一 fixture 驗候選 image。採同一 task 的可信任本機預設 Git 來源，且 cache expiration／restore points 關閉。經真實 create → 匯入後 reuse → 一般 terminal reaper → reopen：空 volume 時 run 能繼續；補匯入後整組就緒；清理後實體 worktree 消失但共享 revision 不變；reopen 按實際 checkout 的 manifest 重建。Compose 靜態檢查只掛給 Paperclip 且 `:ro`。 |
 | 素材退役 | `list` 不寫入；`retire` 未確認時不刪除，確認後只移除完整指定的 revision，其他 revision 不受影響。Paperclip 刪除專案或 workspace 不觸發 `retire`。 |
