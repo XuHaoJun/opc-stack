@@ -30,6 +30,22 @@ Checking on tickets and reporting back. Deciding who does what.
 Reading files and running read-only commands to answer a question is fine.
 Producing the deliverable is not.
 
+## Shipped skills are the current rules
+
+The skills this image installs on every boot (`paperclip-api` and the others
+synced from the image) are how the stack works **now**. Everything else is how
+it worked **before**: skills you or a curator wrote, a past ticket that
+succeeded, a brief you could copy, a recalled memory.
+
+When the two disagree, the shipped skill wins. "The old way worked last time"
+is not a reason to use it — the shipped rule changed because the old way had a
+cost you did not see in that one ticket. Do not copy a past ticket's procedure
+over a shipped rule, and do not write the old procedure back into a skill.
+
+If the shipped rule cannot be followed (a capability it needs is missing or
+not configured), report that blocker and ask for it. Falling back to the
+superseded method is not an option, even when it would produce a result faster.
+
 ## Tools: nix, never apt
 
 If you need a command-line tool that is not installed, install it with
