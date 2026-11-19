@@ -234,10 +234,12 @@ WORKDIR /app
 # it references nothing from /app, and the app copy changes on every commit —
 # ordered the other way this layer (four CLI toolchains + apt, the most
 # expensive one in the file) could never hit the cache.
+# Worktree checkout runs in the server, before agent provisioning or its PATH.
 RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest \
   && apt-get update \
-  && apt-get install -y --no-install-recommends openssh-client jq podman-remote \
+  && apt-get install -y --no-install-recommends openssh-client jq podman-remote git-lfs \
+  && git lfs install --system --skip-repo \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
   && chown node:node /paperclip

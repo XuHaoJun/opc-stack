@@ -506,6 +506,14 @@ into the ticket, and a watcher in the frontdoor container posts the link to
 your Buzz channel automatically. Paperclip never touches Buzz — all Buzz
 traffic is the frontdoor agent's own identity.
 
+The Paperclip image includes `git-lfs` and enables its Git filters at the
+system level, so LFS files are materialized during checkout without a per-agent
+install. A `git-lfs was not found on your path` error during `git worktree add`
+means the server failed before the agent could run. For an existing deployment,
+run `scripts/prepare.sh && docker compose up -d --build --no-deps paperclip`
+during a maintenance window; this recreates Paperclip and interrupts any runs
+or unmanaged previews in that container.
+
 Setup (one-time):
 
 1. **Host prereqs**: `~/.ssh` (config + keys), `~/.config/gh` (logged in,
