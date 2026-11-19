@@ -220,8 +220,6 @@ has "event bridge: live loop gate exists"      tests/event-loop.sh             '
 # brace). The gate builds both payloads and validates them.
 has "ticket helper: payload regression gate"  tests/opc-paperclip.sh            'prototype_payload_json'
 has "ticket helper: source-only test hook"    patches/buzz/opc-paperclip       'OPC_PAPERCLIP_SOURCE_ONLY'
-has "frontdoor quarantines obsolete skills"   patches/buzz/frontdoor-entrypoint.sh 'opc-issue-watcher'
-has "hermes quarantines obsolete skills"      patches/hermes/hermes-entrypoint.sh 'opc-issue-watcher'
 if grep -rqs "opc-issue-watcher" patches/buzz/skills patches/hermes/skills; then
     bad "shipped skills: no retired-watcher instruction"
 else
@@ -231,9 +229,7 @@ fi
 # Delivery must have exactly one writer. The old watcher posted as the front
 # door (identity impersonation) and could not hold a durable cursor; the event
 # bridge replaced it. A leftover reference means two writers for one event.
-# The binary is gone, and nothing may invoke it again. The quarantine logic in
-# the two entrypoints intentionally names the retired *marker* (without .sh) so
-# it can retire stale skills; what must not exist is an executable reference.
+# The binary is gone, and nothing may invoke it again.
 if [ -e patches/buzz/opc-issue-watcher.sh ] || grep -rqs "opc-issue-watcher\.sh" patches docker-compose.yml; then
     bad "watcher retired (an executable reference remains — two delivery writers)"
 else

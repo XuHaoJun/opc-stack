@@ -328,6 +328,12 @@ List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 Route to `engineering`, not `prototype`, even if the request says “prototype
 this PR.” Leave named, retained prototypes on `prototype expose`.
 
+This section replaces the older preview flow — a `devenv provision --with http`
+lease in a scratch directory, a detached server, the issue closed in the same
+run, then separate tickets to stop the server and delete the directory. Briefs
+and skills that describe that flow, including past preview tickets that
+worked, are not templates; do not copy them.
+
 For an engineering preview, put these steps in the dispatch brief:
 
 1. **Build the requested commit.** Verify the exact SHA in the assigned
