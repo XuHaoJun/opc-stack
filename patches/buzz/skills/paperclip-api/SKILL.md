@@ -323,6 +323,29 @@ UI affordance to carry the routing decision.
 Issue statuses: `backlog | todo | in_progress | in_review | done | blocked | cancelled`.
 List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 
+### QA preview for an existing repo or PR
+
+Route to `engineering`, not `prototype`, even if the request says “prototype
+this PR.” Leave named, retained prototypes on `prototype expose`.
+
+For an engineering preview, put these steps in the dispatch brief:
+
+1. **Build the requested commit.** Verify the exact SHA in the assigned
+   Paperclip-managed execution worktree and run the project's normal build.
+2. **Use Paperclip's native runtime service.** Start the operator-configured
+   service with `lifecycle: shared` and `reuseScope: execution_workspace`.
+   Verify the permitted private QA URL serves the build and required assets.
+   If the workspace cannot be prepared at that SHA or the service,
+   authorization, or private access is missing, report the blocker and ask the
+   operator to configure it. Do not ask the agent to register executable service
+   commands with its run key, create a scratch checkout, detach a server
+   (`nohup`/`setsid`), or publish a raw port as a fallback.
+3. **Hand off to QA.** Post the URL, served SHA, and verification evidence.
+   Leave the QA issue `in_review`; HTTP success is not human acceptance.
+   When QA finishes, stop the service through Paperclip, have the operator
+   release any dedicated HTTP lease, then close the issue. Paperclip owns
+   worktree cleanup; do not dispatch a separate scratch-directory cleanup.
+
 ## Reaching an expert agent (Scientist / Prototyper)
 
 The expert agents are Paperclip-driven (`hermes_gateway`); their Buzz identity
