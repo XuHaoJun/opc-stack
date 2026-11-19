@@ -1251,6 +1251,156 @@ cmd_engineering_ticket_create() {
     fi
 }
 
+# Agent chooses whether the feedback is rework. This command chooses no ticket
+# by inference: read the authenticated relay, then verify the issue on the board.
+buzz_feedback() (
+    action="${1-}"; [ "$#" -gt 0 ] && shift
+    channel= event= selected=
+    board="${PAPERCLIP_PUBLIC_URL:-}"; board="${board%/}"
+    case "$action" in resolve|continue) ;; *) die "usage: opc-paperclip buzz-feedback <resolve|continue> --channel UUID --event HEX [--issue OPC-N]" 2 ;; esac
+    while [ "$#" -gt 0 ]; do
+        [ "$#" -ge 2 ] || die "missing value for $1" 2
+        case "$1" in
+            --channel) channel="$2" ;;
+            --event) event="$2" ;;
+            --issue) selected="$2" ;;
+            *) die "unknown feedback option: $1" 2 ;;
+        esac
+        shift 2
+    done
+    printf '%s\n' "$channel" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' ||
+        die "expected a Buzz channel UUID" 2
+    printf '%s\n' "$event" | grep -Eq '^[0-9a-f]{64}$' || die "expected a Buzz feedback event ID" 2
+    keys="${BUZZ_KEYS_DIR:-/keys}"
+    owner="${BUZZ_ACP_AGENT_OWNER:-}"
+    notifier="$(cat "$keys/paperclip.pub")" && frontdoor="$(cat "$keys/agent.pub")" &&
+        relay="$(cat "$keys/relay.pub")" || die "Buzz identities are unavailable" 4
+    printf '%s\n' "$owner" | grep -Eq '^[0-9a-f]{64}$' || die "no configured Buzz operator" 3
+    [ "$owner" != "$relay" ] && [ "$owner" != "$notifier" ] && [ "$owner" != "$frontdoor" ] ||
+        die "Buzz operator must be a human, not a service identity" 3
+
+    # Agent output uses Buzz's own NIP-10 parser for reply_to/thread_root.
+    # Pubkeys and tags are read from the configured relay, never prompt prose.
+    thread="$(buzz --format agent messages thread --channel "$channel" --event "$event" --limit 100)" ||
+        die "cannot resolve feedback on the Buzz relay" 4
+    context="$(printf '%s\n' "$thread" | jq -ec --arg c "$channel" --arg e "$event" \
+        --arg owner "$owner" --arg notifier "$notifier" --arg frontdoor "$frontdoor" \
+        --arg board "$board" '
+        def tags($k): [.tags[]? | select(.[0] == $k) | .[1]];
+        def root: .thread_root // .reply_to // .id;
+        def issue_id: strings | select(test("^[A-Z][A-Z0-9]*-[0-9]+$"));
+        if type != "array" or length >= 100 then error("thread unavailable or incomplete") else . end
+        | [.[] | select(.kind == 9 and tags("h") == [$c])] as $events
+        | [$events[] | select(.id == $e)] as $feedback
+        | if ($feedback | length) != 1 or $feedback[0].pubkey != $owner or
+             ($feedback[0] | tags("auth") | length) != 0 or
+             ($feedback[0].content | type) != "string" or
+             ($feedback[0].content | test("\\S") | not)
+          then error("feedback must be an operator-authored Buzz message") else $feedback[0] end
+        | . as $message | root as $root
+        | [$events[] | select(root == $root and .created_at <= $message.created_at)] as $related
+        | if any($related[]; .id == $root) then . else error("thread root is missing") end
+        | { feedback: $message.content, thread_ids: [$related[].id],
+            references: ([$message.content | scan("(?<![A-Za-z0-9_-])[A-Z][A-Z0-9]*-[0-9]+(?![A-Za-z0-9_-])")] | unique),
+            candidates: ([
+              $related[]
+              | select(.id != $e and tags("auth") == [])
+              | (.id == $message.reply_to) as $direct
+              | if .pubkey == $notifier and (tags("opc-event") | length) == 1
+                then tags("opc-issue") | select(length == 1) | .[] | issue_id | {identifier:., notice:true, direct:$direct}
+                elif .pubkey == $frontdoor and $board != ""
+                then .content | split($board + "/issues/")[1:][]
+                     | capture("^(?<id>[A-Z][A-Z0-9]*-[0-9]+)(?:[^A-Za-z0-9_-]|$)")?
+                     | {identifier:.id, notice:false, direct:$direct}
+                else empty end
+            ] | sort_by(.identifier) | group_by(.identifier)
+              | map({identifier:.[0].identifier, notice:any(.[]; .notice), direct:any(.[]; .direct)})) }
+    ')" || die "unverified Buzz feedback; no Paperclip write" 3
+    company="$(company_id)" || exit $?
+    candidates="$(printf '%s\n' "$context" | jq -c '.candidates[]')"
+    issues='[]'
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        identifier="$(printf '%s\n' "$candidate" | jq -er '.identifier')"
+        issue="$(api_request GET "/issues/$identifier")" || die "cannot read linked issue $identifier" 4
+        issue_id="$(printf '%s\n' "$issue" | jq -er --arg company "$company" --arg ref "$identifier" '
+            select(.companyId == $company and .identifier == $ref and (.projectId | strings | length > 0))
+            | .id | strings | select(test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"))
+        ')" || die "linked issue $identifier has no verified company/project binding" 3
+        if ! printf '%s\n' "$candidate" | jq -e '.notice' >/dev/null; then
+            comments="$(api_request GET "/issues/$issue_id/comments")" || die "cannot verify Buzz origin for $identifier" 4
+            if ! printf '%s\n' "$comments" | jq -e --arg prefix "BUZZ_CHANNEL: $channel" \
+                --argjson ctx "$context" '
+                any(.[]; .authorAgentId == null and (.authorUserId | strings | length > 0) and
+                    (.body as $body | any($ctx.thread_ids[]; $body == ($prefix + "\nBUZZ_EVENT: " + .))))
+            ' >/dev/null; then continue; fi
+        fi
+        issues="$(printf '%s\n' "$issues" | jq -c --argjson i "$issue" --argjson c "$candidate" \
+            '. + [$i + {directBuzzReply:$c.direct}]')"
+    done <<EOF
+$candidates
+EOF
+    # A verified operator can disambiguate by naming one of the linked issues.
+    refs="$(printf '%s\n' "$issues" | jq -c --argjson ctx "$context" '
+        [.[].identifier | split("-")[0]] as $prefixes
+        | [$ctx.references[] | select(split("-")[0] as $p | $prefixes | index($p))]
+    ')"
+    if [ "$refs" != '[]' ]; then
+        matches="$(printf '%s\n' "$issues" | jq -c --argjson refs "$refs" \
+            '[.[] | select(.identifier as $id | $refs | index($id))]')"
+        if [ "$(printf '%s\n' "$refs" | jq 'length')" = 1 ] && [ "$matches" != '[]' ]; then
+            issues="$matches"
+        else
+            die "explicit issue reference is not a unique verified ticket in this thread" 3
+        fi
+    else
+        issues="$(printf '%s\n' "$issues" | jq -c 'if any(.[]; .directBuzzReply) then map(select(.directBuzzReply)) else . end')"
+    fi
+    decision="$(printf '%s\n' "$issues" | jq -r 'length | if . == 1 then "linked" elif . == 0 then "unlinked" else "ambiguous" end')"
+    if [ "$action" = resolve ]; then
+        printf '%s\n' "$issues" | jq -c --arg decision "$decision" \
+            '{decision:$decision, issues:map({id,identifier,title,description,projectId,status})}'
+        exit 0
+    fi
+    [ "$decision" = linked ] && [ -n "$selected" ] &&
+        printf '%s\n' "$issues" | jq -e --arg i "$selected" '.[0].identifier == $i' >/dev/null ||
+        die "feedback does not identify one matching issue" 3
+    issue="$(printf '%s\n' "$issues" | jq -c '.[0]')"
+    issue_id="$(printf '%s\n' "$issue" | jq -er '.id')"
+    status="$(printf '%s\n' "$issue" | jq -er '.status')"
+    printf '%s\n' "$issue" | jq -e '.assigneeAgentId | strings | length > 0' >/dev/null ||
+        die "issue has no agent assignee; use the board" 3
+    products="$(api_request GET "/issues/$issue_id/work-products")" || die "cannot check delivery acceptance" 4
+    printf '%s\n' "$products" | jq -e 'type == "array" and all(.[]; .reviewState != "approved" and .status != "approved" and .status != "merged")' >/dev/null ||
+        die "delivery already accepted or acceptance cannot be verified" 3
+    printf '%s\n' "$issue" | jq -e '(.executionState.lastDecisionOutcome != "approved") and (.executionState.status != "pending")' >/dev/null ||
+        die "formal review or approval is active or recorded; use the board" 3
+
+    # UUID-shaped deterministic key for Paperclip's board comment idempotency.
+    key="$(printf '%s\n' "$event" | sed -E 's/(.{8})(.{4}).(.{3}).(.{3})(.{12}).*/\1-\2-4\3-8\4-\5/')"
+    body="$(printf '%s\n' "$context" | jq -r --arg event "$event" \
+        '"QA feedback from Buzz (" + $event + "):\n\n" + .feedback')"
+    case "$status" in
+        in_review)
+            response="$(api_request PATCH "/issues/$issue_id" "$(jq -nc --arg body "$body" --arg key "$key" \
+                '{status:"todo",comment:$body,commentClientRequestId:$key}')")" || die "Paperclip did not return the issue for rework" 4
+            printf '%s\n' "$response" | jq -e --arg i "$issue_id" '.id == $i and .status == "todo"' >/dev/null ||
+                die "Paperclip did not confirm the rework transition" 4 ;;
+        todo|in_progress|done)
+            response="$(api_request POST "/issues/$issue_id/comments" "$(jq -nc --arg body "$body" \
+                --arg key "$key" --arg status "$status" '{body:$body,clientRequestId:$key} + (if $status == "done" then {resume:true} else {} end)')")" ||
+                die "Paperclip did not accept QA feedback" 4
+            printf '%s\n' "$response" | jq -e '.id | strings | length > 0' >/dev/null ||
+                die "Paperclip did not confirm the feedback comment" 4 ;;
+        *) die "issue status $status does not permit automatic QA rework; use the board" 3 ;;
+    esac
+    current="$(api_request GET "/issues/$issue_id")" || die "feedback write completed; cannot verify final issue state" 4
+    printf '%s\n' "$current" | jq -ec --arg id "$issue_id" --arg url "$board" '
+        select(.id == $id and (.status == "todo" or .status == "in_progress"))
+        | {identifier,status} + (if $url != "" then {boardUrl:($url + "/issues/" + .identifier)} else {} end)
+    ' || die "feedback write completed; issue is not queued for rework" 4
+)
+
 main() {
     [ "$#" -gt 0 ] || die "usage: opc-paperclip <command>" 2
     case "$1" in
@@ -1294,6 +1444,7 @@ main() {
             shift
             cmd_labels_ensure
             ;;
+        buzz-feedback) shift; buzz_feedback "$@" ;;
         engineering-ticket)
             shift
             [ "${1-}" = create ] || die "usage: opc-paperclip engineering-ticket create ..." 2

@@ -620,10 +620,8 @@ volume at boot.
 How it works: entrypoints set `GIT_SSH_COMMAND` / `GH_CONFIG_DIR` /
 `GIT_CONFIG_GLOBAL` from `/creds` (paperclip's omp inherits them), the
 `paperclip-api` skill teaches the agents the REST surface
-(`POST /api/companies/<id>/issues` etc., bearer `PAPERCLIP_API_KEY`), and
-`opc-issue-watcher.sh` polls the ticket (60s) then posts the GitHub link to
-Buzz via the buzz CLI when the issue reaches `done`. The frontdoor entrypoint
-re-attaches watchers for surviving tickets on every boot.
+(bearer `PAPERCLIP_API_KEY`). The event bridge posts terminal issue
+notifications back to the original Buzz thread.
 
 ### Buzz-origin ticket creation: avoid metadata-only duplicate wakes
 
@@ -667,6 +665,20 @@ loads the new helper and boot-syncs the image-owned skill into existing profiles
 The Paperclip image build applies the overlay with `--fuzz=0` and runs the focused
 comment-wake regression tests. No event-bridge rebuild or routing-schema change
 is required.
+
+### QA feedback in Buzz: continue the ticket when acceptance failed
+
+Reply to the preview or its Paperclip notification; no issue number is needed
+when the reply identifies one ticket. The frontdoor checks the configured Buzz
+operator's identity and resolves the related Paperclip issue. If the feedback
+fails that issue's original acceptance criteria, it adds the feedback and
+returns the same ticket to its assignee. A `done` ticket without recorded
+approval can be resumed. A new requirement uses a separate linked ticket.
+
+Reply directly to the notification or name the issue in the thread if there are
+multiple matches. An unverified sender cannot dispatch rework. If a formal
+review is pending, use the board's review workflow rather than opening a
+duplicate.
 
 ### Paperclip workspace and concurrency operator commands
 
