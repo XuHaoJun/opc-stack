@@ -17,6 +17,13 @@
 # model is called. Agents with runs cannot be deleted (DELETE /agents/:id 500s
 # on v2026.1106.0, see AGENTS.md), so the test agent is terminated and left.
 #
+# Side effects on the live stack, per run: the ticket's in_review and done
+# transitions are real Paperclip events, so event-bridge posts them to the Buzz
+# fallback/control channel (the fixture issue has no Buzz origin) and the real
+# front door may react to them. Left behind: one archived project (Paperclip
+# refuses DELETE while it retains archived task workspaces), one done issue and
+# one terminated test agent. The fixture repo and agent script are removed.
+#
 #   --keep   leave the issue, workspace, project and agent in place (for the
 #            manual recreate/reopen checks); the preview itself is still
 #            stopped by the gate.
@@ -268,3 +275,8 @@ if curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$PORT_USED/"; then
 else
   ok "nothing answers on $PORT_USED"
 fi
+# A done ticket is refused (no reopen without an engineer run; AGENTS.md pit 6).
+rc=0; err="$(fd_paperclip preview up --issue "$IDENT" 2>&1 >/dev/null)" || rc=$?
+[ "$rc" = 3 ] && [[ "$err" == *"buzz-feedback continue"* ]] \
+  && ok "preview up on the done ticket exits 3 pointing at buzz-feedback continue" \
+  || bad "preview up on the done ticket exits 3 (rc=$rc: $err)"

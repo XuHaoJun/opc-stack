@@ -181,6 +181,12 @@ jq -e '.assigneeAgentId=="engineer-1"' "$scratch/write" >/dev/null || fail "fall
 rm -f "$scratch/write"; issue_agent="" issue_runs='[]'
 if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3); then fail "rework with no runs and no agent proceeded"; fi
 [[ ! -e "$scratch/write" ]] || fail "no-agent rework wrote"
+# a done ticket handed off to the owner (late preview reopen) goes back to the delivering agent
+issue_status=done issue_agent="" issue_runs='[{"agentId":"engineer-1","status":"succeeded","createdAt":"2026-11-20T01:00:00Z","finishedAt":"2026-11-20T02:00:00Z"}]'
+main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 >/dev/null
+jq -e '.status=="todo" and .assigneeAgentId=="engineer-1" and .assigneeUserId==null' "$scratch/write" >/dev/null ||
+    fail "owner-assigned done ticket was not returned to the delivering agent"
+rm -f "$scratch/write"
 issue_status=todo
 if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3); then fail "todo with no agent assignee proceeded"; fi
 unset issue_status issue_agent issue_runs
@@ -222,7 +228,7 @@ api_request() {
         "GET /execution-workspaces/ws-1")
             jq -nc --arg st "$pv_state" --argjson port "$pv_running_port" --argjson cfg "$pv_cfg" \
                 --arg started "$([ -f "$pv/start" ] && echo 1)" \
-                --arg wsst "$([ -f "$pv/reactivated" ] && echo active || echo "$pv_ws_status")" '
+                --arg wsst "$pv_ws_status" '
                 {id:"ws-1",status:$wsst,sourceIssueId:"issue-3",branchName:"feat/x",config:$cfg,
                  runtimeServices:(if $started=="1" then
                    [{serviceName:"preview",status:$st,port:$port,url:("http://h:"+($port|tostring)),
@@ -236,8 +242,8 @@ api_request() {
                     runtimeServices:[{serviceName:"preview",status:"running",port:21013}]}] else [] end)'  ;;
         "GET /companies/test-company/labels") echo '[{"id":"l-prev","name":"preview"}]' ;;
         "PATCH /execution-workspaces/ws-1")
-            if [[ "$3" == '{"status":"active"}' ]]; then touch "$pv/reactivated"; printf '%s\n' "$3" >"$pv/reactivate"
-            else printf '%s\n' "$3" >>"$pv/patch"; fi ;;
+            if jq -e 'has("status")' <<<"$3" >/dev/null; then printf '%s\n' "$3" >"$pv/status_patch"; fi
+            printf '%s\n' "$3" >>"$pv/patch" ;;
         "PATCH /issues/issue-3") printf '%s\n' "$3" >"$pv/issue_patch" ;;
         *) echo "unstubbed: $*" >&2; return 1 ;;
     esac
@@ -278,8 +284,10 @@ pass "preview up refuses an auto-port fallback"
 
 pv_reset; pv_ws_id=""
 rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
-[[ "$rc" == 3 ]] && grep -q 'reopen it to in_review assigned to the owner' <<<"$err" || fail "no-workspace case wrong (rc=$rc): $err"
-pass "preview up on an issue without a workspace points at the owner-assigned reopen"
+[[ "$rc" == 3 ]] && grep -q 'no usable execution workspace' <<<"$err" && grep -q 'buzz-feedback continue' <<<"$err" \
+    || fail "no-workspace case wrong (rc=$rc): $err"
+[[ ! -e "$pv/status_patch" ]] || fail "a workspace status was PATCHed"
+pass "preview up on an issue without a workspace points at buzz-feedback continue"
 
 pv_reset; pv_issue_status=in_review; pv_live_polls=2
 main preview up --issue OPC-3 >/dev/null || fail "preview up after an in_review hand-off failed"
@@ -289,14 +297,28 @@ main preview up --issue OPC-3 >/dev/null || fail "preview up failed"
 [[ ! -e "$pv/live_polls" ]] || fail "in_progress preview up waited on live runs"
 pass "preview up waits for the hand-off run to end, only in in_review"
 
-pv_reset; pv_ws_status=archived
-main preview up --issue OPC-3 >/dev/null || fail "preview up on an archived workspace failed"
-[[ -s "$pv/reactivate" ]] || fail "archived workspace was not reactivated"
-jq -e '.config.workspaceRuntime.services[0].name=="preview"' "$pv/patch" >/dev/null || fail "archived case did not configure preview"
-pv_reset
-main preview up --issue OPC-3 >/dev/null || fail "preview up failed"
-[[ ! -e "$pv/reactivate" ]] || fail "active workspace was needlessly reactivated"
-pass "preview up reactivates an archived workspace (restart recovery skips archived)"
+for case in "issue done" "issue cancelled" "workspace archived" "workspace cleanup_failed"; do
+    pv_reset
+    case "$case" in
+        "issue "*) pv_issue_status="${case#issue }" ;;
+        *) pv_ws_status="${case#workspace }" ;;
+    esac
+    rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
+    [[ "$rc" == 3 ]] && grep -q 'buzz-feedback continue' <<<"$err" && grep -q 'no usable execution workspace' <<<"$err" \
+        || fail "$case must refuse with exit 3 and the continue path (rc=$rc): $err"
+    [[ ! -e "$pv/patch" && ! -e "$pv/start" ]] || fail "$case wrote to Paperclip"
+done
+pass "preview up refuses done/cancelled tickets and closed workspaces, pointing at buzz-feedback continue"
+
+pv_reset; pv_state=starting
+rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
+[[ "$rc" == 4 ]] && grep -q 'stuck in starting' <<<"$err" && grep -q 'preview down --issue OPC-3' <<<"$err" \
+    || fail "stuck-starting but serving must name the remedy (rc=$rc): $err"
+pv_reset; pv_state=starting; pv_probe_rc=7
+rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
+[[ "$rc" == 4 ]] && grep -q 'did not start within' <<<"$err" || fail "stuck-starting and dead must time out plainly (rc=$rc): $err"
+unset pv_probe_rc
+pass "preview up names the upstream stuck-starting race when the URL already answers"
 
 pv_reset; pv_other_ports="21012 21013 21014 21015"
 rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
@@ -338,6 +360,7 @@ jq -e 'length==1 and .[0].identifier=="OPC-3" and .[0].port==21013 and .[0].stat
     || fail "status output wrong: $out"
 pass "preview status lists preview services"
 
+grep -q '"status":"active"' patches/hermes/opc-paperclip && fail "helper still PATCHes a workspace status"
 api_request() { return 1; }
 rc=0; out="$(main preview status --issue OPC-3 2>/dev/null)" || rc=$?
 [[ "$rc" != 0 && -z "$out" ]] || fail "status swallowed a failed issue lookup (rc=$rc out=$out)"

@@ -339,11 +339,13 @@ are not templates; do not copy them. Never ask an agent to lease ports, run
 Phrase → command (you run these, not the engineer):
 
 - 開環境 / 重開環境 → `opc-paperclip preview up --issue OPC-N`. Prints JSON
-  with `url`, `port`, `status`. Exit 3: no run has created a workspace yet, so
-  there is nothing to preview; tell the owner. Exit 4: the preview failed to
-  start or its URL did not answer; report the error text to the owner and do
-  not retry blindly. Exit 5: all preview ports are in use; tell the owner and
-  ask which preview to close.
+  with `url`, `port`, `status`. Exit 3: the ticket has no usable execution
+  workspace (done/cancelled, closed, or never run); follow step 4. Exit 4: the
+  preview failed to start or its URL did not answer; report the error text to
+  the owner and do not retry blindly — except when it says the record is stuck
+  in `starting`: then run `preview down --issue OPC-N` and `preview up` once
+  more. Exit 5: all preview ports are in use; tell the owner and ask which
+  preview to close.
 - 關掉環境 → `opc-paperclip preview down --issue OPC-N`. Stops only that
   service; the ticket status is unchanged.
 - Check state → `opc-paperclip preview status [--issue OPC-N]`.
@@ -364,10 +366,13 @@ Flow:
    `done` means accepted, not merged — merging is a separate owner request.
 3. Owner reports problems → `opc-paperclip buzz-feedback continue …`. It
    returns the ticket to the agent that delivered the newest succeeded run.
-4. Owner wants a preview of a `done` ticket → reopen it to `in_review`
-   assigned to the owner, then `preview up`. No engineer run is needed: the
-   start rebuilds an archived worktree. If the branch was merged and deleted,
-   the worktree is rebuilt from the base branch, which already contains it.
+4. Owner wants a preview of a `done` ticket (or `preview up` exits 3) →
+   reopen it with `opc-paperclip buzz-feedback continue` on the owner's
+   message. That wakes the engineer once: its run restores the ticket's branch
+   from the remote and hands off as `in_review`, and the `in_review` event
+   brings you back to step 1. Do not reopen it by PATCHing it yourself: once
+   Paperclip has archived the worktree, its local branch may be gone and a
+   rebuild without the engineer would serve the base branch, not the change.
 
 ### Continue or create after Buzz feedback
 

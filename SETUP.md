@@ -696,7 +696,7 @@ In the ticket's Buzz thread:
 | 關掉環境 | Stops the preview; the ticket status is unchanged. |
 | 測試通過 | The ticket becomes `done` (accepted, not merged); event-bridge stops the preview within a few seconds. |
 | A problem report | The ticket goes back to the engineer that delivered it; event-bridge stops the preview until the next hand-off. |
-| 開環境 on a `done` ticket | The front door reopens it to `in_review` assigned to you and opens the preview; an archived worktree is rebuilt, no engineer run. |
+| 開環境 on a `done` ticket | The front door reopens it through the engineer (one run): the engineer restores the ticket's branch from the remote and hands off again, then the preview opens. Reopening without that run could serve the base branch instead of the change. |
 
 Four previews can run at once. When all four are taken, the front door names
 the tickets that hold them and asks which to close; it never evicts one.

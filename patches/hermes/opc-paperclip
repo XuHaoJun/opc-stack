@@ -393,21 +393,24 @@ preview_up() {
     if [ "$(printf '%s' "$_issue" | jq -r '.status // empty')" = in_review ]; then
         preview_wait_hand_off_run "$_issue_id"
     fi
+    # A done/cancelled ticket, or one whose workspace Paperclip closed, has no
+    # worktree we can vouch for: the reaper's `git branch -d` runs at the branch
+    # tip, so it deletes the local branch even when only a PR or a remote squash
+    # delivered it, and a rebuild would then branch off main — a green preview
+    # of code without the change. Only an engineer run restores the branch.
+    _reopen="reopen it with 'opc-paperclip buzz-feedback continue' (one engineer run restores the branch and hands off in_review), then preview up on the in_review event"
+    case "$(printf '%s' "$_issue" | jq -r '.status // empty')" in
+        done|cancelled) die "$_ident is $(printf '%s' "$_issue" | jq -r .status): no usable execution workspace for this ticket — $_reopen" 3 ;;
+    esac
     _ws_id="$(printf '%s' "$_issue" | jq -r '.executionWorkspaceId // empty')"
     [ -n "$_ws_id" ] ||
-        die "$_ident has no execution workspace: no run has created one yet, so there is nothing to preview (a done ticket keeps its workspace — reopen it to in_review assigned to the owner and retry)" 3
+        die "$_ident has no usable execution workspace for this ticket (no run has created one, or it was cleaned up) — if it was delivered before, $_reopen" 3
     _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
         die "failed to read execution workspace $_ws_id" 4
-    # A done ticket's worktree may have been archived by Paperclip's reaper.
-    # The start below rebuilds the worktree itself, but an archived record is
-    # skipped by Paperclip's restart-on-boot recovery, so the preview would
-    # not survive a paperclip recreate. Reactivate the record first.
-    if [ "$(printf '%s' "$_ws" | jq -r '.status // empty')" = archived ]; then
-        api_request PATCH "/execution-workspaces/$_ws_id" '{"status":"active"}' >/dev/null ||
-            die "failed to reactivate archived execution workspace $_ws_id" 4
-        _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
-            die "failed to read execution workspace $_ws_id" 4
-    fi
+    case "$(printf '%s' "$_ws" | jq -r '.status // empty')" in
+        archived|cleanup_failed)
+            die "$_ident has no usable execution workspace for this ticket (workspace $_ws_id is $(printf '%s' "$_ws" | jq -r .status)) — $_reopen" 3 ;;
+    esac
     _base_url="$(preview_public_base)" || exit $?
     _all="$(api_request GET "/companies/$(company_id)/execution-workspaces")" ||
         die "failed to list execution workspaces" 4
@@ -445,15 +448,23 @@ preview_up() {
         [ -n "$_err" ] || _err="$(printf '%s' "$_start_out" | head -c 600)"
         die "failed to start the preview service: ${_err:-no response body}" 4
     fi
-    _deadline=$(( $(date +%s) + ${OPC_PREVIEW_START_TIMEOUT:-300} ))
+    _deadline=$(( $(date +%s) + ${OPC_PREVIEW_START_TIMEOUT:-120} ))
     while :; do
         _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
             die "failed to read execution workspace $_ws_id" 4
         _cur="$(printf '%s' "$_ws" | preview_service_of)"
         _st="$(printf '%s' "$_cur" | jq -r '.status // empty')"
         case "$_st" in running|failed|stopped) break ;; esac
-        [ "$(date +%s)" -lt "$_deadline" ] ||
-            die "preview service did not start within ${OPC_PREVIEW_START_TIMEOUT:-300}s (status: ${_st:-none})" 4
+        if [ "$(date +%s)" -ge "$_deadline" ]; then
+            # Paperclip can leave the record at "starting" while the server
+            # already serves (upstream race with a run's finalize). Say so.
+            _stuck_url="$(printf '%s' "$_cur" | jq -r '.url // empty')"
+            [ -n "$_stuck_url" ] || _stuck_url="$_base_url:$_port"
+            if [ "$_st" = starting ] && preview_probe_url "$_stuck_url"; then
+                die "preview $_stuck_url is serving, but Paperclip's record is stuck in starting (upstream finalize race) — run 'opc-paperclip preview down --issue $_ident' then 'preview up' again" 4
+            fi
+            die "preview service did not start within ${OPC_PREVIEW_START_TIMEOUT:-120}s (status: ${_st:-none})" 4
+        fi
         sleep "${OPC_PREVIEW_POLL_SECONDS:-2}"
     done
     case "$_st" in
@@ -1638,7 +1649,10 @@ EOF
     issue_id="$(printf '%s\n' "$issue" | jq -er '.id')"
     status="$(printf '%s\n' "$issue" | jq -er '.status')"
     rework_agent=
-    if [ "$status" = in_review ]; then
+    # in_review, and a done ticket that was handed off to the owner's user,
+    # carry no agent assignee: give it back to the agent that delivered it.
+    if [ "$status" = in_review ] || { [ "$status" = done ] &&
+        ! printf '%s\n' "$issue" | jq -e '.assigneeAgentId | strings | length > 0' >/dev/null; }; then
         # A preview handoff assigns the ticket to the owner's user, so the
         # agent that delivered it is the one on the newest succeeded run
         # (finishedAt, else createdAt); failed/cancelled retries never take the ticket.
@@ -1662,6 +1676,7 @@ EOF
     key="$(printf '%s\n' "$event" | sed -E 's/(.{8})(.{4}).(.{3}).(.{3})(.{12}).*/\1-\2-4\3-8\4-\5/')"
     body="$(printf '%s\n' "$context" | jq -r --arg event "$event" \
         '"QA feedback from Buzz (" + $event + "):\n\n" + .feedback')"
+    [ -n "$rework_agent" ] && [ "$status" = done ] && status=in_review
     case "$status" in
         in_review)
             response="$(api_request PATCH "/issues/$issue_id" "$(jq -nc --arg body "$body" --arg key "$key" --arg agent "$rework_agent" \
