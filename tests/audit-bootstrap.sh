@@ -236,6 +236,18 @@ else
     ok "watcher retired (event-bridge is the only delivery writer)"
 fi
 
+# Engineering preview lifecycle guidance (ticket-owned runtime service).
+hasall "front door skill: preview lifecycle commands" patches/hermes/skills/paperclip-api/SKILL.md \
+    'opc-paperclip preview up' 'opc-paperclip preview down' 'engineering-ticket create' '--preview' 'paperclip.issue.in_review'
+hasall "engineer prompt: preview hand-off contract" patches/paperclip/agent-prompts/fullstack-engineer.md \
+    '.paperclip/preview' 'in_review' 'createdByUserId'
+if sed -n '/^### QA preview for an existing repo or PR/,/^### Continue or create after Buzz feedback/p' \
+    patches/hermes/skills/paperclip-api/SKILL.md | grep -q 'devenv provision'; then
+    bad "QA preview section: no devenv provision flow"
+else
+    ok "QA preview section: no devenv provision flow"
+fi
+
 echo
 printf 'result: %d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
