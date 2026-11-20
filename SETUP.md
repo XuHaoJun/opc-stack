@@ -696,7 +696,7 @@ In the ticket's Buzz thread:
 | 關掉環境 | Stops the preview; the ticket status is unchanged. |
 | 測試通過 | The ticket becomes `done` (accepted, not merged); event-bridge stops the preview within a few seconds. |
 | A problem report | The ticket goes back to the engineer that delivered it; event-bridge stops the preview until the next hand-off. |
-| 開環境 on a `done` ticket | The front door reopens it through the engineer (one run): the engineer restores the ticket's branch from the remote and hands off again, then the preview opens. Reopening without that run could serve the base branch instead of the change. |
+| 開環境 on a `done` ticket | The ticket gets the `preview` label (asking later counts the same as asking up front), and the front door reopens it through the engineer (`buzz-feedback continue --preview`, one run): the engineer restores the ticket's branch from the remote and hands off as `in_review` instead of finishing as `done`, then the preview opens. Reopening without that run could serve the base branch instead of the change. Work already accepted or merged is not reopened: previewing main is a new ticket. |
 
 Four previews can run at once. When all four are taken, the front door names
 the tickets that hold them and asks which to close; it never evicts one.
@@ -710,7 +710,20 @@ tests/engineering-preview.sh   # live end-to-end gate; needs no LLM
 
 **Existing machines, once.** The preview port slice (devenv's HTTP pool shrinks
 to 21000-21011, previews take 21012-21015) is fixed when the paperclip container
-is created, and the helper, bridge and skills live in the images:
+is created, and the helper, bridge and skills live in the images. First check
+that no devenv HTTP lease already sits on a port the slice takes over:
+
+```bash
+docker compose exec paperclip devenv list   # any http lease on 21012-21015?
+```
+
+If one does, move it before redeploying, or that lease and a ticket preview
+will both claim the same port. devenv has no move: `docker compose exec paperclip
+devenv release <key>` drops the **whole** lease — its database, valkey and S3
+data included, not only the port — so dump anything worth keeping first, then
+provision it again after the redeploy (it gets a port from the smaller
+21000-21011 pool, so whatever used the old port must pick up the new `.env`).
+Then:
 
 ```bash
 scripts/prepare.sh
