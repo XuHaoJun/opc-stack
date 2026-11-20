@@ -207,18 +207,23 @@ rc=0; preview_pick_port "" '[21012,21013,21014,21015]' >/dev/null || rc=$?
 pass "preview helpers"
 
 pv="$scratch/pv"; mkdir -p "$pv"
-pv_reset() { rm -f "$pv"/*; pv_cfg=null; pv_start_rc=0; pv_other_port=21012; pv_running_port=21013; pv_state=running; pv_ws_id=ws-1; pv_other_ports="21012"; }
+pv_reset() { rm -f "$pv"/*; pv_cfg=null; pv_ws_status=active; pv_issue_status=in_progress; pv_live_polls=0; pv_start_rc=0; pv_other_port=21012; pv_running_port=21013; pv_state=running; pv_ws_id=ws-1; pv_other_ports="21012"; }
 preview_probe_url() { return "${pv_probe_rc:-0}"; }
 api_request() {
     case "$1 $2" in
         "GET /issues/OPC-3")
-            jq -nc --arg ws "$pv_ws_id" '{id:"issue-3",identifier:"OPC-3",labelIds:["l0"],executionWorkspaceId:(if $ws=="" then null else $ws end)}' ;;
+            jq -nc --arg ws "$pv_ws_id" --arg st "$pv_issue_status" '{id:"issue-3",identifier:"OPC-3",status:$st,labelIds:["l0"],executionWorkspaceId:(if $ws=="" then null else $ws end)}' ;;
+        "GET /companies/test-company/live-runs?minCount=0&limit=50")
+            echo x >>"$pv/live_polls"
+            if [[ "$(wc -l <"$pv/live_polls")" -le "$pv_live_polls" ]]; then echo '[{"id":"run-1","issueId":"issue-3","status":"running"}]'
+            else echo '[{"id":"run-2","issueId":"issue-other","status":"running"}]'; fi ;;
         "GET /issues/issue-9") echo '{"id":"issue-9","identifier":"OPC-9"}' ;;
         "GET /issues/issue-3") echo '{"id":"issue-3","identifier":"OPC-3"}' ;;
         "GET /execution-workspaces/ws-1")
             jq -nc --arg st "$pv_state" --argjson port "$pv_running_port" --argjson cfg "$pv_cfg" \
-                --arg started "$([ -f "$pv/start" ] && echo 1)" '
-                {id:"ws-1",sourceIssueId:"issue-3",branchName:"feat/x",config:$cfg,
+                --arg started "$([ -f "$pv/start" ] && echo 1)" \
+                --arg wsst "$([ -f "$pv/reactivated" ] && echo active || echo "$pv_ws_status")" '
+                {id:"ws-1",status:$wsst,sourceIssueId:"issue-3",branchName:"feat/x",config:$cfg,
                  runtimeServices:(if $started=="1" then
                    [{serviceName:"preview",status:$st,port:$port,url:("http://h:"+($port|tostring)),
                      id:"rs-1",updatedAt:"2026-11-20T00:00:00Z"}] else [] end)}' ;;
@@ -230,7 +235,9 @@ api_request() {
                 + (if $own=="1" then [{id:"ws-1",sourceIssueId:"issue-3",
                     runtimeServices:[{serviceName:"preview",status:"running",port:21013}]}] else [] end)'  ;;
         "GET /companies/test-company/labels") echo '[{"id":"l-prev","name":"preview"}]' ;;
-        "PATCH /execution-workspaces/ws-1") printf '%s\n' "$3" >>"$pv/patch" ;;
+        "PATCH /execution-workspaces/ws-1")
+            if [[ "$3" == '{"status":"active"}' ]]; then touch "$pv/reactivated"; printf '%s\n' "$3" >"$pv/reactivate"
+            else printf '%s\n' "$3" >>"$pv/patch"; fi ;;
         "PATCH /issues/issue-3") printf '%s\n' "$3" >"$pv/issue_patch" ;;
         *) echo "unstubbed: $*" >&2; return 1 ;;
     esac
@@ -271,8 +278,25 @@ pass "preview up refuses an auto-port fallback"
 
 pv_reset; pv_ws_id=""
 rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
-[[ "$rc" == 3 ]] && grep -q reopen <<<"$err" || fail "no-workspace case wrong (rc=$rc): $err"
-pass "preview up on an issue without a workspace says reopen"
+[[ "$rc" == 3 ]] && grep -q 'reopen it to in_review assigned to the owner' <<<"$err" || fail "no-workspace case wrong (rc=$rc): $err"
+pass "preview up on an issue without a workspace points at the owner-assigned reopen"
+
+pv_reset; pv_issue_status=in_review; pv_live_polls=2
+main preview up --issue OPC-3 >/dev/null || fail "preview up after an in_review hand-off failed"
+[[ "$(wc -l <"$pv/live_polls")" == 3 ]] || fail "in_review preview up did not wait for the hand-off run ($(wc -l <"$pv/live_polls") polls)"
+pv_reset
+main preview up --issue OPC-3 >/dev/null || fail "preview up failed"
+[[ ! -e "$pv/live_polls" ]] || fail "in_progress preview up waited on live runs"
+pass "preview up waits for the hand-off run to end, only in in_review"
+
+pv_reset; pv_ws_status=archived
+main preview up --issue OPC-3 >/dev/null || fail "preview up on an archived workspace failed"
+[[ -s "$pv/reactivate" ]] || fail "archived workspace was not reactivated"
+jq -e '.config.workspaceRuntime.services[0].name=="preview"' "$pv/patch" >/dev/null || fail "archived case did not configure preview"
+pv_reset
+main preview up --issue OPC-3 >/dev/null || fail "preview up failed"
+[[ ! -e "$pv/reactivate" ]] || fail "active workspace was needlessly reactivated"
+pass "preview up reactivates an archived workspace (restart recovery skips archived)"
 
 pv_reset; pv_other_ports="21012 21013 21014 21015"
 rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?

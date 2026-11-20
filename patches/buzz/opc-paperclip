@@ -371,15 +371,43 @@ preview_issue_arg() { # parses "--issue OPC-N" → stdout; $1.. are the args
     printf '%s' "$2"
 }
 
+# Starting a service while the run that handed the ticket off is still
+# finishing leaves Paperclip's record at "starting" forever (the server is
+# serving, the record never turns running; measured 3/3 on v2026.1106.0). The
+# in_review hand-off is exactly that moment, so wait for the issue's live runs
+# to end first. A ticket still in progress keeps its long run; no wait there.
+preview_wait_hand_off_run() { # issue-id
+    _wr_deadline=$(( $(date +%s) + ${OPC_PREVIEW_RUN_WAIT:-120} ))
+    while :; do
+        _wr_live="$(api_request GET "/companies/$(company_id)/live-runs?minCount=0&limit=50")" || return 0
+        [ "$(printf '%s' "$_wr_live" | jq --arg i "$1" '[.[]? | select(.issueId == $i)] | length' 2>/dev/null)" = 0 ] && return 0
+        [ "$(date +%s)" -lt "$_wr_deadline" ] || return 0
+        sleep "${OPC_PREVIEW_POLL_SECONDS:-2}"
+    done
+}
+
 preview_up() {
     _ident="$(preview_issue_arg "$@")" || die "usage: opc-paperclip preview up --issue OPC-N" 2
     _issue="$(preview_issue_json "$_ident")" || exit $?
     _issue_id="$(printf '%s' "$_issue" | jq -r '.id')"
+    if [ "$(printf '%s' "$_issue" | jq -r '.status // empty')" = in_review ]; then
+        preview_wait_hand_off_run "$_issue_id"
+    fi
     _ws_id="$(printf '%s' "$_issue" | jq -r '.executionWorkspaceId // empty')"
     [ -n "$_ws_id" ] ||
-        die "$_ident has no execution workspace (never ran, or archived after done) — reopen the ticket so the engineer re-creates it, then retry" 3
+        die "$_ident has no execution workspace: no run has created one yet, so there is nothing to preview (a done ticket keeps its workspace — reopen it to in_review assigned to the owner and retry)" 3
     _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
         die "failed to read execution workspace $_ws_id" 4
+    # A done ticket's worktree may have been archived by Paperclip's reaper.
+    # The start below rebuilds the worktree itself, but an archived record is
+    # skipped by Paperclip's restart-on-boot recovery, so the preview would
+    # not survive a paperclip recreate. Reactivate the record first.
+    if [ "$(printf '%s' "$_ws" | jq -r '.status // empty')" = archived ]; then
+        api_request PATCH "/execution-workspaces/$_ws_id" '{"status":"active"}' >/dev/null ||
+            die "failed to reactivate archived execution workspace $_ws_id" 4
+        _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
+            die "failed to read execution workspace $_ws_id" 4
+    fi
     _base_url="$(preview_public_base)" || exit $?
     _all="$(api_request GET "/companies/$(company_id)/execution-workspaces")" ||
         die "failed to list execution workspaces" 4
