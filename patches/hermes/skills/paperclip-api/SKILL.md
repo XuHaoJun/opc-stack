@@ -340,7 +340,9 @@ Phrase → command (you run these, not the engineer):
 
 - 開環境 / 重開環境 → `opc-paperclip preview up --issue OPC-N`. Prints JSON
   with `url`, `port`, `status`. Exit 3: the ticket has no usable execution
-  workspace (done/cancelled, closed, or never run); follow step 4. Exit 4: the
+  workspace. For a `done` ticket or a closed workspace, follow step 4. A
+  `cancelled` ticket is not reopened for a preview: tell the owner, and offer a
+  new ticket if they still want one. Exit 4: the
   preview failed to start or its URL did not answer; report the error text to
   the owner and do not retry blindly — except when it says the record is stuck
   in `starting`: then run `preview down --issue OPC-N` and `preview up` once
@@ -373,6 +375,9 @@ Flow:
    brings you back to step 1. Do not reopen it by PATCHing it yourself: once
    Paperclip has archived the worktree, its local branch may be gone and a
    rebuild without the engineer would serve the base branch, not the change.
+   If `continue` refuses because the work is already accepted or merged, the
+   change is in main: tell the owner so, and that previewing main is a new
+   ticket, not a reopen. Do not retry.
 
 ### Continue or create after Buzz feedback
 

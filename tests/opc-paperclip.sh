@@ -184,8 +184,16 @@ if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --is
 # a done ticket handed off to the owner (late preview reopen) goes back to the delivering agent
 issue_status=done issue_agent="" issue_runs='[{"agentId":"engineer-1","status":"succeeded","createdAt":"2026-11-20T01:00:00Z","finishedAt":"2026-11-20T02:00:00Z"}]'
 main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 >/dev/null
-jq -e '.status=="todo" and .assigneeAgentId=="engineer-1" and .assigneeUserId==null' "$scratch/write" >/dev/null ||
-    fail "owner-assigned done ticket was not returned to the delivering agent"
+jq -e '.status=="todo" and .assigneeAgentId=="engineer-1" and .assigneeUserId==null and .resume==true
+    and (.comment | contains("Volume at zero still plays")) and (.commentClientRequestId | length > 0)' "$scratch/write" >/dev/null ||
+    fail "owner-assigned done ticket was not resumed to the delivering agent: $(cat "$scratch/write")"
+rm -f "$scratch/write"
+issue_runs='[{"agentId":"flaky","status":"failed","createdAt":"2026-11-20T03:00:00Z"}]'
+if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3); then fail "owner-assigned done with no succeeded run proceeded"; fi
+[[ ! -e "$scratch/write" ]] || fail "owner-assigned done with no succeeded run wrote"
+issue_status=in_review issue_runs='[{"agentId":"engineer-1","status":"succeeded","createdAt":"2026-11-20T01:00:00Z"}]'
+main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 >/dev/null
+jq -e 'has("resume") | not' "$scratch/write" >/dev/null || fail "in_review rework must not send resume"
 rm -f "$scratch/write"
 issue_status=todo
 if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3); then fail "todo with no agent assignee proceeded"; fi

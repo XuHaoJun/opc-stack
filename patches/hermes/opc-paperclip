@@ -1676,11 +1676,16 @@ EOF
     key="$(printf '%s\n' "$event" | sed -E 's/(.{8})(.{4}).(.{3}).(.{3})(.{12}).*/\1-\2-4\3-8\4-\5/')"
     body="$(printf '%s\n' "$context" | jq -r --arg event "$event" \
         '"QA feedback from Buzz (" + $event + "):\n\n" + .feedback')"
-    [ -n "$rework_agent" ] && [ "$status" = done ] && status=in_review
+    # A done ticket goes through Paperclip's explicit resume intent (resume
+    # needs the comment; it also reopens a closed execution workspace), the
+    # same gate the comment-only done path uses.
+    resume=false
+    if [ -n "$rework_agent" ] && [ "$status" = done ]; then status=in_review; resume=true; fi
     case "$status" in
         in_review)
-            response="$(api_request PATCH "/issues/$issue_id" "$(jq -nc --arg body "$body" --arg key "$key" --arg agent "$rework_agent" \
-                '{status:"todo",assigneeAgentId:$agent,assigneeUserId:null,comment:$body,commentClientRequestId:$key}')")" || die "Paperclip did not return the issue for rework" 4
+            response="$(api_request PATCH "/issues/$issue_id" "$(jq -nc --arg body "$body" --arg key "$key" --arg agent "$rework_agent" --argjson resume "$resume" \
+                '{status:"todo",assigneeAgentId:$agent,assigneeUserId:null,comment:$body,commentClientRequestId:$key}
+                 + (if $resume then {resume:true} else {} end)')")" || die "Paperclip did not return the issue for rework" 4
             printf '%s\n' "$response" | jq -e --arg i "$issue_id" '.id == $i and .status == "todo"' >/dev/null ||
                 die "Paperclip did not confirm the rework transition" 4 ;;
         todo|in_progress|done)
