@@ -80,8 +80,10 @@ api_request() {
         "GET /issues/OPC-3"|"GET /issues/$issue_id")
             if [[ "$*" == "GET /issues/$issue_id" && -f "$scratch/write" ]]; then now=todo; else now=${issue_status:-in_review}; fi
             jq -nc --arg id "$issue_id" --arg status "$now" \
-                --arg company "${issue_company:-test-company}" \
-                '{id:$id,identifier:"OPC-3",companyId:$company,projectId:"project-1",assigneeAgentId:"engineer-1",status:$status,title:"Volume control"}' ;;
+                --arg company "${issue_company:-test-company}" --arg agent "${issue_agent-engineer-1}" \
+                '{id:$id,identifier:"OPC-3",companyId:$company,projectId:"project-1",status:$status,title:"Volume control"}
+                 + (if $agent != "" then {assigneeAgentId:$agent} else {assigneeUserId:"board-user"} end)' ;;
+        "GET /issues/$issue_id/runs") printf '%s\n' "${issue_runs:-[]}" ;;
         "GET /issues/OPC-4")
             printf '%s\n' '{"id":"30000000-0000-4000-8000-000000000000","identifier":"OPC-4","companyId":"test-company","projectId":"project-2","status":"in_review"}' ;;
         "GET /issues/$issue_id/comments")
@@ -161,6 +163,22 @@ main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue 
 jq -e '.resume == true and (.body | contains("Volume at zero still plays"))' "$scratch/write" >/dev/null ||
     fail "premature done was not resumed through Paperclip"
 pass "only unaccepted done work is eligible for native resume"
+
+# in_review handed to the owner's user returns to the agent of the newest run
+rm -f "$scratch/write"
+issue_status=in_review issue_agent=""
+issue_runs='[{"agentId":"other","createdAt":"2026-11-19T00:00:00Z"},{"agentId":"engineer-1","createdAt":"2026-11-20T02:00:00Z"}]'
+main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 >/dev/null
+jq -e '.status=="todo" and .assigneeAgentId=="engineer-1" and .assigneeUserId==null' "$scratch/write" >/dev/null ||
+    fail "in_review rework did not return to the newest run's agent"
+rm -f "$scratch/write"; issue_runs='[]'
+if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3); then fail "rework with no runs and no agent proceeded"; fi
+[[ ! -e "$scratch/write" ]] || fail "no-agent rework wrote"
+issue_status=todo
+if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3); then fail "todo with no agent assignee proceeded"; fi
+unset issue_status issue_agent issue_runs
+rm -f "$scratch/write"
+pass "in_review rework returns to the delivering agent"
 
 # ── ticket preview ───────────────────────────────────────────────────────
 export OPC_PREVIEW_PORT_BASE=21012 OPC_PREVIEW_PORT_END=21015

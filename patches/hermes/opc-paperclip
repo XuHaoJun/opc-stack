@@ -1609,8 +1609,19 @@ EOF
     issue="$(printf '%s\n' "$issues" | jq -c '.[0]')"
     issue_id="$(printf '%s\n' "$issue" | jq -er '.id')"
     status="$(printf '%s\n' "$issue" | jq -er '.status')"
-    printf '%s\n' "$issue" | jq -e '.assigneeAgentId | strings | length > 0' >/dev/null ||
-        die "issue has no agent assignee; use the board" 3
+    rework_agent=
+    if [ "$status" = in_review ]; then
+        # A preview handoff assigns the ticket to the owner's user, so the
+        # agent that delivered it is the one on the newest run (by createdAt).
+        runs="$(api_request GET "/issues/$issue_id/runs")" || die "cannot read runs for $selected" 4
+        rework_agent="$(printf '%s\n' "$runs" | jq -r --argjson issue "$issue" '
+            ([.[]? | select((.agentId | strings | length) > 0)] | sort_by(.createdAt) | last | .agentId)
+            // $issue.assigneeAgentId // empty')" || die "cannot read runs for $selected" 4
+        [ -n "$rework_agent" ] || die "no agent has worked on this issue; use the board" 3
+    else
+        printf '%s\n' "$issue" | jq -e '.assigneeAgentId | strings | length > 0' >/dev/null ||
+            die "issue has no agent assignee; use the board" 3
+    fi
     products="$(api_request GET "/issues/$issue_id/work-products")" || die "cannot check delivery acceptance" 4
     printf '%s\n' "$products" | jq -e 'type == "array" and all(.[]; .reviewState != "approved" and .status != "approved" and .status != "merged")' >/dev/null ||
         die "delivery already accepted or acceptance cannot be verified" 3
@@ -1623,8 +1634,8 @@ EOF
         '"QA feedback from Buzz (" + $event + "):\n\n" + .feedback')"
     case "$status" in
         in_review)
-            response="$(api_request PATCH "/issues/$issue_id" "$(jq -nc --arg body "$body" --arg key "$key" \
-                '{status:"todo",comment:$body,commentClientRequestId:$key}')")" || die "Paperclip did not return the issue for rework" 4
+            response="$(api_request PATCH "/issues/$issue_id" "$(jq -nc --arg body "$body" --arg key "$key" --arg agent "$rework_agent" \
+                '{status:"todo",assigneeAgentId:$agent,assigneeUserId:null,comment:$body,commentClientRequestId:$key}')")" || die "Paperclip did not return the issue for rework" 4
             printf '%s\n' "$response" | jq -e --arg i "$issue_id" '.id == $i and .status == "todo"' >/dev/null ||
                 die "Paperclip did not confirm the rework transition" 4 ;;
         todo|in_progress|done)
