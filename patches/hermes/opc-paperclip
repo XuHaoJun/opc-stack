@@ -36,6 +36,23 @@ api_request() { # METHOD PATH [JSON]
     fi
 }
 
+# Like api_request but keeps the response body on non-2xx: prints the body on
+# stdout and returns 1. Paperclip reports start failures (bind errors, a
+# repo without .paperclip/preview) only in the error body, which curl -f drops.
+api_request_body() { # METHOD PATH [JSON]
+    _rb_file="$(mktemp "${TMPDIR:-/tmp}/opc-paperclip-resp.XXXXXX")" || return 1
+    _rb_code="$(curl -sS -o "$_rb_file" -w '%{http_code}' -X "$1" \
+        -H "Authorization: Bearer $(api_key)" -H 'Content-Type: application/json' \
+        --data-binary "${3-{\}}" "$(api_base)/api$2")" || { rm -f "$_rb_file"; return 1; }
+    cat "$_rb_file"
+    rm -f "$_rb_file"
+    case "$_rb_code" in 2??) return 0 ;; *) return 1 ;; esac
+}
+
+preview_error_text() { # raw response body → short human text
+    printf '%s' "$1" | jq -r '.error // empty' 2>/dev/null | head -c 600
+}
+
 canonical_repo_json() {
     _raw="$1"
     _kind=short
@@ -386,26 +403,34 @@ preview_up() {
         (.config // {})
         | .workspaceRuntime = ((.workspaceRuntime // {})
             | .services = (((.services // []) | map(select(.name != "preview"))) + [$svc]))
+        | .serviceStates = ((.serviceStates // {})
+            + {((.workspaceRuntime.services | length - 1 | tostring)): "running"})
         | .desiredState = "running"')"
+    _idx="$(printf '%s' "$_config" | jq -r '.workspaceRuntime.services | map(.name) | index("preview")')"
     api_request PATCH "/execution-workspaces/$_ws_id" "$(jq -nc --argjson c "$_config" '{config:$c}')" >/dev/null ||
         die "failed to configure the preview service" 4
-    api_request POST "/execution-workspaces/$_ws_id/runtime-services/start" '{}' >/dev/null ||
-        die "failed to start the preview service" 4
+    # serviceIndex selects only the preview entry; an empty selector would
+    # start every service configured on the workspace.
+    if ! _start_out="$(api_request_body POST "/execution-workspaces/$_ws_id/runtime-services/start" \
+        "$(jq -nc --argjson i "$_idx" '{serviceIndex:$i}')")"; then
+        _err="$(preview_error_text "$_start_out")"
+        [ -n "$_err" ] || _err="$(printf '%s' "$_start_out" | head -c 600)"
+        die "failed to start the preview service: ${_err:-no response body}" 4
+    fi
     _deadline=$(( $(date +%s) + ${OPC_PREVIEW_START_TIMEOUT:-300} ))
     while :; do
         _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
             die "failed to read execution workspace $_ws_id" 4
         _cur="$(printf '%s' "$_ws" | preview_service_of)"
         _st="$(printf '%s' "$_cur" | jq -r '.status // empty')"
-        case "$_st" in running|failed) break ;; esac
+        case "$_st" in running|failed|stopped) break ;; esac
         [ "$(date +%s)" -lt "$_deadline" ] ||
             die "preview service did not start within ${OPC_PREVIEW_START_TIMEOUT:-300}s (status: ${_st:-none})" 4
         sleep "${OPC_PREVIEW_POLL_SECONDS:-2}"
     done
-    if [ "$_st" = failed ]; then
-        _err="$(printf '%s' "$_cur" | jq -r '.lastError // .error // .errorMessage // .statusMessage // "no error text reported (see the workspace runtime log)"')"
-        die "preview service failed: $_err" 4
-    fi
+    case "$_st" in
+        failed|stopped) die "preview service ended up $_st right after start (see the workspace runtime log)" 4 ;;
+    esac
     _got_port="$(printf '%s' "$_cur" | jq -r '.port // empty')"
     [ "$_got_port" = "$_port" ] ||
         die "preview port mismatch: requested $_port but Paperclip started it on ${_got_port:-none} (fixed-port fallback) — not publishing that URL" 4
@@ -437,13 +462,26 @@ preview_down() {
         _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
             die "failed to read execution workspace $_ws_id" 4
         _st="$(printf '%s' "$_ws" | preview_service_of | jq -r '.status // empty')"
+        _cur="$(printf '%s' "$_ws" | preview_service_of)"
+        _idx="$(printf '%s' "$_ws" | jq -r '(.config.workspaceRuntime.services // []) | map(.name) | index("preview") // empty')"
         case "$_st" in
             running|starting|provisioning)
-                api_request POST "/execution-workspaces/$_ws_id/runtime-services/stop" '{}' >/dev/null ||
-                    die "failed to stop the preview service" 4 ;;
+                # target only the preview service, never the whole workspace
+                _sel="$(printf '%s' "$_cur" | jq -c '{runtimeServiceId:.id}')"
+                if [ "$(printf '%s' "$_cur" | jq -r '.id // empty')" = "" ]; then
+                    [ -n "$_idx" ] || die "no preview service configured on $_ws_id" 4
+                    _sel="$(jq -nc --argjson i "$_idx" '{serviceIndex:$i}')"
+                fi
+                _stop_out="$(api_request_body POST "/execution-workspaces/$_ws_id/runtime-services/stop" "$_sel")" ||
+                    die "failed to stop the preview service: $(preview_error_text "$_stop_out")" 4 ;;
         esac
-        api_request PATCH "/execution-workspaces/$_ws_id" '{"config":{"desiredState":"stopped"}}' >/dev/null ||
-            die "failed to record desiredState stopped" 4
+        if [ -n "$_idx" ]; then
+            # serviceStates is keyed by the service's index in services[]
+            _patch="$(printf '%s' "$_ws" | jq -c --arg i "$_idx" \
+                '{config:{serviceStates:((.config.serviceStates // {}) + {($i):"stopped"})}}')"
+            api_request PATCH "/execution-workspaces/$_ws_id" "$_patch" >/dev/null ||
+                die "failed to record the stopped preview state" 4
+        fi
     fi
     jq -nc --arg id "$_ident" '{identifier:$id,status:"stopped"}'
 }
@@ -455,7 +493,8 @@ preview_status() {
     fi
     _ws_only=""
     if [ -n "$_ident" ]; then
-        _ws_only="$(preview_issue_json "$_ident" | jq -r '.executionWorkspaceId // empty')" || exit $?
+        _pi_json="$(preview_issue_json "$_ident")" || exit $?
+        _ws_only="$(printf '%s' "$_pi_json" | jq -r '.executionWorkspaceId // empty')"
         [ -n "$_ws_only" ] || { printf '[]\n'; return 0; }
     fi
     _all="$(api_request GET "/companies/$(company_id)/execution-workspaces")" ||

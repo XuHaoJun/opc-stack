@@ -182,7 +182,7 @@ rc=0; preview_pick_port "" '[21012,21013,21014,21015]' >/dev/null || rc=$?
 pass "preview helpers"
 
 pv="$scratch/pv"; mkdir -p "$pv"
-pv_reset() { rm -f "$pv"/*; pv_other_port=21012; pv_running_port=21013; pv_state=running; pv_ws_id=ws-1; pv_other_ports="21012"; }
+pv_reset() { rm -f "$pv"/*; pv_cfg=null; pv_start_rc=0; pv_other_port=21012; pv_running_port=21013; pv_state=running; pv_ws_id=ws-1; pv_other_ports="21012"; }
 preview_probe_url() { return "${pv_probe_rc:-0}"; }
 api_request() {
     case "$1 $2" in
@@ -191,12 +191,12 @@ api_request() {
         "GET /issues/issue-9") echo '{"id":"issue-9","identifier":"OPC-9"}' ;;
         "GET /issues/issue-3") echo '{"id":"issue-3","identifier":"OPC-3"}' ;;
         "GET /execution-workspaces/ws-1")
-            jq -nc --arg st "$pv_state" --argjson port "$pv_running_port" \
+            jq -nc --arg st "$pv_state" --argjson port "$pv_running_port" --argjson cfg "$pv_cfg" \
                 --arg started "$([ -f "$pv/start" ] && echo 1)" '
-                {id:"ws-1",sourceIssueId:"issue-3",branchName:"feat/x",config:null,
+                {id:"ws-1",sourceIssueId:"issue-3",branchName:"feat/x",config:$cfg,
                  runtimeServices:(if $started=="1" then
                    [{serviceName:"preview",status:$st,port:$port,url:("http://h:"+($port|tostring)),
-                     lastError:"boom: .paperclip/preview exited 64",updatedAt:"2026-11-20T00:00:00Z"}] else [] end)}' ;;
+                     id:"rs-1",updatedAt:"2026-11-20T00:00:00Z"}] else [] end)}' ;;
         "GET /companies/test-company/execution-workspaces")
             jq -nc --arg ports "$pv_other_ports" --arg own "$([ -f "$pv/start" ] && echo 1)" '
                 [($ports|split(" ")|map(select(.!="")|tonumber)|to_entries[]) as $e
@@ -206,10 +206,19 @@ api_request() {
                     runtimeServices:[{serviceName:"preview",status:"running",port:21013}]}] else [] end)'  ;;
         "GET /companies/test-company/labels") echo '[{"id":"l-prev","name":"preview"}]' ;;
         "PATCH /execution-workspaces/ws-1") printf '%s\n' "$3" >>"$pv/patch" ;;
-        "POST /execution-workspaces/ws-1/runtime-services/start") touch "$pv/start"; echo '{}' ;;
-        "POST /execution-workspaces/ws-1/runtime-services/stop") echo stop >>"$pv/stop"; echo '{}' ;;
         "PATCH /issues/issue-3") printf '%s\n' "$3" >"$pv/issue_patch" ;;
         *) echo "unstubbed: $*" >&2; return 1 ;;
+    esac
+}
+
+api_request_body() {
+    case "$1 $2" in
+        "POST /execution-workspaces/ws-1/runtime-services/start")
+            printf '%s\n' "$3" >"$pv/start_body"
+            if [[ "$pv_start_rc" != 0 ]]; then echo '{"error":"Runtime service could not bind 0.0.0.0:21013"}'; return 1; fi
+            touch "$pv/start"; echo '{}' ;;
+        "POST /execution-workspaces/ws-1/runtime-services/stop") printf '%s\n' "$3" >"$pv/stop"; echo '{}' ;;
+        *) echo "unstubbed body: $*" >&2; return 1 ;;
     esac
 }
 
@@ -220,7 +229,15 @@ jq -e '.port==21013 and .url=="http://h:21013" and .workspaceId=="ws-1" and .sta
 jq -e '.config.workspaceRuntime.services[0].port==21013 and .config.desiredState=="running"' "$pv/patch" >/dev/null \
     || fail "preview up PATCH body wrong: $(cat "$pv/patch")"
 jq -e '.labelIds | index("l-prev") and index("l0")' "$pv/issue_patch" >/dev/null || fail "preview label not added"
+jq -e '.serviceIndex==0' "$pv/start_body" >/dev/null || fail "start body lacks the preview selector: $(cat "$pv/start_body")"
 pass "preview up picks a free port, starts, probes, labels"
+
+pv_reset; pv_cfg='{"workspaceRuntime":{"services":[{"name":"web","port":3000}]}}'
+main preview up --issue OPC-3 >/dev/null || fail "preview up with another service failed"
+jq -e '.config.workspaceRuntime.services | length==2 and .[0].name=="web" and .[1].name=="preview"' "$pv/patch" >/dev/null \
+    || fail "other services were not preserved"
+jq -e '.serviceIndex==1' "$pv/start_body" >/dev/null || fail "start targeted the wrong service: $(cat "$pv/start_body")"
+pass "preview up targets only the preview service among several"
 
 pv_reset; pv_running_port=54321
 if err="$(main preview up --issue OPC-3 2>&1 >/dev/null)"; then fail "port fallback was published"; fi
@@ -238,21 +255,30 @@ rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
 [[ ! -e "$pv/patch" && ! -e "$pv/start" ]] || fail "port exhaustion still wrote to Paperclip"
 pass "preview up with all ports held exits 5 naming holders, writes nothing"
 
-pv_reset; pv_state=failed
+pv_reset; pv_start_rc=1
 rc=0; out="$(main preview up --issue OPC-3 2>"$pv/err")" || rc=$?
-[[ "$rc" == 4 ]] && grep -q 'boom' "$pv/err" && [[ -z "$out" ]] || fail "failed service case wrong (rc=$rc): $(cat "$pv/err")"
-pass "preview up reports a failed service with its error text"
+[[ "$rc" == 4 ]] && grep -q 'could not bind' "$pv/err" && [[ -z "$out" ]] || fail "failed start case wrong (rc=$rc): $(cat "$pv/err")"
+pass "preview up surfaces Paperclip's start error text"
+
+pv_reset; pv_state=stopped
+rc=0; out="$(main preview up --issue OPC-3 2>"$pv/err")" || rc=$?
+[[ "$rc" == 4 && -z "$out" ]] || fail "service that stopped right after start must fail fast (rc=$rc)"
+pass "preview up fails fast when the service ends up stopped"
 
 pv_reset; pv_probe_rc=22
 rc=0; (main preview up --issue OPC-3 >/dev/null 2>&1) || rc=$?
-[[ "$rc" == 4 ]] || fail "unreachable public URL must exit 4 (got $rc)"
+out="$(main preview up --issue OPC-3 2>/dev/null)" && fail "unreachable URL still succeeded"
+[[ "$rc" == 4 && -z "$out" ]] || fail "unreachable public URL must exit 4 with empty stdout (got $rc)"
 unset pv_probe_rc
+pass "preview up fails when the public URL does not answer"
 
-pv_reset; touch "$pv/start"
+pv_reset; touch "$pv/start"; pv_cfg='{"workspaceRuntime":{"services":[{"name":"web","port":3000},{"name":"preview","port":21013}]}}'
 out="$(main preview down --issue OPC-3)" || fail "preview down failed"
 jq -e '.status=="stopped" and .identifier=="OPC-3"' <<<"$out" >/dev/null || fail "down output wrong: $out"
 [[ -s "$pv/stop" ]] || fail "down did not POST runtime-services/stop"
-jq -e '.config.desiredState=="stopped"' "$pv/patch" >/dev/null || fail "down did not PATCH desiredState stopped"
+jq -e '.runtimeServiceId=="rs-1"' "$pv/stop" >/dev/null || fail "stop is not scoped to the preview runtime service: $(cat "$pv/stop")"
+jq -e '.config.serviceStates=={"1":"stopped"} and (.config|has("desiredState")|not)' "$pv/patch" >/dev/null \
+    || fail "down did not scope the stopped state to the preview index: $(cat "$pv/patch")"
 pv_reset
 main preview down --issue OPC-3 >/dev/null || fail "down is not idempotent with no running service"
 pass "preview down stops the service and records desiredState"
@@ -262,6 +288,11 @@ out="$(main preview status --issue OPC-3)" || fail "preview status failed"
 jq -e 'length==1 and .[0].identifier=="OPC-3" and .[0].port==21013 and .[0].status=="running"' <<<"$out" >/dev/null \
     || fail "status output wrong: $out"
 pass "preview status lists preview services"
+
+api_request() { return 1; }
+rc=0; out="$(main preview status --issue OPC-3 2>/dev/null)" || rc=$?
+[[ "$rc" != 0 && -z "$out" ]] || fail "status swallowed a failed issue lookup (rc=$rc out=$out)"
+pass "preview status propagates a failed issue lookup"
 rm -rf "$pv"
 
 echo "opc-paperclip: ok"
