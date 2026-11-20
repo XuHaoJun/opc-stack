@@ -78,6 +78,37 @@ class PaperclipClientTest(unittest.TestCase):
         self.fake.respond_with({"runs": [{"id": "r1"}]})
         self.assertEqual(self.client.runs_for_issue("i1"), [{"id": "r1"}])
 
+    def test_execution_workspaces_paths(self):
+        self.fake.respond_with([{"id": "w1"}])
+        self.assertEqual(self.client.execution_workspaces(), [{"id": "w1"}])
+        self.assertEqual(self.fake.last_request["method"], "GET")
+        self.assertEqual(self.fake.last_request["path"], "/api/companies/c1/execution-workspaces")
+
+        self.client.execution_workspaces("i 1")
+        self.assertEqual(
+            self.fake.last_request["path"], "/api/companies/c1/execution-workspaces?issueId=i+1"
+        )
+
+    def test_stop_runtime_service_requires_a_selector_and_posts_it(self):
+        self.fake.respond_with({})
+        with self.assertRaises(ValueError):
+            self.client.stop_runtime_service("w1", {})
+        self.assertEqual(self.fake.requests, [])
+
+        self.client.stop_runtime_service("w1", {"runtimeServiceId": "s1"})
+        request = self.fake.last_request
+        self.assertEqual(request["method"], "POST")
+        self.assertEqual(request["path"], "/api/execution-workspaces/w1/runtime-services/stop")
+        self.assertEqual(json.loads(request["body"]), {"runtimeServiceId": "s1"})
+
+    def test_patch_execution_workspace_sends_json(self):
+        self.fake.respond_with({"id": "w1"})
+        self.client.patch_execution_workspace("w1", {"config": {"serviceStates": {"0": "stopped"}}})
+        request = self.fake.last_request
+        self.assertEqual(request["method"], "PATCH")
+        self.assertEqual(request["path"], "/api/execution-workspaces/w1")
+        self.assertEqual(json.loads(request["body"]), {"config": {"serviceStates": {"0": "stopped"}}})
+
     def test_company_is_resolved_once_and_cached(self):
         self.fake.respond_with([{"id": "c9"}])
         client = paperclip.Paperclip(self.fake.base_url, "k")
