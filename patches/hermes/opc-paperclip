@@ -1612,10 +1612,12 @@ EOF
     rework_agent=
     if [ "$status" = in_review ]; then
         # A preview handoff assigns the ticket to the owner's user, so the
-        # agent that delivered it is the one on the newest run (by createdAt).
+        # agent that delivered it is the one on the newest succeeded run
+        # (finishedAt, else createdAt); failed/cancelled retries never take the ticket.
         runs="$(api_request GET "/issues/$issue_id/runs")" || die "cannot read runs for $selected" 4
         rework_agent="$(printf '%s\n' "$runs" | jq -r --argjson issue "$issue" '
-            ([.[]? | select((.agentId | strings | length) > 0)] | sort_by(.createdAt) | last | .agentId)
+            ([.[]? | select(.status == "succeeded" and (.agentId | strings | length) > 0)]
+              | sort_by(.finishedAt // .createdAt) | last | .agentId)
             // $issue.assigneeAgentId // empty')" || die "cannot read runs for $selected" 4
         [ -n "$rework_agent" ] || die "no agent has worked on this issue; use the board" 3
     else

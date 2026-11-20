@@ -167,11 +167,18 @@ pass "only unaccepted done work is eligible for native resume"
 # in_review handed to the owner's user returns to the agent of the newest run
 rm -f "$scratch/write"
 issue_status=in_review issue_agent=""
-issue_runs='[{"agentId":"other","createdAt":"2026-11-19T00:00:00Z"},{"agentId":"engineer-1","createdAt":"2026-11-20T02:00:00Z"}]'
+issue_runs='[{"agentId":"other","status":"succeeded","createdAt":"2026-11-19T00:00:00Z","finishedAt":"2026-11-19T00:10:00Z"},{"agentId":"engineer-1","status":"succeeded","createdAt":"2026-11-20T01:00:00Z","finishedAt":"2026-11-20T02:00:00Z"},{"agentId":"flaky","status":"failed","createdAt":"2026-11-20T03:00:00Z","finishedAt":"2026-11-20T03:01:00Z"},{"agentId":"flaky","status":"cancelled","createdAt":"2026-11-20T04:00:00Z","finishedAt":null}]'
 main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 >/dev/null
 jq -e '.status=="todo" and .assigneeAgentId=="engineer-1" and .assigneeUserId==null' "$scratch/write" >/dev/null ||
     fail "in_review rework did not return to the newest run's agent"
-rm -f "$scratch/write"; issue_runs='[]'
+rm -f "$scratch/write"
+issue_runs='[{"agentId":"flaky","status":"failed","createdAt":"2026-11-20T03:00:00Z"}]'
+if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3); then fail "failed-only runs picked an agent"; fi
+[[ ! -e "$scratch/write" ]] || fail "failed-only rework wrote"
+issue_agent=engineer-1 issue_runs='[{"agentId":"flaky","status":"failed","createdAt":"2026-11-20T03:00:00Z"}]'
+main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 >/dev/null
+jq -e '.assigneeAgentId=="engineer-1"' "$scratch/write" >/dev/null || fail "fallback to existing assignee failed"
+rm -f "$scratch/write"; issue_agent="" issue_runs='[]'
 if (main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3); then fail "rework with no runs and no agent proceeded"; fi
 [[ ! -e "$scratch/write" ]] || fail "no-agent rework wrote"
 issue_status=todo
