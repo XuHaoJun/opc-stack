@@ -80,6 +80,7 @@ unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES \
       DEVENV_PG_PORT DEVENV_VALKEY_PORT TENCENTDB_CORE_PORT \
       TENCENTDB_PANEL_PORT TENCENTDB_KNOWLEDGE_PORT TENCENTDB_PROXY_PORT \
       DEVENV_HTTP_PORT_BASE DEVENV_HTTP_PORT_COUNT DEVENV_HTTP_PORT_RANGE_END \
+      OPC_PREVIEW_PORT_BASE OPC_PREVIEW_PORT_END \
       DEVENV_HTTP_BIND DEVENV_SECRET_SALT \
       PODENV_PORT_BASE PODENV_PORT_COUNT PODENV_PORT_RANGE_END \
       DEVENV_S3_PORT DEVENV_RABBITMQ_PORT 2>/dev/null || true
@@ -241,19 +242,26 @@ $PORT_KEYS
 EOF
 
 # The preview range is not in .env.example's active section — compose defaults
-# it (21000/16/21015). BASE and RANGE_END are two sources for one fact because
+# it (devenv pool 21000/12/21011, plus a 4-port code-ticket preview slice 21012-21015 right after it). BASE and RANGE_END are two sources for one fact because
 # compose cannot do arithmetic, so both are written explicitly and derived
 # from one expression here.
-PREVIEW_COUNT="${OPC_REHEARSAL_PREVIEW_COUNT:-16}"
+PREVIEW_COUNT="${OPC_REHEARSAL_PREVIEW_COUNT:-12}"
 PREVIEW_BASE=$(( 21000 + PORT_OFFSET ))
 PREVIEW_END=$(( PREVIEW_BASE + PREVIEW_COUNT - 1 ))
 LIVE_PREVIEW_BASE="$(env_value "$REPO_ROOT/.env" DEVENV_HTTP_PORT_BASE)"; [ -n "$LIVE_PREVIEW_BASE" ] || LIVE_PREVIEW_BASE=21000
-LIVE_PREVIEW_END="$(env_value "$REPO_ROOT/.env" DEVENV_HTTP_PORT_RANGE_END)"; [ -n "$LIVE_PREVIEW_END" ] || LIVE_PREVIEW_END=21015
+LIVE_PREVIEW_END="$(env_value "$REPO_ROOT/.env" DEVENV_HTTP_PORT_RANGE_END)"; [ -n "$LIVE_PREVIEW_END" ] || LIVE_PREVIEW_END=21011
+# Dedicated code-ticket preview slice (OPC_PREVIEW_PORT_*): contiguous with the
+# devenv pool, derived from it so the two slices stay disjoint when shifted.
+SLICE_COUNT="${OPC_REHEARSAL_SLICE_COUNT:-4}"
+SLICE_BASE=$(( PREVIEW_END + 1 ))
+SLICE_END=$(( SLICE_BASE + SLICE_COUNT - 1 ))
+LIVE_SLICE_BASE="$(env_value "$REPO_ROOT/.env" OPC_PREVIEW_PORT_BASE)"; [ -n "$LIVE_SLICE_BASE" ] || LIVE_SLICE_BASE=$(( LIVE_PREVIEW_END + 1 ))
+LIVE_SLICE_END="$(env_value "$REPO_ROOT/.env" OPC_PREVIEW_PORT_END)"; [ -n "$LIVE_SLICE_END" ] || LIVE_SLICE_END=$(( LIVE_SLICE_BASE + SLICE_COUNT - 1 ))
 
 step "preflight: port allocation (offset +$PORT_OFFSET)"
 # Above 32768 a leased-but-not-listening preview port can be stolen by any
 # process's bind(0) (AGENTS.md, prototype/preview pitfall 3).
-[ "$PREVIEW_END" -lt 32768 ] || die "preview range $PREVIEW_BASE-$PREVIEW_END reaches into the kernel ephemeral range (>=32768)"
+[ "$SLICE_END" -lt 32768 ] || die "preview range $PREVIEW_BASE-$SLICE_END reaches into the kernel ephemeral range (>=32768)"
 
 # Uniqueness within the new set, and against everything the live stack owns.
 seen=""
@@ -263,15 +271,15 @@ for p in $TEST_PORTS; do
     for lp in $LIVE_PORTS; do
         [ "$p" != "$lp" ] || die "rehearsal port $p is already a LIVE stack port — pick another --offset"
     done
-    if [ "$p" -ge "$LIVE_PREVIEW_BASE" ] && [ "$p" -le "$LIVE_PREVIEW_END" ]; then
-        die "rehearsal port $p falls inside the live preview range $LIVE_PREVIEW_BASE-$LIVE_PREVIEW_END"
+    if [ "$p" -ge "$LIVE_PREVIEW_BASE" ] && [ "$p" -le "$LIVE_SLICE_END" ]; then
+        die "rehearsal port $p falls inside the live preview range $LIVE_PREVIEW_BASE-$LIVE_SLICE_END"
     fi
-    if [ "$p" -ge "$PREVIEW_BASE" ] && [ "$p" -le "$PREVIEW_END" ]; then
-        die "rehearsal port $p falls inside the rehearsal preview range $PREVIEW_BASE-$PREVIEW_END"
+    if [ "$p" -ge "$PREVIEW_BASE" ] && [ "$p" -le "$SLICE_END" ]; then
+        die "rehearsal port $p falls inside the rehearsal preview range $PREVIEW_BASE-$SLICE_END"
     fi
 done
-if [ "$PREVIEW_BASE" -le "$LIVE_PREVIEW_END" ] && [ "$PREVIEW_END" -ge "$LIVE_PREVIEW_BASE" ]; then
-    die "rehearsal preview range $PREVIEW_BASE-$PREVIEW_END overlaps the live one $LIVE_PREVIEW_BASE-$LIVE_PREVIEW_END"
+if [ "$PREVIEW_BASE" -le "$LIVE_SLICE_END" ] && [ "$SLICE_END" -ge "$LIVE_PREVIEW_BASE" ]; then
+    die "rehearsal preview range $PREVIEW_BASE-$SLICE_END overlaps the live one $LIVE_PREVIEW_BASE-$LIVE_SLICE_END"
 fi
 
 # podenv (Task 7): a second, independent port pool for the nested-container
@@ -302,11 +310,11 @@ done
 if [ "$PODENV_BASE" -le "$LIVE_PODENV_END" ] && [ "$PODENV_END" -ge "$LIVE_PODENV_BASE" ]; then
     die "rehearsal podenv range $PODENV_BASE-$PODENV_END overlaps the live one $LIVE_PODENV_BASE-$LIVE_PODENV_END"
 fi
-if [ "$PODENV_BASE" -le "$PREVIEW_END" ] && [ "$PODENV_END" -ge "$PREVIEW_BASE" ]; then
-    die "rehearsal podenv range $PODENV_BASE-$PODENV_END overlaps the rehearsal preview range $PREVIEW_BASE-$PREVIEW_END"
+if [ "$PODENV_BASE" -le "$SLICE_END" ] && [ "$PODENV_END" -ge "$PREVIEW_BASE" ]; then
+    die "rehearsal podenv range $PODENV_BASE-$PODENV_END overlaps the rehearsal preview range $PREVIEW_BASE-$SLICE_END"
 fi
-if [ "$PODENV_BASE" -le "$LIVE_PREVIEW_END" ] && [ "$PODENV_END" -ge "$LIVE_PREVIEW_BASE" ]; then
-    die "rehearsal podenv range $PODENV_BASE-$PODENV_END overlaps the live preview range $LIVE_PREVIEW_BASE-$LIVE_PREVIEW_END"
+if [ "$PODENV_BASE" -le "$LIVE_SLICE_END" ] && [ "$PODENV_END" -ge "$LIVE_PREVIEW_BASE" ]; then
+    die "rehearsal podenv range $PODENV_BASE-$PODENV_END overlaps the live preview range $LIVE_PREVIEW_BASE-$LIVE_SLICE_END"
 fi
 
 # Anything else on the host counts too — the collision that matters is with
@@ -316,13 +324,13 @@ check_free_ports() {
     command -v ss >/dev/null 2>&1 || { echo "note: ss(8) not found — skipping the live-socket collision check"; return 0; }
     local listening; listening=" $(ss -ltnH 2>/dev/null | awk '{n=split($4,a,":"); print a[n]}' | sort -nu | tr '\n' ' ')"
     local p
-    for p in $TEST_PORTS $(seq "$PREVIEW_BASE" "$PREVIEW_END") $(seq "$PODENV_BASE" "$PODENV_END"); do
+    for p in $TEST_PORTS $(seq "$PREVIEW_BASE" "$SLICE_END") $(seq "$PODENV_BASE" "$PODENV_END"); do
         case "$listening" in *" $p "*) die "port $p is already bound on this host" ;; esac
     done
 }
 
 echo "rehearsal project : $TEST_PROJECT   (live: $LIVE_PROJECT)"
-echo "rehearsal ports   :$TEST_PORTS  preview $PREVIEW_BASE-$PREVIEW_END  podenv $PODENV_BASE-$PODENV_END"
+echo "rehearsal ports   :$TEST_PORTS  preview $PREVIEW_BASE-$SLICE_END  podenv $PODENV_BASE-$PODENV_END"
 echo "scratch clone     : $CLONE"
 
 # ── previous rehearsal first, so a re-run is a clean run ─────────────────
@@ -422,6 +430,8 @@ done
 set_env DEVENV_HTTP_PORT_BASE "$PREVIEW_BASE"
 set_env DEVENV_HTTP_PORT_COUNT "$PREVIEW_COUNT"
 set_env DEVENV_HTTP_PORT_RANGE_END "$PREVIEW_END"
+set_env OPC_PREVIEW_PORT_BASE "$SLICE_BASE"
+set_env OPC_PREVIEW_PORT_END "$SLICE_END"
 set_env DEVENV_HTTP_BIND "$HOST"
 set_env PODENV_PORT_BASE "$PODENV_BASE"
 set_env PODENV_PORT_COUNT "$PODENV_COUNT"

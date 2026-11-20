@@ -11,9 +11,12 @@ run() { # run <dir-script> [PORT]
   docker run --rm --network none --entrypoint sh "${@:2}" "$IMG" -c "$1"
 }
 
-err=$(run 'd=$(mktemp -d); cd "$d"; opc-preview-run' 2>&1 >/dev/null); rc=$?
+err=$(run 'd=$(mktemp -d); cd "$d"; opc-preview-run' -e PORT=21012 2>&1 >/dev/null); rc=$?
 [ "$rc" = 64 ] && ok "missing entrypoint exits 64" || bad "missing entrypoint exit ${rc} (want 64)"
 case "$err" in *.paperclip/preview*) ok "stderr names .paperclip/preview";; *) bad "stderr: ${err}";; esac
+
+err=$(run 'd=$(mktemp -d); cd "$d"; env -u PORT opc-preview-run' 2>&1 >/dev/null); rc=$?
+{ [ "$rc" != 0 ] && case "$err" in *PORT*) true;; *) false;; esac; } && ok "unset PORT fails naming PORT" || bad "unset PORT: rc=${rc} err=${err}"
 
 out=$(run 'd=$(mktemp -d); cd "$d"; mkdir .paperclip
 printf "#!/bin/sh\necho \"\$HOST:\$PORT\"\n" > .paperclip/preview; chmod +x .paperclip/preview
