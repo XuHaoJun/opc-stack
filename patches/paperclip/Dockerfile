@@ -293,6 +293,7 @@ COPY opc/opc-gh-seed.sh /usr/local/bin/opc-gh-seed.sh
 COPY opc/opc-claude-seed.sh /usr/local/bin/opc-claude-seed.sh
 COPY opc/opc-devenv-seed.sh /usr/local/bin/opc-devenv-seed.sh
 COPY opc/opc-prototype-restore.sh /usr/local/bin/opc-prototype-restore.sh
+COPY opc/opc-preview-run /usr/local/bin/opc-preview-run
 # devenv CLI + providers + control schema (see the devenv spec).
 COPY opc/devenv/ /usr/local/lib/devenv/
 # podenv CLI + its control schema (the nested container lease lane).
@@ -344,7 +345,7 @@ RUN chmod +x /usr/local/bin/opc-nix-seed.sh /usr/local/bin/opc-model-seed.sh \
              /usr/local/bin/opc-mise-seed.sh \
              /usr/local/bin/opc-gh-seed.sh /usr/local/bin/opc-claude-seed.sh \
              /usr/local/bin/opc-devenv-seed.sh /usr/local/bin/opc-podenv-seed.sh \
-             /usr/local/bin/opc-prototype-restore.sh \
+             /usr/local/bin/opc-prototype-restore.sh /usr/local/bin/opc-preview-run \
              /usr/local/bin/opc-paperclip-bootstrap.sh /usr/local/bin/nix-entrypoint.sh \
     && chmod +x /usr/local/lib/devenv/devenv /usr/local/lib/devenv/providers/*.sh \
     && chmod +x /usr/local/lib/podenv/podenv \

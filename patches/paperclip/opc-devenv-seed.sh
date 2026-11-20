@@ -101,7 +101,7 @@ opc_devenv_seed_schema() {
 # appears until someone actually leases a port.
 opc_devenv_check_port_pool() {
     _dv_base="${DEVENV_HTTP_PORT_BASE:-21000}"
-    _dv_count="${DEVENV_HTTP_PORT_COUNT:-16}"
+    _dv_count="${DEVENV_HTTP_PORT_COUNT:-12}"
     _dv_end="${DEVENV_HTTP_PORT_RANGE_END:-}"
 
     # Validate BEFORE the arithmetic, not after: `$((...))` on a non-numeric

@@ -448,6 +448,9 @@ services:
       # Public board address, for building clickable ticket links in chat.
       # PAPERCLIP_API_URL is the internal name and is useless to a browser.
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
+      OPC_PREVIEW_PORT_BASE: ${OPC_PREVIEW_PORT_BASE:-21012}
+      OPC_PREVIEW_PORT_END: ${OPC_PREVIEW_PORT_END:-21015}
+      DEVENV_HTTP_PUBLIC_HOST: ${DEVENV_HTTP_PUBLIC_HOST:-}
     volumes:
       - frontdoor-hermes:/opt/data
       - opc-nix:/nix
@@ -572,6 +575,9 @@ services:
       # Public board address, for building clickable ticket links in chat.
       # PAPERCLIP_API_URL is the internal name and is useless to a browser.
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}
+      OPC_PREVIEW_PORT_BASE: ${OPC_PREVIEW_PORT_BASE:-21012}
+      OPC_PREVIEW_PORT_END: ${OPC_PREVIEW_PORT_END:-21015}
+      DEVENV_HTTP_PUBLIC_HOST: ${DEVENV_HTTP_PUBLIC_HOST:-}
       # Expert agents post their findings to Buzz with the CLI.
       #
       # Same default as buzz / buzz-bootstrap / frontdoor on purpose: one
@@ -791,8 +797,8 @@ services:
       # allocatePort()) can be handed a leased port while its server is down.
       # opc-devenv-seed.sh re-checks this against the CONTAINER's actual range.
       DEVENV_HTTP_PORT_BASE: ${DEVENV_HTTP_PORT_BASE:-21000}
-      DEVENV_HTTP_PORT_COUNT: ${DEVENV_HTTP_PORT_COUNT:-16}
-      DEVENV_HTTP_PORT_RANGE_END: ${DEVENV_HTTP_PORT_RANGE_END:-21015}
+      DEVENV_HTTP_PORT_COUNT: ${DEVENV_HTTP_PORT_COUNT:-12}
+      DEVENV_HTTP_PORT_RANGE_END: ${DEVENV_HTTP_PORT_RANGE_END:-21011}
       # Empty = derive from PAPERCLIP_PUBLIC_URL's host (see providers/http.sh),
       # so one setting governs both the board's address and the preview links
       # instead of the same hostname being written in two places that can
@@ -849,7 +855,9 @@ services:
       # `-i tailscale0` — a rule by interface name exists whether or not the
       # interface is up yet), which also covers 3100/3000/8642 rather than
       # only the preview range.
-      - "${DEVENV_HTTP_BIND:-0.0.0.0}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21015}"
+      - "${DEVENV_HTTP_BIND:-0.0.0.0}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21011}:${DEVENV_HTTP_PORT_BASE:-21000}-${DEVENV_HTTP_PORT_RANGE_END:-21011}"
+      # Dedicated slice for code-ticket previews (Paperclip runtime services).
+      - "${DEVENV_HTTP_BIND:-0.0.0.0}:${OPC_PREVIEW_PORT_BASE:-21012}-${OPC_PREVIEW_PORT_END:-21015}:${OPC_PREVIEW_PORT_BASE:-21012}-${OPC_PREVIEW_PORT_END:-21015}"
     volumes:
       - paperclip-data:/paperclip
       - opc-assets:/opt/opc-assets:ro

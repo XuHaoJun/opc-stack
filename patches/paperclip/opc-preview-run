@@ -1,0 +1,13 @@
+#!/bin/sh
+# Fixed preview command Paperclip runs inside a ticket's worktree.
+# The repo owns how it is served: .paperclip/preview. This only supplies the
+# contract (PORT from Paperclip, HOST bound to all interfaces) and fails loudly
+# when the repo has not defined a preview.
+set -eu
+: "${PORT:?opc-preview-run: PORT is required}"
+export HOST="${HOST:-0.0.0.0}"
+if [ ! -f ./.paperclip/preview ] || [ ! -x ./.paperclip/preview ]; then
+    echo "opc-preview-run: no executable .paperclip/preview in $(pwd) — this repo has not defined how to serve a preview" >&2
+    exit 64
+fi
+exec ./.paperclip/preview

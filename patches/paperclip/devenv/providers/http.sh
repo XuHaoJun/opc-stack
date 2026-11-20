@@ -23,7 +23,7 @@
 # conflict is in the future. Below 32768 the kernel never assigns on its own.
 
 DEVENV_HTTP_PORT_BASE="${DEVENV_HTTP_PORT_BASE:-21000}"
-DEVENV_HTTP_PORT_COUNT="${DEVENV_HTTP_PORT_COUNT:-16}"
+DEVENV_HTTP_PORT_COUNT="${DEVENV_HTTP_PORT_COUNT:-12}"
 # Host part of DEV_URL — the address a BROWSER will use, which is not
 # necessarily how the container sees itself.
 #
