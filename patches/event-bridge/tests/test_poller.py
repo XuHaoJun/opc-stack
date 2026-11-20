@@ -23,6 +23,9 @@ class StubPaperclip:
         self.comment_calls: list[str] = []
         self.label_rows: list[dict] = []
         self.agent_rows: list[dict] = []
+        self.workspaces: list[dict] = []
+        self.stops: list[tuple] = []
+        self.ws_patches: list[tuple] = []
         self.patched_issues: list[tuple] = []
 
     def issues_updated_since(self, iso, limit=100, offset=0):
@@ -69,6 +72,17 @@ class StubPaperclip:
 
     def agents(self):
         return self.agent_rows
+
+    def execution_workspaces(self, issue_id=None):
+        return [w for w in self.workspaces if issue_id in (None, w["sourceIssueId"])]
+
+    def stop_runtime_service(self, workspace_id, selector):
+        self.stops.append((workspace_id, dict(selector)))
+        return {}
+
+    def patch_execution_workspace(self, workspace_id, body):
+        self.ws_patches.append((workspace_id, body))
+        return {}
 
 
 def _issue(issue_id="i1", identifier="OPC-1", status="todo", updated="2026-11-04T00:00:00Z", **extra):
@@ -117,6 +131,78 @@ class PollerTest(unittest.TestCase):
         self.assertEqual(self.p.tick(), 0)
 
     # ── transitions ──────────────────────────────────────────────────────
+    def _preview_ws(self):
+        return {"id": "w1", "sourceIssueId": "i1",
+                "runtimeServices": [{"id": "s1", "serviceName": "preview", "status": "running"}],
+                "config": {"workspaceRuntime": {"services": [{"name": "preview"}]}, "serviceStates": {}}}
+
+    def test_in_review_emits_once_and_does_not_stop_the_preview(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z"))
+        self.store.set_cursor("2026-11-04T00:00:00Z")
+        self.pc.issues = [_issue("i1", status="in_review", updated="2026-11-04T01:00:00Z")]
+        self.pc.workspaces = [self._preview_ws()]
+
+        self.assertEqual(self.p.tick(), 1)
+        self.assertEqual(self.p.tick(), 0)
+        self.assertEqual(self.pc.stops, [])
+
+    def test_rework_transition_stops_the_preview_once(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_review", updated="2026-11-04T00:00:00Z"))
+        self.store.set_cursor("2026-11-04T00:00:00Z")
+        self.pc.issues = [_issue("i1", status="in_progress", updated="2026-11-04T01:00:00Z")]
+        self.pc.workspaces = [self._preview_ws()]
+
+        self.p.tick()
+
+        self.assertEqual(self.pc.stops, [("w1", {"runtimeServiceId": "s1"})])
+        self.assertEqual(self.store.count_deliveries(), 0)
+
+    def test_rework_stop_failure_never_blocks_the_transition(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_review", updated="2026-11-04T00:00:00Z"))
+        self.store.set_cursor("2026-11-04T00:00:00Z")
+        self.pc.issues = [_issue("i1", status="todo", updated="2026-11-04T01:00:00Z")]
+
+        def boom(*_a, **_k):
+            raise RuntimeError("down")
+
+        self.pc.execution_workspaces = boom
+        self.p.tick()
+        self.assertEqual(self.store.get_issue_state("i1")["status"], "todo")
+
+    def test_recover_routes_in_review_through_the_transition_path(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z"))
+        rows = [_issue("i1", status="in_review", updated="2026-11-04T01:00:00Z")]
+        self.pc.issues = rows
+        self.assertEqual(self.p._recover("2026-11-03T00:00:00Z", self.now), 1)
+        self.assertEqual(self.p._recover("2026-11-03T00:00:00Z", self.now), 0)
+        self.assertEqual(self.p.tick(), 0)
+        self.assertEqual(self.store.count_deliveries(), 1)
+
+    def test_recover_sees_rework_and_stops_the_preview(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_review", updated="2026-11-04T00:00:00Z"))
+        self.pc.issues = [_issue("i1", status="todo", updated="2026-11-04T01:00:00Z")]
+        self.pc.workspaces = [self._preview_ws()]
+        self.p._recover("2026-11-03T00:00:00Z", self.now)
+        self.assertEqual(self.pc.stops, [("w1", {"runtimeServiceId": "s1"})])
+
+    def test_review_rework_review_gives_two_events_and_one_stop(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z"))
+        self.store.set_cursor("2026-11-04T00:00:00Z")
+        self.pc.workspaces = [self._preview_ws()]
+        total = 0
+        for status, ts in (("in_review", "01"), ("in_progress", "02"), ("in_review", "03")):
+            self.pc.issues = [_issue("i1", status=status, updated=f"2026-11-04T{ts}:00:00Z")]
+            total += self.p.tick()
+        self.assertEqual(total, 2)
+        self.assertEqual(self.store.count_deliveries(), 2)
+        self.assertEqual(len(self.pc.stops), 1)
+
     def test_terminal_transition_enqueues_exactly_one_event(self):
         self.p.bootstrap()
         self.store.upsert_issue_state(_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z"))

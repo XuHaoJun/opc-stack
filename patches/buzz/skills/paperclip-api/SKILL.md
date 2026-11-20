@@ -328,29 +328,59 @@ List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 Route to `engineering`, not `prototype`, even if the request says “prototype
 this PR.” Leave named, retained prototypes on `prototype expose`.
 
-This section replaces the older preview flow — a `devenv provision --with http`
-lease in a scratch directory, a detached server, the issue closed in the same
-run, then separate tickets to stop the server and delete the directory. Briefs
-and skills that describe that flow, including past preview tickets that
-worked, are not templates; do not copy them.
+A code ticket owns its preview: a Paperclip runtime service named `preview` on
+the ticket's own execution workspace. This replaces the older flow — a
+dedicated HTTP devenv lease in a scratch directory, a detached server, the
+issue closed in the same run, then separate tickets to stop the server and
+delete the directory. Briefs and past preview tickets that describe that flow
+are not templates; do not copy them. Never ask an agent to lease ports, run
+`nohup`/`setsid`, or make a scratch checkout for a preview.
 
-For an engineering preview, put these steps in the dispatch brief:
+Phrase → command (you run these, not the engineer):
 
-1. **Build the requested commit.** Verify the exact SHA in the assigned
-   Paperclip-managed execution worktree and run the project's normal build.
-2. **Use Paperclip's native runtime service.** Start the operator-configured
-   service with `lifecycle: shared` and `reuseScope: execution_workspace`.
-   Verify the permitted private QA URL serves the build and required assets.
-   If the workspace cannot be prepared at that SHA or the service,
-   authorization, or private access is missing, report the blocker and ask the
-   operator to configure it. Do not ask the agent to register executable service
-   commands with its run key, create a scratch checkout, detach a server
-   (`nohup`/`setsid`), or publish a raw port as a fallback.
-3. **Hand off to QA.** Post the URL, served SHA, and verification evidence.
-   Leave the QA issue `in_review`; HTTP success is not human acceptance.
-   When QA finishes, stop the service through Paperclip, have the operator
-   release any dedicated HTTP lease, then close the issue. Paperclip owns
-   worktree cleanup; do not dispatch a separate scratch-directory cleanup.
+- 開環境 / 重開環境 → `opc-paperclip preview up --issue OPC-N`. Prints JSON
+  with `url`, `port`, `status`. Exit 3: the ticket has no usable execution
+  workspace. For a `done` ticket or a closed workspace, follow step 4. A
+  `cancelled` ticket is not reopened for a preview: tell the owner, and offer a
+  new ticket if they still want one. Exit 4: the
+  preview failed to start or its URL did not answer; report the error text to
+  the owner and do not retry blindly — except when it says the record is stuck
+  in `starting`: then run `preview down --issue OPC-N` and `preview up` once
+  more. Exit 5: all preview ports are in use; tell the owner and ask which
+  preview to close.
+- 關掉環境 → `opc-paperclip preview down --issue OPC-N`. Stops only that
+  service; the ticket status is unchanged.
+- Check state → `opc-paperclip preview status [--issue OPC-N]`.
+- Owner wants a preview from the start → create the ticket with
+  `opc-paperclip engineering-ticket create … --preview`. The engineer then
+  commits a `.paperclip/preview` script with the change and hands off in
+  `in_review`.
+
+Flow:
+
+1. When the ticket reaches `in_review`, event-bridge posts
+   `paperclip.issue.in_review` (待驗收) into the ticket's original Buzz thread.
+   For a ticket labelled `preview`, run `preview up`, then post the URL, the
+   port, and the result of your own `curl` against the URL.
+2. Owner says testing passed → `PATCH` the issue `status:"done"`. Event-bridge
+   stops the preview when the issue becomes `done` or `cancelled`, or returns
+   from `in_review` to `todo`/`in_progress`; do not stop it yourself.
+   `done` means accepted, not merged — merging is a separate owner request.
+3. Owner reports problems → `opc-paperclip buzz-feedback continue …`. It
+   returns the ticket to the agent that delivered the newest succeeded run.
+4. Owner wants a preview of a `done` ticket (or `preview up` exits 3) →
+   reopen it with `opc-paperclip buzz-feedback continue --channel … --event …
+   --issue OPC-N --preview` on the owner's message. `--preview` adds the
+   `preview` label in the same write (asking for a preview later still puts
+   the ticket under the hand-off rule; without the label the engineer would
+   finish as `done` again). That wakes the engineer once: its run restores the
+   ticket's branch from the remote and hands off as `in_review`, and the
+   `in_review` event brings you back to step 1. Do not reopen it by PATCHing it yourself: once
+   Paperclip has archived the worktree, its local branch may be gone and a
+   rebuild without the engineer would serve the base branch, not the change.
+   If `continue` refuses because the work is already accepted or merged, the
+   change is in main: tell the owner so, and that previewing main is a new
+   ticket, not a reopen. Do not retry.
 
 ### Continue or create after Buzz feedback
 

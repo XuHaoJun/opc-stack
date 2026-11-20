@@ -165,3 +165,22 @@ class Paperclip:
         return self._request(
             "POST", f"/api/companies/{self.company()}/labels", {"name": name, "color": color}
         )
+
+    # ── execution workspaces / runtime services ──────────────────────────
+    def execution_workspaces(self, issue_id: str | None = None) -> list[dict]:
+        path = f"/api/companies/{self.company()}/execution-workspaces"
+        if issue_id:
+            path += "?" + urllib.parse.urlencode({"issueId": issue_id})
+        return _as_list(self._request("GET", path), "executionWorkspaces", "workspaces")
+
+    def stop_runtime_service(self, workspace_id: str, selector: Mapping[str, Any]) -> dict:
+        """Stop ONE runtime service. An empty body means "all services" upstream,
+        so an empty selector is refused here rather than trusted to callers."""
+        if not selector:
+            raise ValueError("stop_runtime_service needs a runtimeServiceId or serviceIndex")
+        return self._request(
+            "POST", f"/api/execution-workspaces/{workspace_id}/runtime-services/stop", dict(selector)
+        )
+
+    def patch_execution_workspace(self, workspace_id: str, body: Mapping[str, Any]) -> dict:
+        return self._request("PATCH", f"/api/execution-workspaces/{workspace_id}", dict(body))

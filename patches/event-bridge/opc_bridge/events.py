@@ -24,6 +24,7 @@ ISSUE_COMPLETED = "paperclip.issue.completed"
 ISSUE_BLOCKED = "paperclip.issue.blocked"
 ISSUE_CANCELLED = "paperclip.issue.cancelled"
 ISSUE_FAILED = "paperclip.issue.failed"
+ISSUE_IN_REVIEW = "paperclip.issue.in_review"
 
 HEALTH_SLOW = "opc.run.slow"
 HEALTH_STALLED = "opc.run.stalled"
@@ -43,6 +44,7 @@ _LABEL = {
     ISSUE_BLOCKED: "阻塞",
     ISSUE_CANCELLED: "已取消",
     ISSUE_FAILED: "執行失敗",
+    ISSUE_IN_REVIEW: "待驗收",
     HEALTH_SLOW: "進展緩慢",
     HEALTH_STALLED: "疑似停滯",
     HEALTH_LOST: "狀態不一致",
@@ -112,6 +114,11 @@ def terminal_ts(issue: Mapping[str, Any]) -> str | None:
         return issue.get("cancelledAt")
     if status == "blocked":
         return issue.get("blockedTransitionAt") or issue.get("updatedAt")
+    if status == "in_review":
+        # No dedicated column. updatedAt at the moment of the transition makes
+        # a re-entry (rework, then hand-off again) a new id; a replay of the
+        # same observation keeps it.
+        return issue.get("updatedAt")
     return None
 
 
@@ -137,6 +144,8 @@ def classify_issue(
             return ISSUE_BLOCKED
         return None
 
+    if status == "in_review":
+        return ISSUE_IN_REVIEW
     return _TERMINAL.get(str(status))
 
 

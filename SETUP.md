@@ -680,6 +680,59 @@ multiple matches. An unverified sender cannot dispatch rework. If a formal
 review is pending, use the board's review workflow rather than opening a
 duplicate.
 
+### Ticket previews: test a code ticket in the browser
+
+A code ticket can carry a preview, like a review app: a Paperclip runtime
+service on the ticket's own git worktree, served at
+`http://<PAPERCLIP_PUBLIC_URL host>:21012`–`21015`. No extra ticket is needed
+to open, rebuild or close it, and opening/closing costs no agent run.
+
+In the ticket's Buzz thread:
+
+| You say | What happens |
+|---|---|
+| “做完順便開環境讓我測” when asking for the work | The ticket gets the `preview` label. The engineer commits an executable `.paperclip/preview` (builds the commit, serves in the foreground on `$HOST:$PORT`) and hands off as `in_review` assigned to you. The front door then opens the preview and posts the URL with its own check. |
+| 開環境 / 重開環境 | Opens, or rebuilds and restarts, the preview of that ticket. While the ticket is still in progress, it serves work in progress. |
+| 關掉環境 | Stops the preview; the ticket status is unchanged. |
+| 測試通過 | The ticket becomes `done` (accepted, not merged); event-bridge stops the preview within a few seconds. |
+| A problem report | The ticket goes back to the engineer that delivered it; event-bridge stops the preview until the next hand-off. |
+| 開環境 on a `done` ticket | The ticket gets the `preview` label (asking later counts the same as asking up front), and the front door reopens it through the engineer (`buzz-feedback continue --preview`, one run): the engineer restores the ticket's branch from the remote and hands off as `in_review` instead of finishing as `done`, then the preview opens. Reopening without that run could serve the base branch instead of the change. Work already accepted or merged is not reopened: previewing main is a new ticket. |
+
+Four previews can run at once. When all four are taken, the front door names
+the tickets that hold them and asks which to close; it never evicts one.
+Operator view and manual stop:
+
+```bash
+docker compose exec -T -u 10000 frontdoor opc-paperclip preview status
+docker compose exec -T -u 10000 frontdoor opc-paperclip preview down --issue OPC-N
+tests/engineering-preview.sh   # live end-to-end gate; needs no LLM
+```
+
+**Existing machines, once.** The preview port slice (devenv's HTTP pool shrinks
+to 21000-21011, previews take 21012-21015) is fixed when the paperclip container
+is created, and the helper, bridge and skills live in the images. First check
+that no devenv HTTP lease already sits on a port the slice takes over:
+
+```bash
+docker compose exec paperclip devenv list   # any http lease on 21012-21015?
+```
+
+If one does, move it before redeploying, or that lease and a ticket preview
+will both claim the same port. devenv has no move: `docker compose exec paperclip
+devenv release <key>` drops the **whole** lease — its database, valkey and S3
+data included, not only the port — so dump anything worth keeping first, then
+provision it again after the redeploy (it gets a port from the smaller
+21000-21011 pool, so whatever used the old port must pick up the new `.env`).
+Then:
+
+```bash
+scripts/prepare.sh
+docker compose build paperclip frontdoor hermes event-bridge
+docker compose up -d paperclip frontdoor hermes hermes-dashboard event-bridge
+```
+
+Do not add `--no-deps buzz` here; buzz and frontdoor share a network namespace.
+
 ### Paperclip workspace and concurrency operator commands
 
 The `opc-paperclip` helper is installed in Buzz and Hermes. Run these
@@ -1072,6 +1125,8 @@ Search: `nix search nixpkgs <name>`. Wipe a store: `docker volume rm opc_hermes-
 | 8096 | TencentDB proxy |
 | 8642 | Hermes API server |
 | 9119 | Hermes dashboard |
+| 21000-21011 | Prototype / devenv HTTP previews (`DEVENV_HTTP_BIND`) |
+| 21012-21015 | Ticket previews (`OPC_PREVIEW_PORT_BASE`/`_END`, same bind) |
 | 23000-23015 | podenv leases (127.0.0.1 only — operator/client access; see below) |
 
 ## Useful commands

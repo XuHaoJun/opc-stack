@@ -183,8 +183,14 @@ reconcile_agent_instructions() { # agent-id source-file
         fi
     fi
 
-    if jq -n --arg p AGENTS.md --rawfile c "$_rai_source" \
-         '{path:$p, content:$c, clearLegacyPromptTemplate:true}' \
+    # v2026.1106.0 versions the entry file: a write without a base revision is
+    # 422 INSTRUCTION_BASE_REQUIRED (and `|| true` above would hide it), so the
+    # engineer kept its old instructions while this loop printed a warning.
+    # baseHash is the hash we just read; null only when the entry does not exist.
+    _rai_base="$(printf '%s' "$_rai_live_json" | jq -c '.contentHash // null' 2>/dev/null)"
+    [ -n "$_rai_base" ] || _rai_base=null
+    if jq -n --arg p AGENTS.md --rawfile c "$_rai_source" --argjson base "$_rai_base" \
+         '{path:$p, content:$c, baseHash:$base, clearLegacyPromptTemplate:true}' \
          | api_put_raw "/agents/$_rai_id/instructions-bundle/file" \
          | jq -e '.path == "AGENTS.md"' >/dev/null 2>&1; then
         echo "[pc-bootstrap] agent instructions reconciled: $_rai_id"

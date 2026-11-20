@@ -46,7 +46,7 @@ DEVENV_SECRET_SALT="${DEVENV_SECRET_SALT:-}"
 # the allocation inside it is dynamic. See providers/http.sh for why the base
 # must stay below the kernel's ephemeral range.
 DEVENV_HTTP_PORT_BASE="${DEVENV_HTTP_PORT_BASE:-21000}"
-DEVENV_HTTP_PORT_COUNT="${DEVENV_HTTP_PORT_COUNT:-16}"
+DEVENV_HTTP_PORT_COUNT="${DEVENV_HTTP_PORT_COUNT:-12}"
 
 die()   { echo "devenv: $1" >&2; exit "${2:-1}"; }
 note()  { echo "$1" >&2; }

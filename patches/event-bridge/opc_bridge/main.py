@@ -18,7 +18,7 @@ import time
 import traceback
 import urllib.request
 
-from . import adaptive, api, buzz, config, control, deliver, health, paperclip, poller, routes, store
+from . import adaptive, api, buzz, config, control, deliver, health, paperclip, poller, preview, routes, store
 
 
 def _log(message: str) -> None:
@@ -42,6 +42,10 @@ def _poller_loop(stop: threading.Event, cfg: config.Config, p: poller.Poller) ->
             p.tick()
         except Exception:
             _log("poller tick failed:\n" + traceback.format_exc())
+        try:
+            preview.sweep_issues(p.pc, log=_log)
+        except Exception:
+            _log("preview sweep failed:\n" + traceback.format_exc())
         if time.time() >= next_reconcile:
             try:
                 p.reconcile()

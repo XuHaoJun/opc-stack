@@ -93,7 +93,24 @@ class ClassifyTest(unittest.TestCase):
             events.classify_issue({"status": "todo"}, {"status": "cancelled", "cancelledAt": "T"}),
             "paperclip.issue.cancelled",
         )
-        self.assertIsNone(events.classify_issue({"status": "todo"}, {"status": "in_review"}))
+        self.assertIsNone(events.classify_issue({"status": "todo"}, {"status": "in_progress"}))
+
+    def test_in_review_hand_off_is_an_event_and_reentry_gets_a_new_id(self):
+        self.assertEqual(
+            events.classify_issue({"status": "in_progress"}, {"status": "in_review", "updatedAt": "T1"}),
+            events.ISSUE_IN_REVIEW,
+        )
+        self.assertEqual(events.ISSUE_IN_REVIEW, "paperclip.issue.in_review")
+        self.assertIsNone(
+            events.classify_issue({"status": "in_review"}, {"status": "in_review", "updatedAt": "T2"})
+        )
+        self.assertEqual(events.terminal_ts({"status": "in_review", "updatedAt": "T1"}), "T1")
+        first = events.issue_event_id("i1", "in_review", "T1")
+        self.assertEqual(first, events.issue_event_id("i1", "in_review", "T1"))
+        self.assertNotEqual(first, events.issue_event_id("i1", "in_review", "T3"))
+        self.assertIn("待驗收", events.render_message(
+            _event(event_type=events.ISSUE_IN_REVIEW, status="in_review"),
+            {"title": "t", "identifier": "OPC-7"}, ""))
 
     def test_terminal_ts_prefers_the_status_specific_column(self):
         issue = {

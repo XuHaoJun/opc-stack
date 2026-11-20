@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Mapping
 
-from . import config, events, labels
+from . import config, events, labels, preview
 from .config import iso, parse_iso  # re-exported: tests and callers use poller.iso
 
 POLL_OVERLAP_SECONDS = 10.0
@@ -256,6 +256,18 @@ class Poller:
         if event_type is not None:
             emitted += int(self.store.enqueue_event(self._issue_event(issue, event_type, now), now))
 
+        if (
+            previous is not None
+            and previous.get("status") == "in_review"
+            and issue.get("status") in ("todo", "in_progress")
+        ):
+            # Rework: the reviewed build is stale. Best effort — the level
+            # sweep never covers this edge (the ticket is still open).
+            try:
+                preview.stop_for_rework(self.pc, issue_id, log=self.log)
+            except Exception as exc:
+                self.log(f"[preview] rework stop failed for {issue_id}: {exc}")
+
         self.store.upsert_issue_state(dict(issue))
         return emitted
 
@@ -464,6 +476,18 @@ class Poller:
                 break
             for issue in rows:
                 status = str(issue.get("status") or "")
+                stored = self.store.get_issue_state(str(issue["id"]))
+                if (
+                    stored is not None
+                    and stored.get("status") != status
+                    and status not in _TERMINAL_STATUSES
+                ):
+                    # A non-terminal change (in_review hand-off, rework) that
+                    # landed after the tick read the row. Storing it silently
+                    # would lose the event/stop for good, so process it exactly
+                    # like a tick observation.
+                    emitted += self._observe_issue(issue, now)
+                    continue
                 event_type = {
                     "done": events.ISSUE_COMPLETED,
                     "blocked": events.ISSUE_BLOCKED,
