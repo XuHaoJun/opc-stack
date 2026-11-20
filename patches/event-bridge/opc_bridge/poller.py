@@ -476,6 +476,18 @@ class Poller:
                 break
             for issue in rows:
                 status = str(issue.get("status") or "")
+                stored = self.store.get_issue_state(str(issue["id"]))
+                if (
+                    stored is not None
+                    and stored.get("status") != status
+                    and status not in _TERMINAL_STATUSES
+                ):
+                    # A non-terminal change (in_review hand-off, rework) that
+                    # landed after the tick read the row. Storing it silently
+                    # would lose the event/stop for good, so process it exactly
+                    # like a tick observation.
+                    emitted += self._observe_issue(issue, now)
+                    continue
                 event_type = {
                     "done": events.ISSUE_COMPLETED,
                     "blocked": events.ISSUE_BLOCKED,

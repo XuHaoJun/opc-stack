@@ -172,6 +172,37 @@ class PollerTest(unittest.TestCase):
         self.p.tick()
         self.assertEqual(self.store.get_issue_state("i1")["status"], "todo")
 
+    def test_recover_routes_in_review_through_the_transition_path(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z"))
+        rows = [_issue("i1", status="in_review", updated="2026-11-04T01:00:00Z")]
+        self.pc.issues = rows
+        self.assertEqual(self.p._recover("2026-11-03T00:00:00Z", self.now), 1)
+        self.assertEqual(self.p._recover("2026-11-03T00:00:00Z", self.now), 0)
+        self.assertEqual(self.p.tick(), 0)
+        self.assertEqual(self.store.count_deliveries(), 1)
+
+    def test_recover_sees_rework_and_stops_the_preview(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_review", updated="2026-11-04T00:00:00Z"))
+        self.pc.issues = [_issue("i1", status="todo", updated="2026-11-04T01:00:00Z")]
+        self.pc.workspaces = [self._preview_ws()]
+        self.p._recover("2026-11-03T00:00:00Z", self.now)
+        self.assertEqual(self.pc.stops, [("w1", {"runtimeServiceId": "s1"})])
+
+    def test_review_rework_review_gives_two_events_and_one_stop(self):
+        self.p.bootstrap()
+        self.store.upsert_issue_state(_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z"))
+        self.store.set_cursor("2026-11-04T00:00:00Z")
+        self.pc.workspaces = [self._preview_ws()]
+        total = 0
+        for status, ts in (("in_review", "01"), ("in_progress", "02"), ("in_review", "03")):
+            self.pc.issues = [_issue("i1", status=status, updated=f"2026-11-04T{ts}:00:00Z")]
+            total += self.p.tick()
+        self.assertEqual(total, 2)
+        self.assertEqual(self.store.count_deliveries(), 2)
+        self.assertEqual(len(self.pc.stops), 1)
+
     def test_terminal_transition_enqueues_exactly_one_event(self):
         self.p.bootstrap()
         self.store.upsert_issue_state(_issue("i1", status="in_progress", updated="2026-11-04T00:00:00Z"))

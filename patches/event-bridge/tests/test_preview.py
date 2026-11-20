@@ -93,6 +93,20 @@ class PreviewTest(unittest.TestCase):
         self.assertEqual(pc.stops, [])
         self.assertEqual(pc.patches, [("w7", {"config": {"serviceStates": {"0": "stopped"}}})])
 
+    def test_inherited_preview_without_own_config_entry_is_untouched(self):
+        w = _ws("w8", "i8", [("preview", "running")], config_services=["web"])
+        pc = StubPc([w])
+        self.assertEqual(preview.sweep(pc, {"i8": "done"}.get), [])
+        self.assertEqual(preview.stop_for_rework(pc, "i8"), [])
+        self.assertEqual((pc.stops, pc.patches), ([], []))
+
+    def test_transient_status_is_not_stopped_again(self):
+        pc = StubPc([_ws("w9", "i9", [("preview", "failed")])])
+        self.assertEqual(preview.sweep(pc, {"i9": "done"}.get), [])
+        self.assertEqual(pc.stops, [])
+        pc = StubPc([_ws("w9", "i9", [("preview", "starting")])])
+        self.assertEqual(preview.sweep(pc, {"i9": "done"}.get), ["w9"])
+
     def test_stop_for_rework(self):
         pc = StubPc(_fixture())
         self.assertEqual(preview.stop_for_rework(pc, "i2"), ["w2"])

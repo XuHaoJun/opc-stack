@@ -41,9 +41,16 @@ def _preview_index(workspace: Mapping[str, Any]) -> int | None:
     return None
 
 
+_STOPPABLE = {"running", "starting", "provisioning"}
+
+
 def _running_service(workspace: Mapping[str, Any]) -> bool:
+    # Only a preview this workspace declares itself: a shared workspace can list
+    # the project workspace's services, which are not ours to stop.
+    if _preview_index(workspace) is None:
+        return False
     service = _preview_service(workspace)
-    return service is not None and service.get("status") != "stopped"
+    return service is not None and service.get("status") in _STOPPABLE
 
 
 def _state_stale(workspace: Mapping[str, Any]) -> bool:
@@ -52,6 +59,8 @@ def _state_stale(workspace: Mapping[str, Any]) -> bool:
     if _preview_service(workspace) is None:
         return False
     index = _preview_index(workspace)
+    if index is None:
+        return False
     states = (workspace.get("config") or {}).get("serviceStates") or {}
     return index is not None and states.get(str(index)) == "running"
 
@@ -67,7 +76,7 @@ def live_previews(workspaces: list[dict]) -> list[tuple[str, str]]:
 def _stop_preview(pc, workspace: Mapping[str, Any]) -> None:
     index = _preview_index(workspace)
     service = _preview_service(workspace)
-    if service is not None and service.get("status") != "stopped":
+    if service is not None and service.get("status") in _STOPPABLE:
         if service.get("id"):
             selector: dict[str, Any] = {"runtimeServiceId": service["id"]}
         elif index is not None:
