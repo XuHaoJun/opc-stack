@@ -39,11 +39,11 @@ api_request() { # METHOD PATH [JSON]
 # Like api_request but keeps the response body on non-2xx: prints the body on
 # stdout and returns 1. Paperclip reports start failures (bind errors, a
 # repo without .paperclip/preview) only in the error body, which curl -f drops.
-api_request_body() { # METHOD PATH [JSON]
+api_request_body() { # METHOD PATH JSON
     _rb_file="$(mktemp "${TMPDIR:-/tmp}/opc-paperclip-resp.XXXXXX")" || return 1
     _rb_code="$(curl -sS -o "$_rb_file" -w '%{http_code}' -X "$1" \
         -H "Authorization: Bearer $(api_key)" -H 'Content-Type: application/json' \
-        --data-binary "${3-{\}}" "$(api_base)/api$2")" || { rm -f "$_rb_file"; return 1; }
+        --data-binary "$3" "$(api_base)/api$2")" || { rm -f "$_rb_file"; return 1; }
     cat "$_rb_file"
     rm -f "$_rb_file"
     case "$_rb_code" in 2??) return 0 ;; *) return 1 ;; esac
@@ -350,8 +350,64 @@ ensure_preview_label() {
     printf '%s' "$_id"
 }
 
+# Adds the preview label to an issue JSON's labels (merged, never replaced).
+preview_label_issue() { # issue-json
+    _pl_label="$(ensure_preview_label)" || return 1
+    _pl_id="$(printf '%s' "$1" | jq -r '.id')"
+    api_request PATCH "/issues/$_pl_id" "$(printf '%s' "$1" | jq -c --arg l "$_pl_label" '
+        {labelIds: ((.labelIds // [(.labels // [])[].id]) + [$l] | unique)}')" >/dev/null
+}
+
+# The workspace config (stdin: workspace JSON) with the preview service set.
+# The preview entry is replaced in place (appended only when absent), so no
+# other service moves away from its serviceStates key (index-keyed). Every
+# index gets an explicit state: Paperclip fills a missing one from the
+# workspace-wide desiredState, which the start route turns "running" — that
+# would make every other service desired-running on restart and on every run.
+# desiredState itself is left to Paperclip's start route.
+preview_config_json() { # service-json
+    jq -c --argjson svc "$1" '
+        (.config // {})
+        | if ((.workspaceRuntime.commands // []) | length) > 0 then error("commands") else . end
+        | ((.workspaceRuntime.services // []) | map(.name) | index("preview")) as $pi
+        | .workspaceRuntime = ((.workspaceRuntime // {})
+            | .services = ((.services // []) as $s
+                | if $pi == null then $s + [$svc] else $s | .[$pi] = $svc end))
+        | (if $pi == null then (.workspaceRuntime.services | length - 1) else $pi end) as $idx
+        | .serviceStates = (reduce range(0; .workspaceRuntime.services | length) as $i
+            (.serviceStates // {};
+             ($i | tostring) as $k
+             | .[$k] = (if $i == $idx then "running" else (.[$k] // "stopped") end)))'
+}
+
 preview_probe_url() { # URL — separate function so tests can stub it
-    curl -fsS -o /dev/null --max-time 10 "$1"
+    # Only a 2xx counts; redirects are not followed, so a 302 to a login page
+    # or an error page is a failure, not a green preview.
+    _pc="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$1")" || return 1
+    case "$_pc" in 2??) return 0 ;; *) return 1 ;; esac
+}
+
+# Where the front door can check a preview URL from. A loopback public host
+# (the default PAPERCLIP_PUBLIC_URL is http://localhost:3100) names the owner's
+# machine, but from inside frontdoor/hermes it names our own netns, where
+# nothing listens. The published mapping is 1:1, so the same port answers on
+# the paperclip container's compose name. Prints "<probe-url> <public|internal>".
+preview_probe_target() { # URL
+    _pt_host="$(printf '%s' "$1" | sed -e 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||' -e 's|[/?#].*$||' -e 's|^[^@]*@||')"
+    _pt_port="${_pt_host##*:}"
+    case "$_pt_host" in
+        \[*\]:*) _pt_host="${_pt_host%:*}" ;;
+        \[*\]) _pt_port="" ;;
+        *:*:*) _pt_port="" ;;
+        *:*) _pt_host="${_pt_host%:*}" ;;
+        *) _pt_port="" ;;
+    esac
+    case "$_pt_host" in
+        localhost|127.*|\[::1\]|::1)
+            [ -n "$_pt_port" ] || { printf '%s public\n' "$1"; return; }
+            printf 'http://%s:%s internal\n' "${OPC_PREVIEW_INTERNAL_HOST:-paperclip}" "$_pt_port" ;;
+        *) printf '%s public\n' "$1" ;;
+    esac
 }
 
 # The newest runtime service named preview on a workspace JSON (stdin).
@@ -400,7 +456,14 @@ preview_up() {
     # of code without the change. Only an engineer run restores the branch.
     _reopen="reopen it with 'opc-paperclip buzz-feedback continue' (one engineer run restores the branch and hands off in_review), then preview up on the in_review event"
     case "$(printf '%s' "$_issue" | jq -r '.status // empty')" in
-        done|cancelled) die "$_ident is $(printf '%s' "$_issue" | jq -r .status): no usable execution workspace for this ticket — $_reopen" 3 ;;
+        done)
+            # Asking for a preview puts the ticket under the acceptance rule
+            # (spec 6.3a), whenever it is asked. Label it before refusing, so
+            # the engineer woken by the reopen hands off in_review, not done.
+            preview_label_issue "$_issue" ||
+                die "$_ident is done and the preview label could not be added — add it on the board, then $_reopen" 4
+            die "$_ident is done: no usable execution workspace for this ticket (labelled preview) — $_reopen" 3 ;;
+        cancelled) die "$_ident is cancelled: no usable execution workspace for this ticket — $_reopen" 3 ;;
     esac
     _ws_id="$(printf '%s' "$_issue" | jq -r '.executionWorkspaceId // empty')"
     [ -n "$_ws_id" ] ||
@@ -417,26 +480,24 @@ preview_up() {
     _held="$(printf '%s' "$_all" | jq -c --arg ws "$_ws_id" '
         [.[] | select(.id != $ws) | . as $w | (.runtimeServices // [])[]
          | select(.serviceName == "preview" and (.status == "running" or .status == "starting" or .status == "provisioning")
-                  and .port != null) | {port, issue:$w.sourceIssueId}]')"
+                  and .port != null) | {port, issue:$w.sourceIssueId, workspace:$w.id}]')"
     _held_ports="$(printf '%s' "$_held" | jq -c 'map(.port)')"
     _preferred="$(printf '%s' "$_ws" | jq -r '[(.config.workspaceRuntime.services // [])[]
         | select(.name == "preview") | .port][0] // empty')"
     if ! _port="$(preview_pick_port "$_preferred" "$_held_ports")"; then
         _holders=""
-        for _hid in $(printf '%s' "$_held" | jq -r '.[].issue // empty' | sort -u); do
-            _hi="$(api_request GET "/issues/$_hid" 2>/dev/null | jq -r '.identifier // empty')"
+        for _hid in $(printf '%s' "$_held" | jq -r '.[] | if .issue then .issue else "workspace:" + .workspace end' | sort -u); do
+            case "$_hid" in
+                workspace:*) _hi="workspace ${_hid#workspace:}" ;;
+                *) _hi="$(api_request GET "/issues/$_hid" 2>/dev/null | jq -r '.identifier // empty')" ;;
+            esac
             _holders="${_holders}${_holders:+, }${_hi:-$_hid}"
         done
         die "no free preview port (${OPC_PREVIEW_PORT_BASE:-21012}-${OPC_PREVIEW_PORT_END:-21015}); held by: ${_holders:-unknown} — stop one with 'preview down'" 5
     fi
     _svc="$(preview_service_json "$_port" "$_base_url")"
-    _config="$(printf '%s' "$_ws" | jq -c --argjson svc "$_svc" '
-        (.config // {})
-        | .workspaceRuntime = ((.workspaceRuntime // {})
-            | .services = (((.services // []) | map(select(.name != "preview"))) + [$svc]))
-        | .serviceStates = ((.serviceStates // {})
-            + {((.workspaceRuntime.services | length - 1 | tostring)): "running"})
-        | .desiredState = "running"')"
+    _config="$(printf '%s' "$_ws" | preview_config_json "$_svc")" ||
+        die "$_ident's workspace defines workspaceRuntime.commands; preview up only manages services[] — configure the preview on the board" 4
     _idx="$(printf '%s' "$_config" | jq -r '.workspaceRuntime.services | map(.name) | index("preview")')"
     api_request PATCH "/execution-workspaces/$_ws_id" "$(jq -nc --argjson c "$_config" '{config:$c}')" >/dev/null ||
         die "failed to configure the preview service" 4
@@ -460,7 +521,8 @@ preview_up() {
             # already serves (upstream race with a run's finalize). Say so.
             _stuck_url="$(printf '%s' "$_cur" | jq -r '.url // empty')"
             [ -n "$_stuck_url" ] || _stuck_url="$_base_url:$_port"
-            if [ "$_st" = starting ] && preview_probe_url "$_stuck_url"; then
+            _stuck_probe="$(preview_probe_target "$_stuck_url")"
+            if [ "$_st" = starting ] && preview_probe_url "${_stuck_probe% *}"; then
                 die "preview $_stuck_url is serving, but Paperclip's record is stuck in starting (upstream finalize race) — run 'opc-paperclip preview down --issue $_ident' then 'preview up' again" 4
             fi
             die "preview service did not start within ${OPC_PREVIEW_START_TIMEOUT:-120}s (status: ${_st:-none})" 4
@@ -475,11 +537,12 @@ preview_up() {
         die "preview port mismatch: requested $_port but Paperclip started it on ${_got_port:-none} (fixed-port fallback) — not publishing that URL" 4
     _url="$(printf '%s' "$_cur" | jq -r '.url // empty')"
     [ -n "$_url" ] || _url="$_base_url:$_port"
-    preview_probe_url "$_url" || die "preview $_url did not answer a 2xx over HTTP" 4
-    _label="$(ensure_preview_label)" || exit $?
-    api_request PATCH "/issues/$_issue_id" "$(printf '%s' "$_issue" | jq -c --arg l "$_label" '
-        {labelIds: ((.labelIds // [(.labels // [])[].id]) + [$l] | unique)}')" >/dev/null ||
-        die "preview is up but the preview label could not be added" 4
+    _probe="$(preview_probe_target "$_url")"
+    _probe_url="${_probe% *}"
+    _probe_mode="${_probe##* }"
+    preview_probe_url "$_probe_url" ||
+        die "preview $_url did not answer a 2xx over HTTP (checked $_probe_url)" 4
+    preview_label_issue "$_issue" || die "preview is up but the preview label could not be added" 4
     _src="$(printf '%s' "$_ws" | jq -r '.sourceIssueId // empty')"
     _src_ident=""
     if [ -n "$_src" ] && [ "$_src" != "$_issue_id" ]; then
@@ -487,9 +550,9 @@ preview_up() {
         [ -n "$_src_ident" ] || _src_ident="$_src"
     fi
     printf '%s' "$_ws" | jq -c --arg id "$_ident" --arg url "$_url" --argjson port "$_port" \
-        --arg ws "$_ws_id" --arg src "$_src_ident" '
+        --arg ws "$_ws_id" --arg src "$_src_ident" --arg probe "$_probe_mode" '
         {identifier:$id,url:$url,port:$port,workspaceId:$ws,status:"running",
-         branchName:(.branchName // null)}
+         branchName:(.branchName // null),probe:$probe}
         + (if $src == "" then {} else {sourceIssue:$src} end)'
 }
 
@@ -541,12 +604,14 @@ preview_status() {
     _rows="$(printf '%s' "$_all" | jq -c --arg only "$_ws_only" '
         [.[] | select($only == "" or .id == $only) | . as $w
          | (.runtimeServices // [])[] | select(.serviceName == "preview")
-         | {issue:$w.sourceIssueId, port, url, status}]')"
-    _out="[]"
+         | {issue:$w.sourceIssueId, workspaceId:$w.id, port, url, status}]')"
+    # A workspace with no source issue (shared, or detached) still holds its
+    # port: list it under its workspace id rather than dropping it.
+    _out="$(printf '%s' "$_rows" | jq -c '[.[] | select(.issue == null) | {identifier:null, workspaceId, port, url, status}]')"
     for _sid in $(printf '%s' "$_rows" | jq -r '[.[].issue // empty] | unique[]'); do
         _i="$(api_request GET "/issues/$_sid" 2>/dev/null | jq -r '.identifier // empty')"
         _out="$(printf '%s' "$_rows" | jq -c --arg sid "$_sid" --arg i "${_i:-$_sid}" --argjson acc "$_out" \
-            '$acc + [.[] | select(.issue == $sid) | {identifier:$i, port, url, status}]')"
+            '$acc + [.[] | select(.issue == $sid) | {identifier:$i, workspaceId, port, url, status}]')"
     done
     printf '%s\n' "$_out"
 }
@@ -1535,10 +1600,16 @@ cmd_engineering_ticket_create() {
 # by inference: read the authenticated relay, then verify the issue on the board.
 buzz_feedback() (
     action="${1-}"; [ "$#" -gt 0 ] && shift
-    channel= event= selected=
+    channel= event= selected= want_preview=
     board="${PAPERCLIP_PUBLIC_URL:-}"; board="${board%/}"
-    case "$action" in resolve|continue) ;; *) die "usage: opc-paperclip buzz-feedback <resolve|continue> --channel UUID --event HEX [--issue OPC-N]" 2 ;; esac
+    case "$action" in resolve|continue) ;; *) die "usage: opc-paperclip buzz-feedback <resolve|continue> --channel UUID --event HEX [--issue OPC-N] [--preview]" 2 ;; esac
     while [ "$#" -gt 0 ]; do
+        # --preview (continue only): the owner asked for a preview, so the
+        # ticket gets the preview label in the same write that reopens it.
+        if [ "$1" = --preview ]; then
+            [ "$action" = continue ] || die "--preview applies to buzz-feedback continue only" 2
+            want_preview=1; shift; continue
+        fi
         [ "$#" -ge 2 ] || die "missing value for $1" 2
         case "$1" in
             --channel) channel="$2" ;;
@@ -1681,14 +1752,27 @@ EOF
     # same gate the comment-only done path uses.
     resume=false
     if [ -n "$rework_agent" ] && [ "$status" = done ]; then status=in_review; resume=true; fi
+    # Labels are merged with the issue's own, never replaced.
+    labels=null
+    if [ -n "$want_preview" ]; then
+        preview_label="$(ensure_preview_label)" || exit $?
+        labels="$(printf '%s\n' "$issue" | jq -c --arg l "$preview_label" \
+            '(.labelIds // [(.labels // [])[].id]) + [$l] | unique')"
+    fi
     case "$status" in
         in_review)
-            response="$(api_request PATCH "/issues/$issue_id" "$(jq -nc --arg body "$body" --arg key "$key" --arg agent "$rework_agent" --argjson resume "$resume" \
+            response="$(api_request PATCH "/issues/$issue_id" "$(jq -nc --arg body "$body" --arg key "$key" --arg agent "$rework_agent" --argjson resume "$resume" --argjson labels "$labels" \
                 '{status:"todo",assigneeAgentId:$agent,assigneeUserId:null,comment:$body,commentClientRequestId:$key}
-                 + (if $resume then {resume:true} else {} end)')")" || die "Paperclip did not return the issue for rework" 4
+                 + (if $resume then {resume:true} else {} end)
+                 + (if $labels == null then {} else {labelIds:$labels} end)')")" || die "Paperclip did not return the issue for rework" 4
             printf '%s\n' "$response" | jq -e --arg i "$issue_id" '.id == $i and .status == "todo"' >/dev/null ||
                 die "Paperclip did not confirm the rework transition" 4 ;;
         todo|in_progress|done)
+            # The comment wakes the agent; the label must already be there.
+            if [ "$labels" != null ]; then
+                api_request PATCH "/issues/$issue_id" "$(jq -nc --argjson labels "$labels" '{labelIds:$labels}')" >/dev/null ||
+                    die "Paperclip did not accept the preview label" 4
+            fi
             response="$(api_request POST "/issues/$issue_id/comments" "$(jq -nc --arg body "$body" \
                 --arg key "$key" --arg status "$status" '{body:$body,clientRequestId:$key} + (if $status == "done" then {resume:true} else {} end)')")" ||
                 die "Paperclip did not accept QA feedback" 4

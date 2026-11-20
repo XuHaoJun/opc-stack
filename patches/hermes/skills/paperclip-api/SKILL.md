@@ -369,10 +369,13 @@ Flow:
 3. Owner reports problems → `opc-paperclip buzz-feedback continue …`. It
    returns the ticket to the agent that delivered the newest succeeded run.
 4. Owner wants a preview of a `done` ticket (or `preview up` exits 3) →
-   reopen it with `opc-paperclip buzz-feedback continue` on the owner's
-   message. That wakes the engineer once: its run restores the ticket's branch
-   from the remote and hands off as `in_review`, and the `in_review` event
-   brings you back to step 1. Do not reopen it by PATCHing it yourself: once
+   reopen it with `opc-paperclip buzz-feedback continue --channel … --event …
+   --issue OPC-N --preview` on the owner's message. `--preview` adds the
+   `preview` label in the same write (asking for a preview later still puts
+   the ticket under the hand-off rule; without the label the engineer would
+   finish as `done` again). That wakes the engineer once: its run restores the
+   ticket's branch from the remote and hands off as `in_review`, and the
+   `in_review` event brings you back to step 1. Do not reopen it by PATCHing it yourself: once
    Paperclip has archived the worktree, its local branch may be gone and a
    rebuild without the engineer would serve the base branch, not the change.
    If `continue` refuses because the work is already accepted or merged, the

@@ -66,7 +66,7 @@ scratch=$(mktemp -d)
 printf '%s' "$notifier" >"$scratch/paperclip.pub"
 printf '%s' "$agent" >"$scratch/agent.pub"
 printf '%s' "$other" >"$scratch/relay.pub"
-trap 'rm -f "$DESC" "$scratch/paperclip.pub" "$scratch/agent.pub" "$scratch/relay.pub" "$scratch/write"; rmdir "$scratch"' EXIT
+trap 'rm -f "$DESC" "$scratch/paperclip.pub" "$scratch/agent.pub" "$scratch/relay.pub" "$scratch/write" "$scratch/writes"; rmdir "$scratch"' EXIT
 export BUZZ_KEYS_DIR="$scratch" BUZZ_ACP_AGENT_OWNER="$owner" PAPERCLIP_PUBLIC_URL=https://board.example
 fixture=$(jq -nc --arg f "$feedback_id" --arg r "$root_id" --arg n "$notice_id" \
     --arg o "$owner" --arg p "$notifier" --arg c "$channel" '
@@ -81,7 +81,7 @@ api_request() {
             if [[ "$*" == "GET /issues/$issue_id" && -f "$scratch/write" ]]; then now=todo; else now=${issue_status:-in_review}; fi
             jq -nc --arg id "$issue_id" --arg status "$now" \
                 --arg company "${issue_company:-test-company}" --arg agent "${issue_agent-engineer-1}" \
-                '{id:$id,identifier:"OPC-3",companyId:$company,projectId:"project-1",status:$status,title:"Volume control"}
+                '{id:$id,identifier:"OPC-3",companyId:$company,projectId:"project-1",status:$status,title:"Volume control",labelIds:["l0"]}
                  + (if $agent != "" then {assigneeAgentId:$agent} else {assigneeUserId:"board-user"} end)' ;;
         "GET /issues/$issue_id/runs") printf '%s\n' "${issue_runs:-[]}" ;;
         "GET /issues/OPC-4")
@@ -90,7 +90,9 @@ api_request() {
             jq -nc --arg c "$channel" --arg id "${persisted_root:-$root_id}" \
                 '[{authorUserId:"board-user",body:("BUZZ_CHANNEL: "+$c+"\nBUZZ_EVENT: "+$id)}]' ;;
         "GET /issues/$issue_id/work-products") printf '%s\n' "${work_products:-[]}" ;;
+        "GET /companies/test-company/labels") echo '[{"id":"l-prev","name":"preview"}]' ;;
         "PATCH /issues/$issue_id "*|"POST /issues/$issue_id/comments "*)
+            printf '%s %s\n' "$1" "$3" >>"$scratch/writes"
             printf '%s\n' "$3" >"$scratch/write"
             if [ "$1" = PATCH ]; then
                 jq -nc --arg id "$issue_id" '{id:$id,status:"todo"}'
@@ -201,6 +203,34 @@ unset issue_status issue_agent issue_runs
 rm -f "$scratch/write"
 pass "in_review rework returns to the delivering agent"
 
+# --preview: a late preview of a done ticket must carry the preview label, or
+# the reopened engineer re-finishes as done instead of handing off in_review.
+rm -f "$scratch/write" "$scratch/writes"
+issue_status=done issue_agent="" issue_runs='[{"agentId":"engineer-1","status":"succeeded","createdAt":"2026-11-20T01:00:00Z","finishedAt":"2026-11-20T02:00:00Z"}]'
+main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 --preview >/dev/null
+[[ "$(wc -l <"$scratch/writes")" == 1 ]] || fail "--preview reopen must be one write: $(cat "$scratch/writes")"
+jq -e '.status=="todo" and .assigneeAgentId=="engineer-1" and .resume==true and (.labelIds|sort)==["l-prev","l0"]' "$scratch/write" >/dev/null ||
+    fail "--preview reopen did not merge the preview label into the same PATCH: $(cat "$scratch/write")"
+rm -f "$scratch/write" "$scratch/writes"
+main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 >/dev/null
+jq -e 'has("labelIds") | not' "$scratch/write" >/dev/null || fail "continue without --preview touched labels"
+# done with an agent assignee goes through the comment path: label first, then the waking comment
+rm -f "$scratch/write" "$scratch/writes"
+issue_agent=engineer-1
+main buzz-feedback continue --channel "$channel" --event "$feedback_id" --issue OPC-3 --preview >/dev/null
+[[ "$(sed -n 1p "$scratch/writes" | cut -d' ' -f1)" == PATCH && "$(sed -n 2p "$scratch/writes" | cut -d' ' -f1)" == POST ]] ||
+    fail "--preview comment path must label before the waking comment: $(cat "$scratch/writes")"
+sed -n 1p "$scratch/writes" | cut -d' ' -f2- | jq -e '(.labelIds|sort)==["l-prev","l0"] and (has("status")|not)' >/dev/null ||
+    fail "--preview label PATCH wrong: $(cat "$scratch/writes")"
+if (main buzz-feedback resolve --channel "$channel" --event "$feedback_id" --preview >/dev/null 2>&1); then fail "resolve accepted --preview"; fi
+unset issue_status issue_agent issue_runs
+rm -f "$scratch/write" "$scratch/writes"
+pass "buzz-feedback continue --preview labels the reopened ticket (merged, same write)"
+awk '/^4\. Owner wants a preview of a `done` ticket/,/^### /' patches/buzz/skills/paperclip-api/SKILL.md \
+    | tr '\n' ' ' | grep -q 'buzz-feedback continue --channel … --event … *--issue OPC-N --preview' ||
+    fail "skill late-preview step does not reopen with buzz-feedback continue --preview"
+pass "skill late-preview step reopens with --preview"
+
 # ── ticket preview ───────────────────────────────────────────────────────
 export OPC_PREVIEW_PORT_BASE=21012 OPC_PREVIEW_PORT_END=21015
 export OPC_PREVIEW_POLL_SECONDS=0 OPC_PREVIEW_START_TIMEOUT=2
@@ -221,8 +251,8 @@ rc=0; preview_pick_port "" '[21012,21013,21014,21015]' >/dev/null || rc=$?
 pass "preview helpers"
 
 pv="$scratch/pv"; mkdir -p "$pv"
-pv_reset() { rm -f "$pv"/*; pv_cfg=null; pv_ws_status=active; pv_issue_status=in_progress; pv_live_polls=0; pv_start_rc=0; pv_other_port=21012; pv_running_port=21013; pv_state=running; pv_ws_id=ws-1; pv_other_ports="21012"; }
-preview_probe_url() { return "${pv_probe_rc:-0}"; }
+pv_reset() { rm -f "$pv"/*; pv_cfg=null; pv_ws_status=active; pv_issue_status=in_progress; pv_live_polls=0; pv_start_rc=0; pv_other_port=21012; pv_running_port=21013; pv_state=running; pv_ws_id=ws-1; pv_other_ports="21012"; pv_url_host=http://h; pv_orphan=""; }
+preview_probe_url() { printf '%s\n' "$1" >>"$pv/probes"; return "${pv_probe_rc:-0}"; }
 api_request() {
     case "$1 $2" in
         "GET /issues/OPC-3")
@@ -236,15 +266,16 @@ api_request() {
         "GET /execution-workspaces/ws-1")
             jq -nc --arg st "$pv_state" --argjson port "$pv_running_port" --argjson cfg "$pv_cfg" \
                 --arg started "$([ -f "$pv/start" ] && echo 1)" \
-                --arg wsst "$pv_ws_status" '
+                --arg wsst "$pv_ws_status" --arg uh "$pv_url_host" '
                 {id:"ws-1",status:$wsst,sourceIssueId:"issue-3",branchName:"feat/x",config:$cfg,
                  runtimeServices:(if $started=="1" then
-                   [{serviceName:"preview",status:$st,port:$port,url:("http://h:"+($port|tostring)),
+                   [{serviceName:"preview",status:$st,port:$port,url:($uh+":"+($port|tostring)),
                      id:"rs-1",updatedAt:"2026-11-20T00:00:00Z"}] else [] end)}' ;;
         "GET /companies/test-company/execution-workspaces")
-            jq -nc --arg ports "$pv_other_ports" --arg own "$([ -f "$pv/start" ] && echo 1)" '
+            jq -nc --arg ports "$pv_other_ports" --arg own "$([ -f "$pv/start" ] && echo 1)" --arg orphan "$pv_orphan" '
                 [($ports|split(" ")|map(select(.!="")|tonumber)|to_entries[]) as $e
-                 | {id:("other-"+($e.key|tostring)),sourceIssueId:"issue-9",
+                 | {id:("other-"+($e.key|tostring)),
+                    sourceIssueId:(if $orphan != "" and $e.key == 0 then null else "issue-9" end),
                     runtimeServices:[{serviceName:"preview",status:"running",port:$e.value}]}]
                 + (if $own=="1" then [{id:"ws-1",sourceIssueId:"issue-3",
                     runtimeServices:[{serviceName:"preview",status:"running",port:21013}]}] else [] end)'  ;;
@@ -270,9 +301,11 @@ api_request_body() {
 
 pv_reset
 out="$(main preview up --issue OPC-3)" || fail "preview up failed"
-jq -e '.port==21013 and .url=="http://h:21013" and .workspaceId=="ws-1" and .status=="running" and .branchName=="feat/x"' <<<"$out" >/dev/null \
+jq -e '.port==21013 and .url=="http://h:21013" and .workspaceId=="ws-1" and .status=="running" and .branchName=="feat/x" and .probe=="public"' <<<"$out" >/dev/null \
     || fail "preview up output wrong: $out"
-jq -e '.config.workspaceRuntime.services[0].port==21013 and .config.desiredState=="running"' "$pv/patch" >/dev/null \
+[[ "$(cat "$pv/probes")" == http://h:21013 ]] || fail "public preview probed elsewhere: $(cat "$pv/probes")"
+jq -e '.config.workspaceRuntime.services[0].port==21013 and (.config|has("desiredState")|not)
+    and .config.serviceStates=={"0":"running"}' "$pv/patch" >/dev/null \
     || fail "preview up PATCH body wrong: $(cat "$pv/patch")"
 jq -e '.labelIds | index("l-prev") and index("l0")' "$pv/issue_patch" >/dev/null || fail "preview label not added"
 jq -e '.serviceIndex==0' "$pv/start_body" >/dev/null || fail "start body lacks the preview selector: $(cat "$pv/start_body")"
@@ -284,6 +317,36 @@ jq -e '.config.workspaceRuntime.services | length==2 and .[0].name=="web" and .[
     || fail "other services were not preserved"
 jq -e '.serviceIndex==1' "$pv/start_body" >/dev/null || fail "start targeted the wrong service: $(cat "$pv/start_body")"
 pass "preview up targets only the preview service among several"
+
+# Re-up with preview already configured at index 1 behind a service with no
+# serviceStates entry: indices stay put, the other service is not made
+# desired-running (Paperclip fills a missing state from desiredState).
+pv_reset; pv_cfg='{"workspaceRuntime":{"services":[{"name":"web","port":3000},{"name":"preview","port":21013,"command":"old"}]},"serviceStates":{"1":"stopped"}}'
+main preview up --issue OPC-3 >/dev/null || fail "re-up with preview at index 1 failed"
+jq -e '.config.workspaceRuntime.services | length==2 and .[0].name=="web" and .[0].port==3000
+    and .[1].name=="preview" and .[1].command=="opc-preview-run"' "$pv/patch" >/dev/null \
+    || fail "re-up moved services: $(cat "$pv/patch")"
+jq -e '.config.serviceStates=={"0":"stopped","1":"running"} and (.config|has("desiredState")|not)' "$pv/patch" >/dev/null \
+    || fail "re-up serviceStates wrong (other service must not be running): $(cat "$pv/patch")"
+jq -e '.serviceIndex==1' "$pv/start_body" >/dev/null || fail "re-up started the wrong index: $(cat "$pv/start_body")"
+pv_reset; pv_cfg='{"workspaceRuntime":{"services":[{"name":"web"},{"name":"db"},{"name":"preview"}]},"serviceStates":{"0":"manual","1":"running"}}'
+main preview up --issue OPC-3 >/dev/null || fail "re-up with explicit states failed"
+jq -e '.config.serviceStates=={"0":"manual","1":"running","2":"running"}' "$pv/patch" >/dev/null \
+    || fail "re-up did not keep explicit states: $(cat "$pv/patch")"
+pv_reset; pv_cfg='{"workspaceRuntime":{"commands":[{"name":"web","kind":"service"}]}}'
+rc=0; (main preview up --issue OPC-3 >/dev/null 2>&1) || rc=$?
+[[ "$rc" == 4 && ! -e "$pv/patch" && ! -e "$pv/start" ]] || fail "commands[] workspace must be refused untouched (rc=$rc)"
+pass "preview up replaces the preview entry in place with explicit per-index states"
+
+# Default install: PAPERCLIP_PUBLIC_URL=http://localhost:3100. From the front
+# door's netns, localhost is not the host; probe the same port on paperclip.
+for host in http://localhost http://127.0.0.1 "http://[::1]"; do
+    pv_reset; pv_url_host="$host"
+    out="$(PAPERCLIP_PUBLIC_URL="$host:3100" main preview up --issue OPC-3)" || fail "loopback preview up ($host) failed"
+    [[ "$(cat "$pv/probes")" == http://paperclip:21013 ]] || fail "loopback ($host) probed $(cat "$pv/probes")"
+    jq -e --arg u "$host:21013" '.url==$u and .probe=="internal"' <<<"$out" >/dev/null || fail "loopback output wrong: $out"
+done
+pass "preview up probes a loopback public URL through the compose name, reports the public URL"
 
 pv_reset; pv_running_port=54321
 if err="$(main preview up --issue OPC-3 2>&1 >/dev/null)"; then fail "port fallback was published"; fi
@@ -315,8 +378,14 @@ for case in "issue done" "issue cancelled" "workspace archived" "workspace clean
     [[ "$rc" == 3 ]] && grep -q 'buzz-feedback continue' <<<"$err" && grep -q 'no usable execution workspace' <<<"$err" \
         || fail "$case must refuse with exit 3 and the continue path (rc=$rc): $err"
     [[ ! -e "$pv/patch" && ! -e "$pv/start" ]] || fail "$case wrote to Paperclip"
+    if [[ "$case" == "issue done" ]]; then
+        jq -e '(.labelIds|sort)==["l-prev","l0"]' "$pv/issue_patch" >/dev/null 2>&1 ||
+            fail "done ticket was refused without the preview label: $(cat "$pv/issue_patch" 2>/dev/null)"
+    else
+        [[ ! -e "$pv/issue_patch" ]] || fail "$case labelled the ticket"
+    fi
 done
-pass "preview up refuses done/cancelled tickets and closed workspaces, pointing at buzz-feedback continue"
+pass "preview up refuses done/cancelled tickets and closed workspaces, pointing at buzz-feedback continue (done gets labelled first)"
 
 pv_reset; pv_state=starting
 rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
@@ -331,6 +400,10 @@ pass "preview up names the upstream stuck-starting race when the URL already ans
 pv_reset; pv_other_ports="21012 21013 21014 21015"
 rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
 [[ "$rc" == 5 ]] && grep -q OPC-9 <<<"$err" || fail "all-ports-held case wrong (rc=$rc): $err"
+pv_reset; pv_other_ports="21012 21013 21014 21015"; pv_orphan=1
+rc=0; err="$(main preview up --issue OPC-3 2>&1 >/dev/null)" || rc=$?
+[[ "$rc" == 5 ]] && grep -q 'workspace other-0' <<<"$err" && grep -q OPC-9 <<<"$err" && ! grep -q unknown <<<"$err" \
+    || fail "holder without a source issue must be named by workspace id (rc=$rc): $err"
 [[ ! -e "$pv/patch" && ! -e "$pv/start" ]] || fail "port exhaustion still wrote to Paperclip"
 pass "preview up with all ports held exits 5 naming holders, writes nothing"
 
@@ -366,7 +439,26 @@ pv_reset; touch "$pv/start"
 out="$(main preview status --issue OPC-3)" || fail "preview status failed"
 jq -e 'length==1 and .[0].identifier=="OPC-3" and .[0].port==21013 and .[0].status=="running"' <<<"$out" >/dev/null \
     || fail "status output wrong: $out"
-pass "preview status lists preview services"
+pv_reset; pv_orphan=1; pv_other_ports="21012 21014"
+out="$(main preview status)" || fail "preview status (all) failed"
+jq -e 'any(.[]; .identifier==null and .workspaceId=="other-0" and .port==21012) and any(.[]; .identifier=="OPC-9")' <<<"$out" >/dev/null \
+    || fail "status dropped a preview without a source issue: $out"
+pass "preview status lists preview services (workspace id when there is no source issue)"
+
+# The probe counts only a 2xx; a redirect is not followed and fails.
+probe_fn="$(declare -f preview_probe_url)"
+unset -f preview_probe_url
+# shellcheck disable=SC1091
+eval "$(sed -n '/^preview_probe_url() {/,/^}/p' patches/buzz/opc-paperclip)"
+curl() { printf '%s' "$probe_code"; }
+probe_code=302; preview_probe_url http://x && fail "a 302 counted as a live preview"
+probe_code=500; preview_probe_url http://x && fail "a 500 counted as a live preview"
+probe_code=204; preview_probe_url http://x || fail "a 204 did not count"
+unset -f curl
+eval "$probe_fn"
+grep -A4 '^preview_probe_url() {' patches/buzz/opc-paperclip | grep -q -- "-w '%{http_code}'" || fail "probe does not read the status code"
+grep -A4 '^preview_probe_url() {' patches/buzz/opc-paperclip | grep -q -- ' -L' && fail "probe follows redirects"
+pass "preview probe requires a 2xx"
 
 grep -q '"status":"active"' patches/hermes/opc-paperclip && fail "helper still PATCHes a workspace status"
 api_request() { return 1; }
