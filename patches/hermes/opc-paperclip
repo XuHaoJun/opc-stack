@@ -286,6 +286,202 @@ ensure_ticket_labels_json() { # <track> <style> → JSON array of label ids
     printf '[%s]' "$_ids"
 }
 
+# ── ticket preview (Paperclip runtime service named "preview") ───────────
+# A code ticket's preview is a runtime service on the ticket's own execution
+# workspace. Only board-key callers may write runtime-service commands, which is
+# why this lives in the front door's helper and not in the engineer's skill.
+preview_public_base() {
+    _host="${DEVENV_HTTP_PUBLIC_HOST:-}"
+    if [ -z "$_host" ] && [ -n "${PAPERCLIP_PUBLIC_URL:-}" ]; then
+        _host="$(printf '%s' "$PAPERCLIP_PUBLIC_URL" | sed -e 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||' -e 's|[/?#].*$||' -e 's|^[^@]*@||' -e 's|:[0-9]*$||')"
+    fi
+    [ -n "$_host" ] || die "no preview host: set DEVENV_HTTP_PUBLIC_HOST or PAPERCLIP_PUBLIC_URL" 4
+    printf 'http://%s' "$_host"
+}
+
+preview_service_json() { # port public_base
+    jq -nc --argjson port "$1" --arg base "$2" '
+        {name:"preview",command:"opc-preview-run",cwd:".",port:$port,
+         lifecycle:"shared",reuseScope:"execution_workspace",
+         readiness:{type:"http",urlTemplate:"http://127.0.0.1:{{port}}"},
+         expose:{type:"url",urlTemplate:($base + ":{{port}}")}}'
+}
+
+preview_pick_port() { # preferred-or-empty held-ports-json-array
+    _base="${OPC_PREVIEW_PORT_BASE:-21012}"
+    _end="${OPC_PREVIEW_PORT_END:-21015}"
+    _picked="$(jq -nr --arg pref "$1" --argjson held "$2" --argjson b "$_base" --argjson e "$_end" '
+        ([range($b; $e + 1)] | map(select(. as $p | $held | index($p) | not))) as $free
+        | if ($pref != "" and ($free | index($pref | tonumber))) then $pref | tonumber
+          else ($free[0] // empty) end')" || return 5
+    [ -n "$_picked" ] || return 5
+    printf '%s' "$_picked"
+}
+
+ensure_preview_label() {
+    _labels="$(api_request GET "/companies/$(company_id)/labels")" ||
+        die "failed to list Paperclip labels" 4
+    printf '%s' "$_labels" | jq -e 'type == "array"' >/dev/null 2>&1 ||
+        die "Paperclip labels response is not an array" 4
+    _id="$(printf '%s' "$_labels" | jq -r '[.[] | select(.name == "preview")][0].id // empty')"
+    if [ -z "$_id" ]; then
+        _id="$(api_request POST "/companies/$(company_id)/labels" \
+            '{"name":"preview","color":"#0891b2"}' | jq -r '.id // empty')" ||
+            die "failed to create label preview" 4
+        [ -n "$_id" ] || die "Paperclip label create returned no id for preview" 4
+    fi
+    printf '%s' "$_id"
+}
+
+preview_probe_url() { # URL — separate function so tests can stub it
+    curl -fsS -o /dev/null --max-time 10 "$1"
+}
+
+# The newest runtime service named preview on a workspace JSON (stdin).
+preview_service_of() {
+    jq -c '[(.runtimeServices // [])[] | select(.serviceName == "preview")]
+           | sort_by(.updatedAt // "") | last // empty'
+}
+
+preview_issue_json() { # OPC-N
+    _pi="$(api_request GET "/issues/$1")" || die "failed to read issue $1" 4
+    printf '%s' "$_pi" | jq -e '.id' >/dev/null 2>&1 || die "issue $1 not found" 4
+    printf '%s' "$_pi"
+}
+
+preview_issue_arg() { # parses "--issue OPC-N" → stdout; $1.. are the args
+    [ "${1-}" = --issue ] && [ "$#" -ge 2 ] || return 1
+    printf '%s' "$2"
+}
+
+preview_up() {
+    _ident="$(preview_issue_arg "$@")" || die "usage: opc-paperclip preview up --issue OPC-N" 2
+    _issue="$(preview_issue_json "$_ident")" || exit $?
+    _issue_id="$(printf '%s' "$_issue" | jq -r '.id')"
+    _ws_id="$(printf '%s' "$_issue" | jq -r '.executionWorkspaceId // empty')"
+    [ -n "$_ws_id" ] ||
+        die "$_ident has no execution workspace (never ran, or archived after done) — reopen the ticket so the engineer re-creates it, then retry" 3
+    _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
+        die "failed to read execution workspace $_ws_id" 4
+    _base_url="$(preview_public_base)" || exit $?
+    _all="$(api_request GET "/companies/$(company_id)/execution-workspaces")" ||
+        die "failed to list execution workspaces" 4
+    _held="$(printf '%s' "$_all" | jq -c --arg ws "$_ws_id" '
+        [.[] | select(.id != $ws) | . as $w | (.runtimeServices // [])[]
+         | select(.serviceName == "preview" and (.status == "running" or .status == "starting" or .status == "provisioning")
+                  and .port != null) | {port, issue:$w.sourceIssueId}]')"
+    _held_ports="$(printf '%s' "$_held" | jq -c 'map(.port)')"
+    _preferred="$(printf '%s' "$_ws" | jq -r '[(.config.workspaceRuntime.services // [])[]
+        | select(.name == "preview") | .port][0] // empty')"
+    if ! _port="$(preview_pick_port "$_preferred" "$_held_ports")"; then
+        _holders=""
+        for _hid in $(printf '%s' "$_held" | jq -r '.[].issue // empty' | sort -u); do
+            _hi="$(api_request GET "/issues/$_hid" 2>/dev/null | jq -r '.identifier // empty')"
+            _holders="${_holders}${_holders:+, }${_hi:-$_hid}"
+        done
+        die "no free preview port (${OPC_PREVIEW_PORT_BASE:-21012}-${OPC_PREVIEW_PORT_END:-21015}); held by: ${_holders:-unknown} — stop one with 'preview down'" 5
+    fi
+    _svc="$(preview_service_json "$_port" "$_base_url")"
+    _config="$(printf '%s' "$_ws" | jq -c --argjson svc "$_svc" '
+        (.config // {})
+        | .workspaceRuntime = ((.workspaceRuntime // {})
+            | .services = (((.services // []) | map(select(.name != "preview"))) + [$svc]))
+        | .desiredState = "running"')"
+    api_request PATCH "/execution-workspaces/$_ws_id" "$(jq -nc --argjson c "$_config" '{config:$c}')" >/dev/null ||
+        die "failed to configure the preview service" 4
+    api_request POST "/execution-workspaces/$_ws_id/runtime-services/start" '{}' >/dev/null ||
+        die "failed to start the preview service" 4
+    _deadline=$(( $(date +%s) + ${OPC_PREVIEW_START_TIMEOUT:-300} ))
+    while :; do
+        _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
+            die "failed to read execution workspace $_ws_id" 4
+        _cur="$(printf '%s' "$_ws" | preview_service_of)"
+        _st="$(printf '%s' "$_cur" | jq -r '.status // empty')"
+        case "$_st" in running|failed) break ;; esac
+        [ "$(date +%s)" -lt "$_deadline" ] ||
+            die "preview service did not start within ${OPC_PREVIEW_START_TIMEOUT:-300}s (status: ${_st:-none})" 4
+        sleep "${OPC_PREVIEW_POLL_SECONDS:-2}"
+    done
+    if [ "$_st" = failed ]; then
+        _err="$(printf '%s' "$_cur" | jq -r '.lastError // .error // .errorMessage // .statusMessage // "no error text reported (see the workspace runtime log)"')"
+        die "preview service failed: $_err" 4
+    fi
+    _got_port="$(printf '%s' "$_cur" | jq -r '.port // empty')"
+    [ "$_got_port" = "$_port" ] ||
+        die "preview port mismatch: requested $_port but Paperclip started it on ${_got_port:-none} (fixed-port fallback) — not publishing that URL" 4
+    _url="$(printf '%s' "$_cur" | jq -r '.url // empty')"
+    [ -n "$_url" ] || _url="$_base_url:$_port"
+    preview_probe_url "$_url" || die "preview $_url did not answer a 2xx over HTTP" 4
+    _label="$(ensure_preview_label)" || exit $?
+    api_request PATCH "/issues/$_issue_id" "$(printf '%s' "$_issue" | jq -c --arg l "$_label" '
+        {labelIds: ((.labelIds // [(.labels // [])[].id]) + [$l] | unique)}')" >/dev/null ||
+        die "preview is up but the preview label could not be added" 4
+    _src="$(printf '%s' "$_ws" | jq -r '.sourceIssueId // empty')"
+    _src_ident=""
+    if [ -n "$_src" ] && [ "$_src" != "$_issue_id" ]; then
+        _src_ident="$(api_request GET "/issues/$_src" 2>/dev/null | jq -r '.identifier // empty')"
+        [ -n "$_src_ident" ] || _src_ident="$_src"
+    fi
+    printf '%s' "$_ws" | jq -c --arg id "$_ident" --arg url "$_url" --argjson port "$_port" \
+        --arg ws "$_ws_id" --arg src "$_src_ident" '
+        {identifier:$id,url:$url,port:$port,workspaceId:$ws,status:"running",
+         branchName:(.branchName // null)}
+        + (if $src == "" then {} else {sourceIssue:$src} end)'
+}
+
+preview_down() {
+    _ident="$(preview_issue_arg "$@")" || die "usage: opc-paperclip preview down --issue OPC-N" 2
+    _issue="$(preview_issue_json "$_ident")" || exit $?
+    _ws_id="$(printf '%s' "$_issue" | jq -r '.executionWorkspaceId // empty')"
+    if [ -n "$_ws_id" ]; then
+        _ws="$(api_request GET "/execution-workspaces/$_ws_id")" ||
+            die "failed to read execution workspace $_ws_id" 4
+        _st="$(printf '%s' "$_ws" | preview_service_of | jq -r '.status // empty')"
+        case "$_st" in
+            running|starting|provisioning)
+                api_request POST "/execution-workspaces/$_ws_id/runtime-services/stop" '{}' >/dev/null ||
+                    die "failed to stop the preview service" 4 ;;
+        esac
+        api_request PATCH "/execution-workspaces/$_ws_id" '{"config":{"desiredState":"stopped"}}' >/dev/null ||
+            die "failed to record desiredState stopped" 4
+    fi
+    jq -nc --arg id "$_ident" '{identifier:$id,status:"stopped"}'
+}
+
+preview_status() {
+    _ident=""
+    if [ "$#" -gt 0 ]; then
+        _ident="$(preview_issue_arg "$@")" || die "usage: opc-paperclip preview status [--issue OPC-N]" 2
+    fi
+    _ws_only=""
+    if [ -n "$_ident" ]; then
+        _ws_only="$(preview_issue_json "$_ident" | jq -r '.executionWorkspaceId // empty')" || exit $?
+        [ -n "$_ws_only" ] || { printf '[]\n'; return 0; }
+    fi
+    _all="$(api_request GET "/companies/$(company_id)/execution-workspaces")" ||
+        die "failed to list execution workspaces" 4
+    _rows="$(printf '%s' "$_all" | jq -c --arg only "$_ws_only" '
+        [.[] | select($only == "" or .id == $only) | . as $w
+         | (.runtimeServices // [])[] | select(.serviceName == "preview")
+         | {issue:$w.sourceIssueId, port, url, status}]')"
+    _out="[]"
+    for _sid in $(printf '%s' "$_rows" | jq -r '[.[].issue // empty] | unique[]'); do
+        _i="$(api_request GET "/issues/$_sid" 2>/dev/null | jq -r '.identifier // empty')"
+        _out="$(printf '%s' "$_rows" | jq -c --arg sid "$_sid" --arg i "${_i:-$_sid}" --argjson acc "$_out" \
+            '$acc + [.[] | select(.issue == $sid) | {identifier:$i, port, url, status}]')"
+    done
+    printf '%s\n' "$_out"
+}
+
+cmd_preview() {
+    case "${1-}" in
+        up) shift; preview_up "$@" ;;
+        down) shift; preview_down "$@" ;;
+        status) shift; preview_status "$@" ;;
+        *) die "usage: opc-paperclip preview <up|down|status> [--issue OPC-N]" 2 ;;
+    esac
+}
+
 validate_concurrency_max() {
     _max="$1"
     if ! jq -en --arg value "$_max" \
@@ -1156,8 +1352,10 @@ cmd_engineering_ticket_create() {
     _execution_workspace_id=""
     _buzz_channel=""
     _buzz_event=""
+    _preview=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
+            --preview) _preview=1; shift ;;
             --repo) [ "$#" -ge 2 ] || die "--repo requires a value" 2; _repo="$2"; shift 2 ;;
             --title) [ "$#" -ge 2 ] || die "--title requires a value" 2; _title="$2"; shift 2 ;;
             --priority) [ "$#" -ge 2 ] || die "--priority requires a value" 2; _priority="$2"; shift 2 ;;
@@ -1166,7 +1364,7 @@ cmd_engineering_ticket_create() {
             --execution-workspace-id) [ "$#" -ge 2 ] || die "--execution-workspace-id requires a value" 2; _execution_workspace_id="$2"; shift 2 ;;
             --buzz-channel) [ "$#" -ge 2 ] || die "--buzz-channel requires a value" 2; _buzz_channel="$2"; shift 2 ;;
             --buzz-event) [ "$#" -ge 2 ] || die "--buzz-event requires a value" 2; _buzz_event="$2"; shift 2 ;;
-            *) die "usage: opc-paperclip engineering-ticket create --repo <repo> --title <title> [--priority <p>] [--status todo|backlog] [--mode <mode>] [--execution-workspace-id <uuid>] [--buzz-channel <uuid> --buzz-event <id>]" 2 ;;
+            *) die "usage: opc-paperclip engineering-ticket create --repo <repo> --title <title> [--priority <p>] [--status todo|backlog] [--mode <mode>] [--execution-workspace-id <uuid>] [--buzz-channel <uuid> --buzz-event <id>] [--preview]" 2 ;;
         esac
     done
     [ -n "$_repo" ] || die "--repo is required" 2
@@ -1213,6 +1411,10 @@ cmd_engineering_ticket_create() {
     case "$_track" in core|lab) ;; *) die "unknown Track: $_track (core|lab)" 2 ;; esac
     case "$_style" in blueprint|exploration) ;; *) die "unknown Style: $_style (blueprint|exploration)" 2 ;; esac
     _labels_json="$(ensure_ticket_labels_json "$_track" "$_style")" || exit $?
+    if [ "$_preview" = 1 ]; then
+        _preview_label="$(ensure_preview_label)" || exit $?
+        _labels_json="$(printf '%s' "$_labels_json" | jq -c --arg l "$_preview_label" '. + [$l] | unique')"
+    fi
     _payload="$(engineering_payload_json "$_description_file" "$_title" "$_priority" \
         "$_status" "$_mode" "$_execution_workspace_id" "$_agent_id" "$_project_id" \
         "$_workspace_id" "$_settings" "$_labels_json")"
@@ -1445,6 +1647,7 @@ main() {
             cmd_labels_ensure
             ;;
         buzz-feedback) shift; buzz_feedback "$@" ;;
+        preview) shift; cmd_preview "$@" ;;
         engineering-ticket)
             shift
             [ "${1-}" = create ] || die "usage: opc-paperclip engineering-ticket create ..." 2
