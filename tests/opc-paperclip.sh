@@ -467,4 +467,85 @@ rc=0; out="$(main preview status --issue OPC-3 2>/dev/null)" || rc=$?
 pass "preview status propagates a failed issue lookup"
 rm -rf "$pv"
 
+# ── prototype preview (front door opens/closes what the Prototyper registered) ──
+pp="$scratch/pp"; mkdir -p "$pp"
+pp_reset() { rm -f "$pp"/*; pp_svcs='[{"name":"api","port":21005},{"name":"preview","port":21003,"expose":{"urlTemplate":"http://box:21003"}}]'; pp_result=running; pp_port=21003; pp_archived=null; pp_start_rc=0; }
+preview_probe_url() { printf '%s\n' "$1" >>"$pp/probes"; return "${pp_probe_rc:-0}"; }
+api_request() {
+    case "$1 $2" in
+        "GET /companies/test-company/projects")
+            jq -nc --argjson a "$pp_archived" '[{id:"p1",name:"demo",archivedAt:$a},{id:"p2",name:"other",archivedAt:null}]' ;;
+        "GET /projects/p1")
+            jq -nc --argjson s "$pp_svcs" --arg st "$pp_result" --argjson port "$pp_port" \
+                --arg started "$([ -f "$pp/start" ] && echo 1)" '
+                {id:"p1",workspaces:[{id:"w1",isPrimary:true,runtimeConfig:{workspaceRuntime:{services:$s}},
+                  runtimeServices:(if $started=="1" then [{serviceName:"preview",status:$st,port:$port,
+                    url:("http://box:"+($port|tostring)),updatedAt:"t"}] else [] end)}]}' ;;
+        *) echo "unstubbed: $*" >&2; return 1 ;;
+    esac
+}
+api_request_body() {
+    case "$1 $2" in
+        "POST /projects/p1/workspaces/w1/runtime-services/start")
+            printf '%s\n' "$3" >"$pp/start_body"
+            if [[ "$pp_start_rc" != 0 ]]; then echo '{"error":"spawn failed"}'; return 1; fi
+            touch "$pp/start"; echo '{}' ;;
+        "POST /projects/p1/workspaces/w1/runtime-services/stop") printf '%s\n' "$3" >"$pp/stop"; echo '{}' ;;
+        *) echo "unstubbed body: $*" >&2; return 1 ;;
+    esac
+}
+
+pp_reset
+out="$(main preview up --prototype demo)" || fail "prototype preview up failed"
+jq -e '.prototype=="demo" and .url=="http://box:21003" and .port==21003 and .status=="running"' <<<"$out" >/dev/null \
+    || fail "prototype up output wrong: $out"
+jq -e '.serviceIndex==1' "$pp/start_body" >/dev/null || fail "prototype start not scoped to the preview: $(cat "$pp/start_body")"
+[[ "$(cat "$pp/probes")" == http://box:21003 ]] || fail "prototype preview probed elsewhere: $(cat "$pp/probes")"
+pass "preview up --prototype starts only the registered preview and probes it"
+
+pp_reset; pp_svcs='[{"name":"api","port":21005}]'
+rc=0; out="$(main preview up --prototype demo 2>&1)" || rc=$?
+[[ "$rc" == 3 ]] && grep -q 'prototype expose demo' <<<"$out" || fail "unregistered prototype must exit 3 pointing at prototype expose (rc=$rc): $out"
+[[ ! -e "$pp/start_body" ]] || fail "unregistered prototype was started"
+pp_reset; pp_archived='"2026-11-01T00:00:00Z"'
+rc=0; ( main preview up --prototype demo ) >/dev/null 2>&1 || rc=$?
+[[ "$rc" == 3 ]] || fail "archived prototype must exit 3 (got $rc)"
+rc=0; ( main preview up --prototype nope ) >/dev/null 2>&1 || rc=$?
+[[ "$rc" == 3 ]] || fail "unknown prototype must exit 3 (got $rc)"
+pass "preview up --prototype refuses unknown, archived and unregistered prototypes"
+
+pp_reset; pp_result=failed
+rc=0; ( main preview up --prototype demo ) >/dev/null 2>&1 || rc=$?
+[[ "$rc" == 4 ]] || fail "failed prototype start must exit 4 (got $rc)"
+pp_reset; pp_port=39001
+rc=0; out="$(main preview up --prototype demo 2>&1)" || rc=$?
+[[ "$rc" == 4 ]] && grep -q 39001 <<<"$out" || fail "prototype port fallback must exit 4 (rc=$rc): $out"
+pp_reset; pp_probe_rc=1
+rc=0; ( main preview up --prototype demo ) >/dev/null 2>&1 || rc=$?
+[[ "$rc" == 4 ]] || fail "unanswered prototype URL must exit 4 (got $rc)"
+pp_probe_rc=0
+pass "preview up --prototype fails on a failed start, a port fallback, or a dead URL"
+
+pp_reset
+out="$(main preview down --prototype demo)" || fail "prototype preview down failed"
+jq -e '.prototype=="demo" and .status=="stopped"' <<<"$out" >/dev/null || fail "prototype down output wrong: $out"
+jq -e '.serviceIndex==1' "$pp/stop" >/dev/null || fail "prototype stop not scoped to the preview: $(cat "$pp/stop")"
+pp_reset; pp_svcs='[]'
+main preview down --prototype demo >/dev/null || fail "down of an unregistered prototype must succeed"
+[[ ! -e "$pp/stop" ]] || fail "down of an unregistered prototype POSTed a stop"
+pass "preview down --prototype stops only the preview; no-op when unregistered"
+
+pp_reset; touch "$pp/start"
+out="$(main preview status --prototype demo)" || fail "prototype status failed"
+jq -e '.prototype=="demo" and .status=="running" and .port==21003 and .url=="http://box:21003"' <<<"$out" >/dev/null \
+    || fail "prototype status wrong: $out"
+pp_reset
+out="$(main preview status --prototype demo)" || fail "prototype status (stopped) failed"
+jq -e '.status=="stopped" and .url=="http://box:21003"' <<<"$out" >/dev/null || fail "stopped prototype status wrong: $out"
+pp_reset; pp_svcs='[]'
+out="$(main preview status --prototype demo)" || fail "prototype status (unregistered) failed"
+jq -e '.status=="unregistered"' <<<"$out" >/dev/null || fail "unregistered prototype status wrong: $out"
+pass "preview status --prototype reports running / stopped / unregistered"
+rm -rf "$pp"
+
 echo "opc-paperclip: ok"

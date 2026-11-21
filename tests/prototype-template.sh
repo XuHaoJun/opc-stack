@@ -195,7 +195,7 @@ $PCN sh -c "cd /prototypes/$NAME && node scripts/migrate.mjs" 2>&1 | grep -q "up
   && ok "migrate is re-runnable" || bad "migrate re-run was not a no-op"
 
 step "serve"
-$PC prototype expose "$NAME" --command "node scripts/dev.mjs" --start 2>&1 | sed 's/^/  /'
+$PC prototype expose "$NAME" --start 2>&1 | sed 's/^/  /'
 for _ in $(seq 1 60); do curl -sf -o /dev/null --max-time 3 "$URL/" && break; sleep 3; done
 
 # WITH an Origin header — that is the case Next 16 rejects, and the case a

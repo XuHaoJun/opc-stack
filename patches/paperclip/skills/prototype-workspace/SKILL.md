@@ -71,20 +71,37 @@ not create `<name>-v2` — the user's bookmark and database belong to this one.
 
 ## Serving the preview
 
+How the prototype is served lives **in the prototype itself**, in an
+executable `.paperclip/preview` at its root. Paperclip runs it (through the
+fixed `opc-preview-run`) in the prototype directory with `PORT` and
+`HOST=0.0.0.0` set, and owns the process. The `nextjs` template already ships
+one; for anything else, write it:
+
 ```sh
-prototype expose <name> --command "<your dev server command>" --start
+#!/bin/sh
+set -eu
+exec pnpm dev --port "$PORT" --host "$HOST"      # or: exec python3 -m http.server "$PORT" --bind "$HOST"
 ```
 
-Your command must bind the port from `$PORT` (Paperclip injects it) or
-`$DEV_PORT` from `.env`, and bind `0.0.0.0`. Examples:
+- Stay in the **foreground** (`exec`, no `nohup`, no `&`) — Paperclip has to be
+  able to stop it and to bring it back after a restart.
+- Bind `$HOST:$PORT` exactly; never pick another port.
+- `chmod +x` it and commit it with the rest of the prototype.
+
+Then:
 
 ```sh
-prototype expose recipe-bot --command "pnpm dev --port \$PORT --host 0.0.0.0" --start
-prototype expose recipe-bot --command "python3 -m http.server \$PORT --bind 0.0.0.0" --start
+prototype expose <name> --start      # first time
+prototype expose <name> --restart    # after changing how it is served
+prototype expose <name> --stop
 ```
 
-Re-running `expose` with a different command updates the service; it does not
-add a second one.
+`expose` registers the service and waits until it is running; when it exits
+non-zero, read its message — it names what is wrong (no script, the service
+failed, a port fallback). **Never start a server yourself instead** (`nohup`,
+`setsid`, `&`): Paperclip does not know such a process exists, it is gone after
+the next restart, and the URL you reported goes dead. If `expose` cannot work,
+report that as the blocker.
 
 **Post `DEV_URL` back to the ticket as a comment — that URL is the
 deliverable.** It is what gets relayed to the user; a ticket that closes
@@ -108,7 +125,8 @@ Check your framework for an equivalent before declaring the prototype done,
 and open the preview URL once yourself. A `curl` of the page is not enough —
 it sends no `Origin` header, so it passes while a browser fails.
 
-The service idle-stops after 7 days. That stops a process; it deletes nothing.
+The preview keeps running — across restarts — until someone stops it. The
+owner opens and closes it from Buzz; stopping deletes nothing, and
 `prototype expose <name> --start` brings the same URL back.
 
 ## Project-only skills

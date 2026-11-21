@@ -6,7 +6,7 @@ you should not have to think about any of it.
 ```
 pnpm install
 node scripts/migrate.mjs
-prototype expose <name> --command "node scripts/dev.mjs" --start
+prototype expose <name> --start   # serves via .paperclip/preview
 ```
 
 Then open `DEV_URL` from `.env` and check `/` — it reports whether Postgres and
