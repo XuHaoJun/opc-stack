@@ -1,10 +1,10 @@
 #!/bin/sh
 # prototype — the workflow object: a named, long-lived experiment.
 #
-#   prototype create    <name> [--template T] [--command CMD] [--idle 7d|never] [--ports N]
+#   prototype create    <name> [--template T] [--ports N]
 #   prototype templates | prototype layers
 #   prototype layer add <name> <layer>
-#   prototype expose    <name> --command CMD [--idle 7d|never] [--start|--stop]
+#   prototype expose    <name> [--start|--stop|--restart]
 #   prototype skill add <name> --from <git-url> [--path DIR] [--ref REF] [--only a,b]
 #   prototype publish   <name> [--public] [--repo NAME] [--yes]
 #   prototype list
@@ -27,6 +27,7 @@
 #     + project workspace    cwd=/prototypes/recipe-bot <- its own git
 #     + devenv key           recipe-bot                 <- DB + port, stable
 #     + runtime service      on the PROJECT workspace   <- URL never changes
+#       "preview" = opc-preview-run -> the repo's own .paperclip/preview
 #     + issues over time     each one a change request
 #
 # The service is attached to the PROJECT workspace, not to an execution
@@ -35,15 +36,17 @@
 #
 # LIFECYCLE RULE: nothing here ever deletes on its own. `destroy` is the only
 # destructive command, it is never called by anything automatic, and it has no
-# --yes flag on purpose.
+# --yes flag on purpose. Nothing stops a preview on its own either: it runs until
+# someone stops it (`expose --stop`, or the owner through the front door's
+# `opc-paperclip preview down --prototype`). Paperclip's idle_timeout is not
+# used — it counts from the last AGENT RUN, not from the last visit, and its
+# timer lives in memory, so it stopped previews people were using and never
+# stopped the ones restored after a reboot.
 set -eu
 
 PROTOTYPE_ROOT="${PROTOTYPE_ROOT:-/prototypes}"
 PROTOTYPE_TEMPLATES="${PROTOTYPE_TEMPLATES:-/usr/local/lib/prototype/templates}"
 PROTOTYPE_LAYERS="${PROTOTYPE_LAYERS:-$PROTOTYPE_TEMPLATES/_layers}"
-# 7 days. Prototypes idle-stop to free the process; the engineering lane never
-# does. Stopping is not deleting: lease, database and files all stay.
-PROTOTYPE_DEFAULT_IDLE="${PROTOTYPE_DEFAULT_IDLE:-7d}"
 BOARD_KEY_FILE="${BOARD_KEY_FILE:-/paperclip/.opc/board-api.key}"
 
 die()  { echo "prototype: $1" >&2; exit "${2:-1}"; }
@@ -73,13 +76,34 @@ api_key() {
 }
 
 api() { # api <METHOD> <PATH> [json-body-on-stdin]
-    _m="$1"; _p="$2"
+    _a_key="$(api_key)" || exit $?
+    api_as "$_a_key" "$@"
+}
+
+api_as() { # api_as <KEY> <METHOD> <PATH> [json-body-on-stdin]
+    _k="$1"; _m="$2"; _p="$3"
     if [ "$_m" = GET ] || [ "$_m" = DELETE ]; then
-        curl -fsS -X "$_m" -H "Authorization: Bearer $(api_key)" "$(api_base)/api$_p"
+        curl -fsS -X "$_m" -H "Authorization: Bearer $_k" "$(api_base)/api$_p"
     else
-        curl -fsS -X "$_m" -H "Authorization: Bearer $(api_key)" \
+        curl -fsS -X "$_m" -H "Authorization: Bearer $_k" \
              -H "Content-Type: application/json" --data-binary @- "$(api_base)/api$_p"
     fi
+}
+
+# Runtime-service writes go through the board key, never the run's agent key:
+# Paperclip refuses any agent-key PATCH that carries a host-executed command
+# (projects.ts, assertNoAgentHostWorkspaceCommandMutation), and an agent-key
+# start/stop additionally needs a live issue tied to this exact workspace. What
+# this writes is fixed — the opc-preview-run service — never agent input, so
+# the rule's intent (an agent cannot choose what the host runs) holds: the repo
+# decides through .paperclip/preview, which is code under review.
+#
+# Until agents run under their own uid they can read this file anyway; when that
+# hardening lands, this function is the one call site to turn into the narrow
+# privileged entry point.
+board_api() { # board_api <METHOD> <PATH> [json-body-on-stdin]
+    [ -s "$BOARD_KEY_FILE" ] || die "no board key at $BOARD_KEY_FILE (paperclip bootstrap writes it)" 4
+    api_as "$(cat "$BOARD_KEY_FILE")" "$@"
 }
 
 company_id() {
@@ -260,18 +284,6 @@ check_name() {
         || die "invalid name '$1' — must match ^[a-z][a-z0-9-]{1,40}\$" 2
 }
 
-# 7d / 30m / 3600 / never  ->  seconds, or empty for never
-idle_seconds() {
-    case "$1" in
-        never|none|off) echo "" ;;
-        *d) echo $(( ${1%d} * 86400 )) ;;
-        *h) echo $(( ${1%h} * 3600 )) ;;
-        *m) echo $(( ${1%m} * 60 )) ;;
-        *[!0-9]*) die "bad --idle '$1' (use 7d / 12h / 30m / seconds / never)" 2 ;;
-        *) echo "$1" ;;
-    esac
-}
-
 # Run a command as the runtime user when we are root.
 #
 # Anything that writes into the prototype tree OR into the runtime user's home
@@ -325,18 +337,18 @@ env_get() { # read a key out of the prototype's .env
 # ── commands ─────────────────────────────────────────────────────────────
 
 cmd_create() {
-    name=""; command_=""; idle="$PROTOTYPE_DEFAULT_IDLE"; ports=1; template=""
+    name=""; ports=1; template=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --template) template="${2:?--template needs a value}"; shift 2 ;;
-            --command) command_="${2:?--command needs a value}"; shift 2 ;;
-            --idle)    idle="${2:?--idle needs a value}"; shift 2 ;;
             --ports)   ports="${2:?--ports needs a value}"; shift 2 ;;
+            --command) die "--command was removed: write the serve command into .paperclip/preview, then 'prototype expose <name> --start'" 2 ;;
+            --idle)    die "--idle was removed: previews run until stopped (prototype expose <name> --stop)" 2 ;;
             -*) die "unknown flag: $1" 2 ;;
             *)  [ -z "$name" ] || die "unexpected argument: $1" 2; name="$1"; shift ;;
         esac
     done
-    [ -n "$name" ] || die "usage: prototype create <name> [--command CMD] [--idle 7d|never]" 2
+    [ -n "$name" ] || die "usage: prototype create <name> [--template T] [--ports N]" 2
     check_name "$name"
 
     dir="$PROTOTYPE_ROOT/$name"
@@ -411,78 +423,119 @@ cmd_create() {
         fi
     fi
 
-    if [ -n "$command_" ]; then
-        cmd_expose "$name" --command "$command_" --idle "$idle" --start
+    note "prototype: '$name' ready — $dir (preview port $port, not yet exposed)"
+    if [ -x "$dir/.paperclip/preview" ]; then
+        note "prototype:   next: prototype expose $name --start"
     else
-        note "prototype: '$name' ready — $dir (preview port $port, not yet exposed)"
-        note "prototype:   next: prototype expose $name --command '<dev server cmd>' --start"
+        note "prototype:   next: write $dir/.paperclip/preview (executable), then: prototype expose $name --start"
     fi
 }
 
+# The service entry `expose` owns. Same shape as the ticket preview's
+# (opc-paperclip preview_service_json): Paperclip runs the fixed opc-preview-run,
+# which execs the repo's .paperclip/preview with PORT/HOST. port is an EXPLICIT
+# number, never {"type":"auto"}: auto allocates from the kernel's ephemeral
+# range, which docker has not published. readiness probes 127.0.0.1 (inside the
+# container) while expose advertises the host address — two viewpoints, two
+# fields. No stopPolicy: a shared service defaults to manual.
+preview_service_json() { # port url
+    jq -nc --argjson p "$1" --arg url "$2" '
+        {name:"preview", command:"opc-preview-run", cwd:".", port:$p, lifecycle:"shared",
+         readiness:{type:"http", urlTemplate:"http://127.0.0.1:{{port}}"},
+         expose:{type:"url", urlTemplate:$url}}'
+}
+
+# services[] with the preview entry replaced IN PLACE (appended only when
+# absent): serviceStates is keyed by index, so moving entries would hand one
+# service's desired state to another.
+preview_services_upsert() { # services-json service-json
+    jq -nc --argjson s "$1" --argjson svc "$2" '
+        ($s | map(.name) | index("preview")) as $i
+        | if $i == null then $s + [$svc] else $s | .[$i] = $svc end'
+}
+
+workspace_json() { # project-id workspace-id
+    board_api GET "/projects/$1" | jq -c --arg id "$2" '(.workspaces // [])[] | select(.id == $id)'
+}
+
 cmd_expose() {
-    name=""; command_=""; idle="$PROTOTYPE_DEFAULT_IDLE"; action=""; svc=web
+    name=""; action=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --command) command_="${2:?--command needs a value}"; shift 2 ;;
-            --idle)    idle="${2:?--idle needs a value}"; shift 2 ;;
-            --service) svc="${2:?--service needs a value}"; shift 2 ;;
             --start)   action=start; shift ;;
             --stop)    action=stop; shift ;;
+            --restart) action=restart; shift ;;
+            --command) die "--command was removed: the serve command lives in the prototype's .paperclip/preview (Paperclip refuses agent-written commands)" 2 ;;
+            --idle)    die "--idle was removed: previews run until stopped (prototype expose <name> --stop)" 2 ;;
+            --service) die "--service was removed: the service is always named preview" 2 ;;
             -*) die "unknown flag: $1" 2 ;;
             *)  [ -z "$name" ] || die "unexpected argument: $1" 2; name="$1"; shift ;;
         esac
     done
-    [ -n "$name" ] || die "usage: prototype expose <name> --command CMD [--idle 7d|never] [--start]" 2
+    [ -n "$name" ] || die "usage: prototype expose <name> [--start|--stop|--restart]" 2
     check_name "$name"
 
     project="$(find_project "$name")"
     [ -n "$project" ] || die "no prototype named '$name' — run 'prototype create $name' first" 2
     ws="$(primary_workspace_id "$project")"
     [ -n "$ws" ] || die "prototype '$name' has no primary workspace" 1
+    wsjson="$(workspace_json "$project" "$ws")" || die "failed to read prototype workspace" 4
+    services="$(printf '%s' "$wsjson" | jq -c '.runtimeConfig.workspaceRuntime.services // []')"
 
     if [ "$action" = stop ]; then
-        printf '{}' | api POST "/projects/$project/workspaces/$ws/runtime-services/stop" >/dev/null
-        note "prototype: '$name' service stopped (nothing was deleted)"
+        idx="$(printf '%s' "$services" | jq -r 'map(.name) | index("preview") // empty')"
+        if [ -z "$idx" ]; then
+            note "prototype: '$name' has no preview service — nothing to stop"
+            return 0
+        fi
+        jq -nc --argjson i "$idx" '{serviceIndex:$i}' \
+            | board_api POST "/projects/$project/workspaces/$ws/runtime-services/stop" >/dev/null \
+            || die "failed to stop the preview of '$name'" 4
+        note "prototype: '$name' preview stopped (nothing was deleted; it stays stopped across reboots)"
         return 0
     fi
 
-    [ -n "$command_" ] || die "--command is required (it is what gets run to serve the preview)" 2
+    dir="$PROTOTYPE_ROOT/$name"
+    [ -x "$dir/.paperclip/preview" ] ||
+        die "no executable $dir/.paperclip/preview — it is how this prototype is served (build/dev command, bound to \$HOST:\$PORT, in the foreground); write it, chmod +x, commit, then re-run" 2
     port="$(env_get "$name" DEV_PORT)" || die "'$name' has no DEV_PORT — run 'prototype create $name'" 2
-    secs="$(idle_seconds "$idle")"
+    url="$(env_get "$name" DEV_URL)"
+    [ -n "$url" ] || die "'$name' has no DEV_URL — run 'prototype create $name'" 2
 
-    # port is an EXPLICIT number, never {"type":"auto"}: auto allocates from the
-    # kernel's ephemeral range, which docker has not published, so the URL would
-    # render fine and connect to nothing.
-    #
-    # readiness probes 127.0.0.1 (inside the container) while expose advertises
-    # the host address — two separate fields for two separate viewpoints.
-    svc_json="$(jq -nc --arg n "$svc" --arg c "$command_" --argjson p "$port" \
-        --arg url "$(env_get "$name" DEV_URL)" --arg secs "$secs" '
-        {name:$n, command:$c, cwd:".", port:$p, lifecycle:"shared",
-         readiness:{type:"http", urlTemplate:"http://127.0.0.1:{{port}}"},
-         expose:{type:"url", urlTemplate:$url}}
-        + (if $secs == "" then {} else
-             {stopPolicy:{type:"idle_timeout", idleSeconds:($secs|tonumber)}} end)')"
-
-    # Upsert by name so re-running with a changed command updates the entry
-    # instead of appending a second service on the same port.
-    existing="$(api GET "/projects/$project" \
-        | jq -c --arg id "$ws" '((.workspaces // [])[] | select(.id == $id)
-            | .runtimeConfig.workspaceRuntime.services) // []')"
-    merged="$(printf '%s' "$existing" | jq -c --argjson s "$svc_json" \
-        '(map(select(.name != $s.name)) + [$s])')"
-
-    jq -nc --argjson svcs "$merged" \
-        '{runtimeConfig:{workspaceRuntime:{services:$svcs}, desiredState:"running"}}' \
-        | api PATCH "/projects/$project/workspaces/$ws" >/dev/null
-
-    devenv mark-exposed "$name" >/dev/null 2>&1 || true
-    note "prototype: '$name' service '$svc' registered on port $port (idle=${idle})"
-
-    if [ "$action" = start ]; then
-        printf '{}' | api POST "/projects/$project/workspaces/$ws/runtime-services/start" >/dev/null
-        note "prototype: started → $(env_get "$name" DEV_URL)"
+    merged="$(preview_services_upsert "$services" "$(preview_service_json "$port" "$url")")"
+    if [ "$merged" != "$services" ]; then
+        jq -nc --argjson svcs "$merged" '{runtimeConfig:{workspaceRuntime:{services:$svcs}}}' \
+            | board_api PATCH "/projects/$project/workspaces/$ws" >/dev/null \
+            || die "failed to register the preview service for '$name'" 4
+        note "prototype: '$name' preview registered on port $port"
     fi
+    devenv mark-exposed "$name" >/dev/null 2>&1 || true
+    [ -n "$action" ] || return 0
+
+    idx="$(printf '%s' "$merged" | jq -r 'map(.name) | index("preview")')"
+    # serviceIndex selects only the preview; an empty body would act on every
+    # service of the workspace. start/stop/restart with it also record the
+    # desired state, which is what reboot recovery reads.
+    jq -nc --argjson i "$idx" '{serviceIndex:$i}' \
+        | board_api POST "/projects/$project/workspaces/$ws/runtime-services/$action" >/dev/null \
+        || die "failed to $action the preview of '$name'" 4
+
+    deadline=$(( $(date +%s) + ${PROTOTYPE_START_TIMEOUT:-180} ))
+    while :; do
+        cur="$(workspace_json "$project" "$ws" | jq -c '[(.runtimeServices // [])[] | select(.serviceName == "preview")]
+            | sort_by(.updatedAt // "") | last // empty')" || cur=""
+        st="$(printf '%s' "$cur" | jq -r '.status // empty' 2>/dev/null)"
+        case "$st" in running|failed|stopped) break ;; esac
+        [ "$(date +%s)" -lt "$deadline" ] ||
+            die "preview of '$name' did not become running within ${PROTOTYPE_START_TIMEOUT:-180}s (status: ${st:-none})" 4
+        sleep "${PROTOTYPE_POLL_SECONDS:-2}"
+    done
+    [ "$st" = running ] ||
+        die "preview of '$name' ended up $st — check .paperclip/preview (it must stay in the foreground, bound to \$HOST:\$PORT) and the workspace runtime log on the board" 4
+    got="$(printf '%s' "$cur" | jq -r '.port // empty')"
+    [ "$got" = "$port" ] ||
+        die "preview of '$name' started on port ${got:-none}, not its leased $port — that URL would be dead" 4
+    note "prototype: preview running → $url"
 }
 
 # Vendor a skill INTO the prototype's own tree, which is what "project-only

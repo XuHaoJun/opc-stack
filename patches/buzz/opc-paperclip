@@ -616,12 +616,130 @@ preview_status() {
     printf '%s\n' "$_out"
 }
 
+# ── prototype preview (service "preview" on a prototype's project workspace) ──
+# The Prototyper registers it (`prototype expose`, paperclip image): only that
+# side knows the prototype's leased port and directory. The front door only
+# starts and stops what is registered, so the owner's "open X" / "close X"
+# costs no agent run. Nothing stops a prototype preview on its own; it runs
+# until someone says so, across reboots.
+prototype_preview_target() { # NAME → "<project-id> <workspace-id>"
+    _pt_matches="$(prototype_project_matches "$1")" || exit $?
+    _pt_matches="$(printf '%s' "$_pt_matches" | jq -c '[.[] | select(.archivedAt == null)]')"
+    case "$(printf '%s' "$_pt_matches" | jq -r 'length')" in
+        0) die "no prototype named $1" 3 ;;
+        1) ;;
+        *) die "multiple Paperclip projects named $1" 3 ;;
+    esac
+    _pt_pid="$(printf '%s' "$_pt_matches" | jq -r '.[0].id')"
+    _pt_proj="$(api_request GET "/projects/$_pt_pid")" || die "failed to read project $_pt_pid" 4
+    _pt_ws="$(prototype_primary_workspace_id "$_pt_proj")"
+    [ -n "$_pt_ws" ] || die "prototype $1 has no primary workspace" 3
+    printf '%s %s\n' "$_pt_pid" "$_pt_ws"
+}
+
+prototype_workspace_json() { # project-id workspace-id
+    _pw="$(api_request GET "/projects/$1")" || die "failed to read project $1" 4
+    printf '%s' "$_pw" | jq -c --arg id "$2" '(.workspaces // [])[] | select(.id == $id)'
+}
+
+prototype_preview_index() { # workspace-json → index or empty
+    printf '%s' "$1" | jq -r '(.runtimeConfig.workspaceRuntime.services // []) | map(.name) | index("preview") // empty'
+}
+
+prototype_name_arg() { # parses "--prototype NAME" → stdout
+    [ "${1-}" = --prototype ] && [ "$#" -ge 2 ] || return 1
+    printf '%s' "$2"
+}
+
+prototype_preview_up() {
+    _name="$(prototype_name_arg "$@")" || die "usage: opc-paperclip preview up --prototype NAME" 2
+    _t="$(prototype_preview_target "$_name")" || exit $?
+    _pid="${_t% *}"; _wsid="${_t#* }"
+    _ws="$(prototype_workspace_json "$_pid" "$_wsid")" || exit $?
+    _idx="$(prototype_preview_index "$_ws")"
+    [ -n "$_idx" ] ||
+        die "prototype $_name has no preview registered — the Prototyper registers it ('prototype expose $_name'); ask for it in a prototype ticket" 3
+    _port="$(printf '%s' "$_ws" | jq -r --argjson i "$_idx" '.runtimeConfig.workspaceRuntime.services[$i].port // empty')"
+    if ! _start_out="$(api_request_body POST "/projects/$_pid/workspaces/$_wsid/runtime-services/start" \
+        "$(jq -nc --argjson i "$_idx" '{serviceIndex:$i}')")"; then
+        _err="$(preview_error_text "$_start_out")"
+        die "failed to start the preview of $_name: ${_err:-$(printf '%s' "$_start_out" | head -c 600)}" 4
+    fi
+    _deadline=$(( $(date +%s) + ${OPC_PREVIEW_START_TIMEOUT:-120} ))
+    while :; do
+        _ws="$(prototype_workspace_json "$_pid" "$_wsid")" || exit $?
+        _cur="$(printf '%s' "$_ws" | preview_service_of)"
+        _st="$(printf '%s' "$_cur" | jq -r '.status // empty')"
+        case "$_st" in running|failed|stopped) break ;; esac
+        [ "$(date +%s)" -lt "$_deadline" ] ||
+            die "preview of $_name did not start within ${OPC_PREVIEW_START_TIMEOUT:-120}s (status: ${_st:-none})" 4
+        sleep "${OPC_PREVIEW_POLL_SECONDS:-2}"
+    done
+    [ "$_st" = running ] ||
+        die "preview of $_name ended up $_st right after start (see the workspace runtime log on the board)" 4
+    _got="$(printf '%s' "$_cur" | jq -r '.port // empty')"
+    [ -z "$_port" ] || [ "$_got" = "$_port" ] ||
+        die "preview of $_name started on port ${_got:-none}, not its registered $_port — not publishing that URL" 4
+    _url="$(printf '%s' "$_cur" | jq -r '.url // empty')"
+    [ -n "$_url" ] || _url="$(printf '%s' "$_ws" | jq -r --argjson i "$_idx" \
+        '.runtimeConfig.workspaceRuntime.services[$i].expose.urlTemplate // empty')"
+    [ -n "$_url" ] || die "preview of $_name is running but Paperclip reports no URL" 4
+    _probe="$(preview_probe_target "$_url")"
+    preview_probe_url "${_probe% *}" ||
+        die "preview $_url did not answer a 2xx over HTTP (checked ${_probe% *})" 4
+    jq -nc --arg n "$_name" --arg url "$_url" --arg port "$_got" --arg probe "${_probe##* }" \
+        '{prototype:$n,url:$url,port:($port|tonumber),status:"running",probe:$probe}'
+}
+
+prototype_preview_down() {
+    _name="$(prototype_name_arg "$@")" || die "usage: opc-paperclip preview down --prototype NAME" 2
+    _t="$(prototype_preview_target "$_name")" || exit $?
+    _pid="${_t% *}"; _wsid="${_t#* }"
+    _ws="$(prototype_workspace_json "$_pid" "$_wsid")" || exit $?
+    _idx="$(prototype_preview_index "$_ws")"
+    if [ -n "$_idx" ]; then
+        # serviceIndex: only the preview, and Paperclip records it as desired
+        # stopped, so a reboot does not bring it back.
+        _stop_out="$(api_request_body POST "/projects/$_pid/workspaces/$_wsid/runtime-services/stop" \
+            "$(jq -nc --argjson i "$_idx" '{serviceIndex:$i}')")" ||
+            die "failed to stop the preview of $_name: $(preview_error_text "$_stop_out")" 4
+    fi
+    jq -nc --arg n "$_name" '{prototype:$n,status:"stopped"}'
+}
+
+prototype_preview_status() {
+    _name="$(prototype_name_arg "$@")" || die "usage: opc-paperclip preview status --prototype NAME" 2
+    _t="$(prototype_preview_target "$_name")" || exit $?
+    _ws="$(prototype_workspace_json "${_t% *}" "${_t#* }")" || exit $?
+    _idx="$(prototype_preview_index "$_ws")"
+    if [ -z "$_idx" ]; then
+        jq -nc --arg n "$_name" '{prototype:$n,status:"unregistered"}'
+        return 0
+    fi
+    _cur="$(printf '%s' "$_ws" | preview_service_of)"
+    printf '%s' "$_ws" | jq -c --arg n "$_name" --argjson i "$_idx" --argjson cur "${_cur:-null}" '
+        .runtimeConfig.workspaceRuntime.services[$i] as $svc
+        | {prototype:$n, port:($cur.port // $svc.port), url:($cur.url // $svc.expose.urlTemplate),
+           status:($cur.status // "stopped")}'
+}
+
 cmd_preview() {
-    case "${1-}" in
-        up) shift; preview_up "$@" ;;
-        down) shift; preview_down "$@" ;;
-        status) shift; preview_status "$@" ;;
-        *) die "usage: opc-paperclip preview <up|down|status> [--issue OPC-N]" 2 ;;
+    _verb="${1-}"
+    [ "$#" -eq 0 ] || shift
+    if [ "${1-}" = --prototype ]; then
+        case "$_verb" in
+            up) prototype_preview_up "$@" ;;
+            down) prototype_preview_down "$@" ;;
+            status) prototype_preview_status "$@" ;;
+            *) die "usage: opc-paperclip preview <up|down|status> [--issue OPC-N | --prototype NAME]" 2 ;;
+        esac
+        return
+    fi
+    case "$_verb" in
+        up) preview_up "$@" ;;
+        down) preview_down "$@" ;;
+        status) preview_status "$@" ;;
+        *) die "usage: opc-paperclip preview <up|down|status> [--issue OPC-N | --prototype NAME]" 2 ;;
     esac
 }
 

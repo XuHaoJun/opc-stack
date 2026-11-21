@@ -326,7 +326,7 @@ List issues (for progress checks): `GET /api/companies/<companyId>/issues`.
 ### QA preview for an existing repo or PR
 
 Route to `engineering`, not `prototype`, even if the request says “prototype
-this PR.” Leave named, retained prototypes on `prototype expose`.
+this PR.” Named, retained prototypes are the next section.
 
 A code ticket owns its preview: a Paperclip runtime service named `preview` on
 the ticket's own execution workspace. This replaces the older flow — a
@@ -381,6 +381,26 @@ Flow:
    If `continue` refuses because the work is already accepted or merged, the
    change is in main: tell the owner so, and that previewing main is a new
    ticket, not a reopen. Do not retry.
+
+### Opening and closing a prototype's preview
+
+A prototype's preview is the runtime service `preview` on its project
+workspace. The Prototyper registers it while building (`prototype expose`);
+after that it runs — across restarts — until someone stops it. Nothing stops it
+automatically. You only start and stop what is registered:
+
+- 開 <name> / 打開 <name> 的 prototype → `opc-paperclip preview up --prototype
+  <name>`. Prints JSON with `url`, `port`, `status`; post the URL. Exit 3: no
+  such prototype, or it has no preview registered yet — that takes a prototype
+  ticket to the Prototyper; do not wake an agent just to start it. Exit 4: it
+  failed to start or its URL did not answer; report the error text, do not
+  retry blindly.
+- 關掉 <name> → `opc-paperclip preview down --prototype <name>`. Stops the
+  process only: files, database, port and URL stay, and it stays stopped
+  across restarts until opened again.
+- Check → `opc-paperclip preview status --prototype <name>`.
+
+Deleting a prototype is `prototype destroy`, which only the owner runs.
 
 ### Continue or create after Buzz feedback
 

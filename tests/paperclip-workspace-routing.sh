@@ -945,13 +945,13 @@ live_gate() {
 
   prototype="wsroute-proto-$(date +%s)-$$"
   LIVE_PROTO_NAMES="$prototype"
-  if docker compose exec -T paperclip prototype create "$prototype" --idle never >/dev/null; then
+  if docker compose exec -T paperclip prototype create "$prototype" >/dev/null; then
     ok "prototype create test prototype"
   else
     bad "prototype create test prototype"
     return 1
   fi
-  if docker compose exec -T paperclip prototype create "$prototype" --idle never >/dev/null; then
+  if docker compose exec -T paperclip prototype create "$prototype" >/dev/null; then
     ok "prototype resume test prototype"
   else
     bad "prototype resume test prototype"
@@ -1064,7 +1064,7 @@ AGENT_SCRIPT
   docker compose exec -T paperclip sh -c "touch '$LIVE_RELEASE'"
   prototype_two="wsroute-proto-alt-$(date +%s)-$$"
   LIVE_PROTO_NAMES="$LIVE_PROTO_NAMES $prototype_two"
-  if docker compose exec -T paperclip prototype create "$prototype_two" --idle never >/dev/null; then
+  if docker compose exec -T paperclip prototype create "$prototype_two" >/dev/null; then
     ok "prototype create second test prototype"
   else
     bad "prototype create second test prototype"

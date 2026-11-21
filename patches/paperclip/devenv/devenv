@@ -369,7 +369,7 @@ cmd_list() {
                   || CASE WHEN http_unexposed THEN ' !' ELSE '' END  AS ports,
                 date_trunc('second', idle) AS idle
          FROM devenv_usage"
-    note "  ports '!' = leased but not exposed (run: devenv expose <name> --command ...)"
+    note "  ports '!' = leased but not exposed (run: prototype expose <name> --start)"
 
     # podenv leases live in the same database in their own table (devenv_tenant
     # is one-column-per-provider; carrying podenv's columns here would make

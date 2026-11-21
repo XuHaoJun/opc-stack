@@ -1,0 +1,12 @@
+#!/bin/sh
+# How this prototype is served. Paperclip runs it (through opc-preview-run) in
+# the prototype directory with PORT and HOST=0.0.0.0, and owns the process: keep
+# it in the foreground — no nohup, no `&` — or Paperclip cannot stop it or bring
+# it back after a restart.
+#
+# A dev server, not a build: a prototype is iterated on, and hot reload is the
+# point. scripts/dev.mjs reads .env (DEV_PORT == PORT here), drops NODE_ENV and
+# binds 0.0.0.0. Change this file, not the board, to change how it runs.
+set -eu
+[ -d node_modules ] || pnpm install
+exec node scripts/dev.mjs
